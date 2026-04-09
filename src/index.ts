@@ -2,6 +2,7 @@ import express from "express";
 import cors from "cors";
 import getDb from "./config/database";
 import priceRoutes from "./routes/priceRoutes";
+import masterDataRoutes from "./routes/masterDataRoutes";
 
 const app = express();
 const port = process.env.PORT || 3001;
@@ -11,6 +12,7 @@ app.use(cors({ origin: "http://localhost:5173" }));
 
 app.use(express.json());
 app.use("/api", priceRoutes);
+app.use("/api", masterDataRoutes);
 
 app.get("/db-test", async (req, res) => {
   try {

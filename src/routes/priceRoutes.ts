@@ -1,1 +1,41 @@
-import express from "express";import getDb from "../config/database";const router = express.Router();router.get("/price-records", async (req, res) => {try {const db = await getDb();const priceRecords = await db.all("SELECT * FROM price_records");res.json({ status: "success", data: priceRecords });} catch (error) {res.status(500).json({ status: "error", message: "Failed to fetch price records", error: error.message });}});router.post("/price-records", async (req, res) => {try {const db = await getDb();const { date, category, object_name, variant, price, source, note } = req.body;const now = new Date().toISOString();const result = await db.run("INSERT INTO price_records (date, category, object_name, variant, price, source, note, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", [date, category, object_name, variant, price, source, note, now, now]);res.json({ status: "success", message: "Price record inserted", id: result.lastID });} catch (error) {res.status(500).json({ status: "error", message: "Failed to insert price record", error: error.message });}});router.put("/price-records/:id", async (req, res) => {try {const db = await getDb();const { id } = req.params;const { date, category, object_name, variant, price, source, note } = req.body;const now = new Date().toISOString();const result = await db.run("UPDATE price_records SET date = ?, category = ?, object_name = ?, variant = ?, price = ?, source = ?, note = ?, updated_at = ? WHERE id = ?", [date, category, object_name, variant, price, source, note, now, id]);res.json({ status: "success", message: "Price record updated", changes: result.changes });} catch (error) {res.status(500).json({ status: "error", message: "Failed to update price record", error: error.message });}});router.get("/categories", async (req, res) => {try {const db = await getDb();const categories = await db.all("SELECT * FROM categories");res.json({ status: "success", data: categories });} catch (error) {res.status(500).json({ status: "error", message: "Failed to fetch categories", error: error.message });}});router.get("/objects", async (req, res) => {try {const db = await getDb();const objects = await db.all("SELECT objects.id, objects.category_id, objects.name, categories.name AS category_name, objects.created_at, objects.updated_at FROM objects JOIN categories ON objects.category_id = categories.id");res.json({ status: "success", data: objects });} catch (error) {res.status(500).json({ status: "error", message: "Failed to fetch objects", error: error.message });}});router.get("/variants", async (req, res) => {try {const db = await getDb();const variants = await db.all("SELECT variants.id, variants.object_id, variants.name, objects.name AS object_name, objects.category_id, categories.name AS category_name, variants.created_at, variants.updated_at FROM variants JOIN objects ON variants.object_id = objects.id JOIN categories ON objects.category_id = categories.id");res.json({ status: "success", data: variants });} catch (error) {res.status(500).json({ status: "error", message: "Failed to fetch variants", error: error.message });}});export default router;
+import express from "express";
+import getDb from "../config/database";
+
+const router = express.Router();
+
+router.get("/price-records", async (req, res) => {
+  try {
+    const db = await getDb();
+    const priceRecords = await db.all("SELECT * FROM price_records");
+    res.json({ status: "success", data: priceRecords });
+  } catch (error) {
+    res.status(500).json({ status: "error", message: "Failed to fetch price records", error: error.message });
+  }
+});
+
+router.post("/price-records", async (req, res) => {
+  try {
+    const db = await getDb();
+    const { date, category, object_name, variant, price, source, note } = req.body;
+    const now = new Date().toISOString();
+    const result = await db.run("INSERT INTO price_records (date, category, object_name, variant, price, source, note, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", [date, category, object_name, variant, price, source, note, now, now]);
+    res.json({ status: "success", message: "Price record inserted", id: result.lastID });
+  } catch (error) {
+    res.status(500).json({ status: "error", message: "Failed to insert price record", error: error.message });
+  }
+});
+
+router.put("/price-records/:id", async (req, res) => {
+  try {
+    const db = await getDb();
+    const { id } = req.params;
+    const { date, category, object_name, variant, price, source, note } = req.body;
+    const now = new Date().toISOString();
+    const result = await db.run("UPDATE price_records SET date = ?, category = ?, object_name = ?, variant = ?, price = ?, source = ?, note = ?, updated_at = ? WHERE id = ?", [date, category, object_name, variant, price, source, note, now, id]);
+    res.json({ status: "success", message: "Price record updated", changes: result.changes });
+  } catch (error) {
+    res.status(500).json({ status: "error", message: "Failed to update price record", error: error.message });
+  }
+});
+
+export default router;
