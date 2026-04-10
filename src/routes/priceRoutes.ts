@@ -69,12 +69,51 @@ router.put("/price-records/:id", async (req, res) => {
   try {
     const db = await getDb();
     const { id } = req.params;
-    const { date, category, object_name, variant, price, source, note } = req.body;
+    const { date, category_name, object_name, variant_name, price, source, note } = req.body;
+    
+    // 校验字段
+    if (!category_name || !object_name || !price || !date) {
+      return res.status(400).json({ status: "error", message: "缺少必填字段: category_name, object_name, price, date" });
+    }
+    
+    // 校验价格是否为数字
+    if (typeof price !== 'number') {
+      return res.status(400).json({ status: "error", message: "价格必须是数字" });
+    }
+    
+    // 校验日期格式
+    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+    if (!dateRegex.test(date)) {
+      return res.status(400).json({ status: "error", message: "日期格式不正确，应为 YYYY-MM-DD" });
+    }
+    
+    // 标准化 variant_name
+    const variant = variant_name || '';
+    
+    // 校验主数据是否存在
+    const category = await db.get("SELECT * FROM categories WHERE name = ?", [category_name]);
+    if (!category) {
+      return res.status(400).json({ status: "error", message: "品类不存在" });
+    }
+    
+    const object = await db.get("SELECT * FROM objects WHERE category_id = ? AND name = ?", [category.id, object_name]);
+    if (!object) {
+      return res.status(400).json({ status: "error", message: "对象不存在" });
+    }
+    
+    // 如果 variant_name 不为空，校验变体是否存在
+    if (variant_name) {
+      const variant = await db.get("SELECT * FROM variants WHERE object_id = ? AND name = ?", [object.id, variant_name]);
+      if (!variant) {
+        return res.status(400).json({ status: "error", message: "变体不存在" });
+      }
+    }
+    
     const now = new Date().toISOString();
-    const result = await db.run("UPDATE price_records SET date = ?, category = ?, object_name = ?, variant = ?, price = ?, source = ?, note = ?, updated_at = ? WHERE id = ?", [date, category, object_name, variant, price, source, note, now, id]);
-    res.json({ status: "success", message: "Price record updated", changes: result.changes });
+    const result = await db.run("UPDATE price_records SET date = ?, category = ?, object_name = ?, variant = ?, price = ?, source = ?, note = ?, updated_at = ? WHERE id = ?", [date, category_name, object_name, variant, price, source, note, now, id]);
+    res.json({ status: "success", message: "价格记录编辑成功", changes: result.changes });
   } catch (error) {
-    res.status(500).json({ status: "error", message: "Failed to update price record", error: error.message });
+    res.status(500).json({ status: "error", message: "编辑价格记录失败", error: error.message });
   }
 });
 
