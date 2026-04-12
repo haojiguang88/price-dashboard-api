@@ -10,7 +10,8 @@ router.get("/follows", async (req, res) => {
     const follows = await db.all("SELECT * FROM follows ORDER BY created_at DESC");
     res.json({ status: "success", data: follows });
   } catch (error) {
-    res.status(500).json({ status: "error", message: "获取关注列表失败", error: error.message });
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    res.status(500).json({ status: "error", message: "获取关注列表失败", error: errorMessage });
   }
 });
 
@@ -66,14 +67,16 @@ router.post("/follows", async (req, res) => {
       );
       res.json({ status: "success", message: "已关注", id: result.lastID });
     } catch (error) {
-      if (error.message.includes("UNIQUE constraint failed")) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      if (errorMessage.includes("UNIQUE constraint failed")) {
         // 重复关注，返回已关注状态
         return res.json({ status: "success", message: "已关注", already_followed: true });
       }
       throw error;
     }
   } catch (error) {
-    res.status(500).json({ status: "error", message: "关注失败", error: error.message });
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    res.status(500).json({ status: "error", message: "关注失败", error: errorMessage });
   }
 });
 
@@ -100,7 +103,8 @@ router.delete("/follows", async (req, res) => {
     
     res.json({ status: "success", message: "已取消关注" });
   } catch (error) {
-    res.status(500).json({ status: "error", message: "取消关注失败", error: error.message });
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    res.status(500).json({ status: "error", message: "取消关注失败", error: errorMessage });
   }
 });
 
@@ -133,8 +137,8 @@ router.get("/follow-cards", async (req, res) => {
         
         if (priceRecords.length > 0) {
           // 计算价格信息
-          const highestPrice = Math.max(...priceRecords.map(r => r.price));
-          const lowestPrice = Math.min(...priceRecords.map(r => r.price));
+          const highestPrice = Math.max(...priceRecords.map((r: any) => r.price));
+          const lowestPrice = Math.min(...priceRecords.map((r: any) => r.price));
           const currentPrice = priceRecords[0].price;
           const currentDate = priceRecords[0].date;
           
@@ -209,7 +213,8 @@ router.get("/follow-cards", async (req, res) => {
     
     res.json({ status: "success", data: result });
   } catch (error) {
-    res.status(500).json({ status: "error", message: "获取关注卡片失败", error: error.message });
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    res.status(500).json({ status: "error", message: "获取关注卡片失败", error: errorMessage });
   }
 });
 

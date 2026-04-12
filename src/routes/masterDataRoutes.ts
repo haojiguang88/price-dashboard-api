@@ -25,10 +25,11 @@ router.post("/categories", async (req, res) => {
       const result = await db.run("INSERT INTO categories (name, created_at, updated_at) VALUES (?, ?, ?)", [name.trim(), now, now]);
       res.json({ success: true, data: { id: result.lastID, message: "新增品类成功" } });
     } catch (error) {
-      if (error.message.includes("UNIQUE constraint failed")) {
-        return res.status(409).json({ success: false, message: "该品类名称已存在" });
-      }
-      throw error;
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    if (errorMessage.includes("UNIQUE constraint failed")) {
+      return res.status(409).json({ success: false, message: "该品类名称已存在" });
+    }
+    throw error;
     }
   } catch (error) {
     res.status(500).json({ success: false, message: "新增品类失败" });
@@ -51,10 +52,11 @@ router.put("/categories/:id", async (req, res) => {
       }
       res.json({ success: true, data: { message: "编辑品类成功" } });
     } catch (error) {
-      if (error.message.includes("UNIQUE constraint failed")) {
-        return res.status(409).json({ success: false, message: "该品类名称已存在" });
-      }
-      throw error;
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    if (errorMessage.includes("UNIQUE constraint failed")) {
+      return res.status(409).json({ success: false, message: "该品类名称已存在" });
+    }
+    throw error;
     }
   } catch (error) {
     res.status(500).json({ success: false, message: "编辑品类失败" });
@@ -108,7 +110,8 @@ router.post("/objects", async (req, res) => {
       const result = await db.run("INSERT INTO objects (category_id, name, created_at, updated_at) VALUES (?, ?, ?, ?)", [category_id, name.trim(), now, now]);
       res.json({ success: true, data: { id: result.lastID, message: "新增对象成功" } });
     } catch (error) {
-      if (error.message.includes("UNIQUE constraint failed")) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      if (errorMessage.includes("UNIQUE constraint failed")) {
         return res.status(409).json({ success: false, message: "该品类下已存在同名对象" });
       }
       throw error;
@@ -134,7 +137,8 @@ router.put("/objects/:id", async (req, res) => {
       }
       res.json({ success: true, data: { message: "编辑对象成功" } });
     } catch (error) {
-      if (error.message.includes("UNIQUE constraint failed")) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      if (errorMessage.includes("UNIQUE constraint failed")) {
         return res.status(409).json({ success: false, message: "该品类下已存在同名对象" });
       }
       throw error;
@@ -191,8 +195,9 @@ router.post("/variants", async (req, res) => {
       const result = await db.run("INSERT INTO variants (object_id, name, created_at, updated_at) VALUES (?, ?, ?, ?)", [object_id, name.trim(), now, now]);
       res.json({ success: true, data: { id: result.lastID, message: "新增变体成功" } });
     } catch (error) {
-      if (error.message.includes("UNIQUE constraint failed")) {
-        return res.status(409).json({ success: false, message: "该对象下已存在相同名称的变体" });
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      if (errorMessage.includes("UNIQUE constraint failed")) {
+        return res.status(409).json({ success: false, message: "该对象下已存在同名变体" });
       }
       throw error;
     }
@@ -217,8 +222,9 @@ router.put("/variants/:id", async (req, res) => {
       }
       res.json({ success: true, data: { message: "编辑变体成功" } });
     } catch (error) {
-      if (error.message.includes("UNIQUE constraint failed")) {
-        return res.status(409).json({ success: false, message: "该对象下已存在相同名称的变体" });
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      if (errorMessage.includes("UNIQUE constraint failed")) {
+        return res.status(409).json({ success: false, message: "该对象下已存在同名变体" });
       }
       throw error;
     }

@@ -4,7 +4,7 @@ import getDb from "../config/database";
 const router = express.Router();
 
 // 辅助函数：计算并更新持仓汇总
-const updatePositionSummary = async (db, positionId) => {
+const updatePositionSummary = async (db: any, positionId: number) => {
   // 获取该持仓的所有批次
   const batches = await db.all("SELECT batch_quantity, batch_cost FROM position_batches WHERE position_id = ?", [positionId]);
   
@@ -12,7 +12,7 @@ const updatePositionSummary = async (db, positionId) => {
   let totalQuantity = 0;
   let totalCost = 0;
   
-  batches.forEach(batch => {
+  batches.forEach((batch: any) => {
     totalQuantity += batch.batch_quantity;
     totalCost += batch.batch_cost;
   });
@@ -61,7 +61,8 @@ router.get("/positions", async (req, res) => {
     const positions = await db.all("SELECT * FROM positions ORDER BY created_at DESC");
     res.json({ status: "success", data: positions });
   } catch (error) {
-    res.status(500).json({ status: "error", message: "获取持仓列表失败", error: error.message });
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    res.status(500).json({ status: "error", message: "获取持仓列表失败", error: errorMessage });
   }
 });
 
@@ -77,7 +78,8 @@ router.get("/position-batches", async (req, res) => {
     `);
     res.json({ status: "success", data: batches });
   } catch (error) {
-    res.status(500).json({ status: "error", message: "获取批次列表失败", error: error.message });
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    res.status(500).json({ status: "error", message: "获取批次列表失败", error: errorMessage });
   }
 });
 
@@ -155,7 +157,8 @@ router.post("/position-batches", async (req, res) => {
     
     res.json({ status: "success", message: "新增持仓批次成功", id: batchResult.lastID });
   } catch (error) {
-    res.status(500).json({ status: "error", message: "新增持仓批次失败", error: error.message });
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    res.status(500).json({ status: "error", message: "新增持仓批次失败", error: errorMessage });
   }
 });
 
@@ -202,7 +205,8 @@ router.put("/position-batches/:id", async (req, res) => {
     
     res.json({ status: "success", message: "编辑持仓批次成功", changes: 1 });
   } catch (error) {
-    res.status(500).json({ status: "error", message: "编辑持仓批次失败", error: error.message });
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    res.status(500).json({ status: "error", message: "编辑持仓批次失败", error: errorMessage });
   }
 });
 
@@ -236,7 +240,8 @@ router.post("/position-batches/:id/copy", async (req, res) => {
     
     res.json({ status: "success", message: "复制持仓批次成功", id: batchResult.lastID });
   } catch (error) {
-    res.status(500).json({ status: "error", message: "复制持仓批次失败", error: error.message });
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    res.status(500).json({ status: "error", message: "复制持仓批次失败", error: errorMessage });
   }
 });
 

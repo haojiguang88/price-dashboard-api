@@ -32,7 +32,8 @@ router.get("/price-records", async (req, res) => {
     const priceRecords = await db.all(query, params);
     res.json({ status: "success", data: priceRecords });
   } catch (error) {
-    res.status(500).json({ status: "error", message: "Failed to fetch price records", error: error.message });
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    res.status(500).json({ status: "error", message: "Failed to fetch price records", error: errorMessage });
   }
 });
 

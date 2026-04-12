@@ -26,7 +26,8 @@ app.get("/db-test", async (req, res) => {
     const result = await db.get("SELECT 1 + 1 as result");
     res.json({ status: "success", message: "Database connection established", result: result });
   } catch (error) {
-    res.status(500).json({ status: "error", message: "Database connection failed", error: error.message });
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    res.status(500).json({ status: "error", message: "Database connection failed", error: errorMessage });
   }
 });
 

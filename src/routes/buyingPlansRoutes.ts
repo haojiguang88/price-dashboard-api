@@ -10,7 +10,8 @@ router.get("/buying-plans", async (req, res) => {
     const plans = await db.all("SELECT * FROM buying_plans ORDER BY created_at DESC");
     res.json({ status: "success", data: plans });
   } catch (error) {
-    res.status(500).json({ status: "error", message: "获取买入计划列表失败", error: error.message });
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    res.status(500).json({ status: "error", message: "获取买入计划列表失败", error: errorMessage });
   }
 });
 
@@ -68,7 +69,8 @@ router.post("/buying-plans", async (req, res) => {
     );
     res.json({ status: "success", message: "新增买入计划成功", id: result.lastID });
   } catch (error) {
-    res.status(500).json({ status: "error", message: "新增买入计划失败", error: error.message });
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    res.status(500).json({ status: "error", message: "新增买入计划失败", error: errorMessage });
   }
 });
 
@@ -133,7 +135,8 @@ router.put("/buying-plans/:id", async (req, res) => {
     );
     res.json({ status: "success", message: "编辑买入计划成功", changes: result.changes });
   } catch (error) {
-    res.status(500).json({ status: "error", message: "编辑买入计划失败", error: error.message });
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    res.status(500).json({ status: "error", message: "编辑买入计划失败", error: errorMessage });
   }
 });
 
@@ -153,7 +156,8 @@ router.delete("/buying-plans/:id", async (req, res) => {
     const result = await db.run("DELETE FROM buying_plans WHERE id = ?", [id]);
     res.json({ status: "success", message: "删除买入计划成功", changes: result.changes });
   } catch (error) {
-    res.status(500).json({ status: "error", message: "删除买入计划失败", error: error.message });
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    res.status(500).json({ status: "error", message: "删除买入计划失败", error: errorMessage });
   }
 });
 
