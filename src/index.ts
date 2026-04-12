@@ -3,10 +3,9 @@ import cors from "cors";
 import getDb from "./config/database";
 import priceRoutes from "./routes/priceRoutes";
 import masterDataRoutes from "./routes/masterDataRoutes";
-import buyingPlansRoutes from "./routes/buyingPlansRoutes";
-import sellingPlansRoutes from "./routes/sellingPlansRoutes";
 import positionRoutes from "./routes/positionRoutes";
 import followRoutes from "./routes/followRoutes";
+import planRoutes from "./routes/planRoutes";
 
 const app = express();
 const port = process.env.PORT || 3001;
@@ -17,10 +16,9 @@ app.use(cors({ origin: "http://localhost:5173" }));
 app.use(express.json());
 app.use("/api", priceRoutes);
 app.use("/api", masterDataRoutes);
-app.use("/api", buyingPlansRoutes);
-app.use("/api", sellingPlansRoutes);
 app.use("/api", positionRoutes);
 app.use("/api", followRoutes);
+app.use("/api", planRoutes);
 
 app.get("/db-test", async (req, res) => {
   try {
