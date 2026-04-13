@@ -1,3 +1,6 @@
+import dotenv from "dotenv";
+dotenv.config();
+
 import express from "express";
 import cors from "cors";
 import getDb from "./config/database";
@@ -6,6 +9,8 @@ import masterDataRoutes from "./routes/masterDataRoutes";
 import positionRoutes from "./routes/positionRoutes";
 import followRoutes from "./routes/followRoutes";
 import planRoutes from "./routes/planRoutes";
+import watchlistRoutes from "./routes/watchlistRoutes";
+import todoCenterRoutes from "./routes/todoCenterRoutes";
 
 const app = express();
 const port = process.env.PORT || 3001;
@@ -19,6 +24,8 @@ app.use("/api", masterDataRoutes);
 app.use("/api", positionRoutes);
 app.use("/api", followRoutes);
 app.use("/api", planRoutes);
+app.use("/api", watchlistRoutes);
+app.use("/api", todoCenterRoutes);
 
 app.get("/db-test", async (req, res) => {
   try {
@@ -39,6 +46,20 @@ app.get("/health", (req, res) => {
   res.json({ status: "healthy" });
 });
 
-app.listen(port, () => {
-  console.log(`Server running on port ${port}`);
+// 初始化数据库连接
+const initDatabase = async () => {
+  try {
+    await getDb();
+    console.log("Database initialized successfully");
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    console.error("Failed to initialize database:", errorMessage);
+  }
+};
+
+// 启动服务器
+initDatabase().then(() => {
+  app.listen(port, () => {
+    console.log(`Server running on port ${port}`);
+  });
 });
