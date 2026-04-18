@@ -54,8 +54,8 @@ router.post('/buying-plans', async (req, res) => {
     // 插入记录
     const now = new Date().toISOString();
     const result = await db.run(
-      'INSERT INTO buying_plans (plan_name, category_name, object_name, variant_name, target_price, plan_quantity, total_amount, note, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [plan_name, category_name, object_name, variant, target_price, plan_quantity, total_amount, note, 'pending', now, now]
+      'INSERT INTO buying_plans (plan_name, category_name, object_name, variant_name, target_price, plan_quantity, total_amount, note, track, type, market_type_preset, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [plan_name, category_name, object_name, variant, target_price, plan_quantity, total_amount, note, req.body.track || null, req.body.type || 'manual', req.body.market_type_preset || 'standard', 'pending', now, now]
     );
     res.json({ success: true, data: { id: result.lastID } });
   } catch (error) {
@@ -120,8 +120,8 @@ router.put('/buying-plans/:id', async (req, res) => {
     // 更新记录
     const now = new Date().toISOString();
     const result = await db.run(
-      'UPDATE buying_plans SET plan_name = ?, category_name = ?, object_name = ?, variant_name = ?, target_price = ?, plan_quantity = ?, total_amount = ?, note = ?, updated_at = ? WHERE id = ?',
-      [plan_name, category_name, object_name, variant, target_price, plan_quantity, total_amount, note, now, id]
+      'UPDATE buying_plans SET plan_name = ?, category_name = ?, object_name = ?, variant_name = ?, target_price = ?, plan_quantity = ?, total_amount = ?, note = ?, track = ?, type = ?, market_type_preset = ?, updated_at = ? WHERE id = ?',
+      [plan_name, category_name, object_name, variant, target_price, plan_quantity, total_amount, note, req.body.track || null, req.body.type || 'manual', req.body.market_type_preset || 'standard', now, id]
     );
     res.json({ success: true, data: { changes: result.changes } });
   } catch (error) {
@@ -182,7 +182,7 @@ router.get('/buying-plans/:id', async (req, res) => {
     const { id } = req.params;
     
     // 获取计划详情
-    const plan = await db.get('SELECT id, plan_name, category_name, object_name, variant_name, target_price, plan_quantity, total_amount, status, note, created_at, updated_at FROM buying_plans WHERE id = ?', [id]);
+    const plan = await db.get('SELECT id, plan_name, category_name, object_name, variant_name, target_price, plan_quantity, total_amount, status, note, track, type, market_type_preset, created_at, updated_at FROM buying_plans WHERE id = ?', [id]);
     
     if (!plan) {
       return res.status(404).json({ success: false, message: '买入计划不存在' });
@@ -200,7 +200,10 @@ router.get('/buying-plans/:id', async (req, res) => {
         plan_quantity: plan.plan_quantity,
         total_amount: plan.total_amount,
         status: plan.status,
-        note: plan.note
+        note: plan.note,
+        track: plan.track,
+        type: plan.type,
+        market_type_preset: plan.market_type_preset
       }
     });
   } catch (error) {
@@ -274,8 +277,8 @@ router.post('/buying-plans/:id/copy', async (req, res) => {
     // 插入新记录
     const now = new Date().toISOString();
     const result = await db.run(
-      'INSERT INTO buying_plans (plan_name, category_name, object_name, variant_name, target_price, plan_quantity, total_amount, note, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [newPlanName, originalPlan.category_name, originalPlan.object_name, originalPlan.variant_name, newTargetPrice, newPlanQuantity, total_amount, newNote, 'pending', now, now]
+      'INSERT INTO buying_plans (plan_name, category_name, object_name, variant_name, target_price, plan_quantity, total_amount, note, track, type, market_type_preset, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [newPlanName, originalPlan.category_name, originalPlan.object_name, originalPlan.variant_name, newTargetPrice, newPlanQuantity, total_amount, newNote, originalPlan.track || null, originalPlan.type || 'manual', originalPlan.market_type_preset || 'standard', 'pending', now, now]
     );
     
     res.json({ success: true, data: { id: result.lastID } });
@@ -336,8 +339,8 @@ router.post('/selling-plans', async (req, res) => {
     // 插入记录
     const now = new Date().toISOString();
     const result = await db.run(
-      'INSERT INTO selling_plans (plan_name, category_name, object_name, variant_name, target_price, plan_quantity, total_amount, note, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [plan_name, category_name, object_name, variant, target_price, plan_quantity, total_amount, note, 'pending', now, now]
+      'INSERT INTO selling_plans (plan_name, category_name, object_name, variant_name, target_price, plan_quantity, total_amount, note, track, type, market_type_preset, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [plan_name, category_name, object_name, variant, target_price, plan_quantity, total_amount, note, req.body.track || null, req.body.type || 'manual', req.body.market_type_preset || 'standard', 'pending', now, now]
     );
     res.json({ success: true, data: { id: result.lastID } });
   } catch (error) {
@@ -402,8 +405,8 @@ router.put('/selling-plans/:id', async (req, res) => {
     // 更新记录
     const now = new Date().toISOString();
     const result = await db.run(
-      'UPDATE selling_plans SET plan_name = ?, category_name = ?, object_name = ?, variant_name = ?, target_price = ?, plan_quantity = ?, total_amount = ?, note = ?, updated_at = ? WHERE id = ?',
-      [plan_name, category_name, object_name, variant, target_price, plan_quantity, total_amount, note, now, id]
+      'UPDATE selling_plans SET plan_name = ?, category_name = ?, object_name = ?, variant_name = ?, target_price = ?, plan_quantity = ?, total_amount = ?, note = ?, track = ?, type = ?, market_type_preset = ?, updated_at = ? WHERE id = ?',
+      [plan_name, category_name, object_name, variant, target_price, plan_quantity, total_amount, note, req.body.track || null, req.body.type || 'manual', req.body.market_type_preset || 'standard', now, id]
     );
     res.json({ success: true, data: { changes: result.changes } });
   } catch (error) {
@@ -464,7 +467,7 @@ router.get('/selling-plans/:id', async (req, res) => {
     const { id } = req.params;
     
     // 获取计划详情
-    const plan = await db.get('SELECT id, plan_name, category_name, object_name, variant_name, target_price, plan_quantity, total_amount, status, note, created_at, updated_at FROM selling_plans WHERE id = ?', [id]);
+    const plan = await db.get('SELECT id, plan_name, category_name, object_name, variant_name, target_price, plan_quantity, total_amount, status, note, track, type, market_type_preset, created_at, updated_at FROM selling_plans WHERE id = ?', [id]);
     
     if (!plan) {
       return res.status(404).json({ success: false, message: '卖出计划不存在' });
@@ -482,7 +485,10 @@ router.get('/selling-plans/:id', async (req, res) => {
         plan_quantity: plan.plan_quantity,
         total_amount: plan.total_amount,
         status: plan.status,
-        note: plan.note
+        note: plan.note,
+        track: plan.track,
+        type: plan.type,
+        market_type_preset: plan.market_type_preset
       }
     });
   } catch (error) {
@@ -556,8 +562,8 @@ router.post('/selling-plans/:id/copy', async (req, res) => {
     // 插入新记录
     const now = new Date().toISOString();
     const result = await db.run(
-      'INSERT INTO selling_plans (plan_name, category_name, object_name, variant_name, target_price, plan_quantity, total_amount, note, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [newPlanName, originalPlan.category_name, originalPlan.object_name, originalPlan.variant_name, newTargetPrice, newPlanQuantity, total_amount, newNote, 'pending', now, now]
+      'INSERT INTO selling_plans (plan_name, category_name, object_name, variant_name, target_price, plan_quantity, total_amount, note, track, type, market_type_preset, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [newPlanName, originalPlan.category_name, originalPlan.object_name, originalPlan.variant_name, newTargetPrice, newPlanQuantity, total_amount, newNote, originalPlan.track || null, originalPlan.type || 'manual', originalPlan.market_type_preset || 'standard', 'pending', now, now]
     );
     
     res.json({ success: true, data: { id: result.lastID } });

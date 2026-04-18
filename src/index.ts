@@ -4,6 +4,8 @@ dotenv.config();
 import express from "express";
 import cors from "cors";
 import getDb from "./config/database";
+import { runMigrations } from "./migrations";
+import path from "path";
 import priceRoutes from "./routes/priceRoutes";
 import masterDataRoutes from "./routes/masterDataRoutes";
 import positionRoutes from "./routes/positionRoutes";
@@ -11,6 +13,17 @@ import followRoutes from "./routes/followRoutes";
 import planRoutes from "./routes/planRoutes";
 import watchlistRoutes from "./routes/watchlistRoutes";
 import todoCenterRoutes from "./routes/todoCenterRoutes";
+import eventRecordsRoutes from "./routes/eventRecordsRoutes";
+import opinionRecordsRoutes from "./routes/opinionRecordsRoutes";
+import missedProjectsRoutes from "./routes/missedProjectsRoutes";
+import tradeReviewsRoutes from "./routes/tradeReviewsRoutes";
+import treeHangingCasesRoutes from "./routes/treeHangingCasesRoutes";
+import marketReviewsRoutes from "./routes/marketReviewsRoutes";
+import ruleExperiencesRoutes from "./routes/ruleExperiencesRoutes";
+import originalPriceRecordsRoutes from "./routes/originalPriceRecordsRoutes";
+import annualPlansRoutes from "./routes/annualPlansRoutes";
+import annualPlanItemsRoutes from "./routes/annualPlanItemsRoutes";
+import annualPlanItemChangesRoutes from "./routes/annualPlanItemChangesRoutes";
 
 const app = express();
 const port = process.env.PORT || 3001;
@@ -26,6 +39,17 @@ app.use("/api", followRoutes);
 app.use("/api", planRoutes);
 app.use("/api", watchlistRoutes);
 app.use("/api", todoCenterRoutes);
+app.use("/api", eventRecordsRoutes);
+app.use("/api", opinionRecordsRoutes);
+app.use("/api", missedProjectsRoutes);
+app.use("/api", tradeReviewsRoutes);
+app.use("/api", treeHangingCasesRoutes);
+app.use("/api", marketReviewsRoutes);
+app.use("/api", ruleExperiencesRoutes);
+app.use("/api", originalPriceRecordsRoutes);
+app.use("/api", annualPlansRoutes);
+app.use("/api", annualPlanItemsRoutes);
+app.use("/api", annualPlanItemChangesRoutes);
 
 app.get("/db-test", async (req, res) => {
   try {
@@ -51,6 +75,11 @@ const initDatabase = async () => {
   try {
     await getDb();
     console.log("Database initialized successfully");
+    
+    // 执行迁移
+    const dbPath = process.env.DB_PATH || path.join(process.cwd(), "db", "price_dashboard_dev.db");
+    await runMigrations(dbPath);
+    console.log("Migrations executed successfully");
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     console.error("Failed to initialize database:", errorMessage);
