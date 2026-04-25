@@ -212,33 +212,33 @@ async function importBatches() {
           positions.forEach((position) => {
             if (position.batches && position.batches.length > 0) {
               position.batches.forEach((batch) => {
-                // 检查批次是否已存在
+                // 查找对应的 position_id
                 db.get(
-                  'SELECT id FROM position_batches WHERE source_id = ?',
-                  [batch.id],
-                  (getErr, row) => {
-                    if (getErr) {
+                  'SELECT id FROM positions WHERE source_id = ?',
+                  [position.id],
+                  (posErr, posRow) => {
+                    if (posErr) {
                       db.close();
-                      reject(getErr);
+                      reject(posErr);
                       return;
                     }
 
-                    if (row) {
-                      // 已存在，跳过
-                      stats.batches.skipped++;
-                    } else {
-                      // 查找对应的 position_id
+                    if (posRow) {
+                      // 检查批次是否已存在
                       db.get(
-                        'SELECT id FROM positions WHERE source_id = ?',
-                        [position.id],
-                        (posErr, posRow) => {
-                          if (posErr) {
+                        'SELECT id FROM position_batches WHERE source_id = ?',
+                        [batch.id],
+                        (getErr, row) => {
+                          if (getErr) {
                             db.close();
-                            reject(posErr);
+                            reject(getErr);
                             return;
                           }
 
-                          if (posRow) {
+                          if (row) {
+                            // 已存在，跳过
+                            stats.batches.skipped++;
+                          } else {
                             // 插入批次
                             db.run(
                               `INSERT INTO position_batches (
@@ -268,14 +268,22 @@ async function importBatches() {
                               }
                             );
                           }
+
+                          processedBatches++;
+                          if (processedBatches === totalBatches) {
+                            db.close();
+                            resolve();
+                          }
                         }
                       );
-                    }
-
-                    processedBatches++;
-                    if (processedBatches === totalBatches) {
-                      db.close();
-                      resolve();
+                    } else {
+                      // 仓位不存在，跳过批次
+                      stats.batches.skipped++;
+                      processedBatches++;
+                      if (processedBatches === totalBatches) {
+                        db.close();
+                        resolve();
+                      }
                     }
                   }
                 );
