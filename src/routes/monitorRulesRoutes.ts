@@ -148,6 +148,10 @@ router.post('/', async (req, res) => {
       res.status(400).json({ status: "error", message: "scope_type 为 category 时，scope_id 必填" });
       return;
     }
+    if (scope_type === 'object' && !scope_id) {
+      res.status(400).json({ status: "error", message: "scope_type 为 object 时，scope_id 必填" });
+      return;
+    }
     
     const now = new Date().toISOString();
     
@@ -189,12 +193,10 @@ router.put('/:id', async (req, res) => {
     const {
       rule_name,
       rule_type,
-      scope_type,
       scope_id,
       params_json,
       action_text,
-      description,
-      status
+      description
     } = req.body;
     
     // 检查规则是否存在
@@ -205,7 +207,7 @@ router.put('/:id', async (req, res) => {
     }
     
     // 验证必填字段
-    if (!rule_name || !rule_type || !scope_type || !params_json) {
+    if (!rule_name || !rule_type || !params_json) {
       res.status(400).json({ status: "error", message: "缺少必填字段" });
       return;
     }
@@ -216,18 +218,6 @@ router.put('/:id', async (req, res) => {
       return;
     }
     
-    // 验证范围类型
-    if (!validateScopeType(scope_type)) {
-      res.status(400).json({ status: "error", message: "无效的范围类型" });
-      return;
-    }
-    
-    // 验证状态
-    if (status && !validateStatus(status)) {
-      res.status(400).json({ status: "error", message: "无效的状态" });
-      return;
-    }
-    
     // 验证 JSON 字符串
     if (!validateJsonString(params_json)) {
       res.status(400).json({ status: "error", message: "无效的 params_json 格式" });
@@ -235,8 +225,12 @@ router.put('/:id', async (req, res) => {
     }
     
     // 验证 scope_id
-    if (scope_type === 'category' && !scope_id) {
+    if (existingRule.scope_type === 'category' && !scope_id) {
       res.status(400).json({ status: "error", message: "scope_type 为 category 时，scope_id 必填" });
+      return;
+    }
+    if (existingRule.scope_type === 'object' && !scope_id) {
+      res.status(400).json({ status: "error", message: "scope_type 为 object 时，scope_id 必填" });
       return;
     }
     
@@ -246,15 +240,13 @@ router.put('/:id', async (req, res) => {
       `UPDATE monitor_rules SET 
        rule_name = ?, 
        rule_type = ?, 
-       scope_type = ?, 
        scope_id = ?, 
        params_json = ?, 
        action_text = ?, 
        description = ?, 
-       status = ?, 
        updated_at = ? 
        WHERE id = ?`,
-      [rule_name, rule_type, scope_type, scope_id, params_json, action_text, description, status, now, id]
+      [rule_name, rule_type, scope_id, params_json, action_text, description, now, id]
     );
     
     const updatedRule = await db.get('SELECT * FROM monitor_rules WHERE id = ?', [id]);
