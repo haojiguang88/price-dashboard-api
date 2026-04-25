@@ -243,16 +243,15 @@ async function importBatches() {
                             db.run(
                               `INSERT INTO position_batches (
                                 position_id, batch_date, batch_price, batch_quantity, 
-                                batch_amount, remaining_quantity, source_id, note, 
+                                batch_cost, source_id, note, 
                                 created_at, updated_at
-                              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                               [
                                 posRow.id,
                                 batch.date,
                                 batch.price,
                                 batch.quantity,
-                                batch.totalAmount,
-                                batch.quantity, // remaining_quantity = batch_quantity
+                                batch.totalAmount, // totalAmount 映射到 batch_cost
                                 batch.id,
                                 batch.note || '',
                                 new Date().toISOString(),
