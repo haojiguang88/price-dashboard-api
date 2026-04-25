@@ -354,6 +354,61 @@ const migrations: Migration[] = [
         FOREIGN KEY (plan_item_id) REFERENCES annual_plan_items (id)
       );
     `
+  },
+  {
+    id: '20260423_001',
+    name: 'Add ended_position_id to sell_records',
+    sql: `
+      -- 为 sell_records 表添加 ended_position_id 字段
+      ALTER TABLE sell_records ADD COLUMN ended_position_id INTEGER;
+    `
+  },
+  {
+    id: '20260424_001',
+    name: 'Create monitor rules table',
+    sql: `
+      -- 监控规则表
+      CREATE TABLE IF NOT EXISTS monitor_rules (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        rule_code TEXT NOT NULL UNIQUE,
+        rule_name TEXT NOT NULL,
+        rule_type TEXT NOT NULL,
+        scope_type TEXT NOT NULL,
+        scope_id INTEGER NULL,
+        params_json TEXT NOT NULL,
+        action_text TEXT NULL,
+        description TEXT NULL,
+        status TEXT NOT NULL DEFAULT 'enabled',
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+    `
+  },
+  {
+    id: '20260425_001',
+    name: 'Create abnormal monitor reads table',
+    sql: `
+      -- 异动监控已读表
+      CREATE TABLE IF NOT EXISTS abnormal_monitor_reads (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        read_key TEXT NOT NULL UNIQUE,
+        target_type TEXT NOT NULL,
+        category_name TEXT,
+        object_name TEXT,
+        variant_name TEXT,
+        rule_code TEXT NOT NULL,
+        effective_date TEXT NOT NULL,
+        read_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+    `
+  },
+  {
+    id: '20260425_002',
+    name: 'Add source_id to positions table',
+    sql: `
+      -- 为 positions 表添加 source_id 字段
+      ALTER TABLE positions ADD COLUMN source_id TEXT;
+    `
   }
 ];
 

@@ -1,0 +1,56 @@
+[
+  {
+    "id": "1",
+    "category": "股票",
+    "object": "苹果公司",
+    "variant": "AAPL",
+    "batches": [
+      {
+        "id": "batch1",
+        "date": "2026-01-01",
+        "price": 150,
+        "quantity": 100,
+        "amount": 15000,
+        "note": "第一批"
+      },
+      {
+        "id": "batch2",
+        "date": "2026-02-01",
+        "price": 160,
+        "quantity": 50,
+        "amount": 8000,
+        "note": "第二批"
+      }
+    ],
+    "totalQuantity": 150,
+    "totalAmount": 23000,
+    "avgPrice": 153.33,
+    "currentPrice": 180,
+    "totalProfit": 4000,
+    "profitRate": 17.39,
+    "lastUpdated": "2026-04-01"
+  },
+  {
+    "id": "2",
+    "category": "加密货币",
+    "object": "比特币",
+    "variant": "BTC",
+    "batches": [
+      {
+        "id": "batch3",
+        "date": "2026-02-01",
+        "price": 50000,
+        "quantity": 1,
+        "amount": 50000,
+        "note": "第一批"
+      }
+    ],
+    "totalQuantity": 1,
+    "totalAmount": 50000,
+    "avgPrice": 50000,
+    "currentPrice": 60000,
+    "totalProfit": 10000,
+    "profitRate": 20,
+    "lastUpdated": "2026-04-01"
+  }
+]

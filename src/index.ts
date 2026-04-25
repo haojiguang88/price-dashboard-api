@@ -24,6 +24,11 @@ import originalPriceRecordsRoutes from "./routes/originalPriceRecordsRoutes";
 import annualPlansRoutes from "./routes/annualPlansRoutes";
 import annualPlanItemsRoutes from "./routes/annualPlanItemsRoutes";
 import annualPlanItemChangesRoutes from "./routes/annualPlanItemChangesRoutes";
+import endedPositionsRoutes from "./routes/endedPositionsRoutes";
+import sellRecordsRoutes from "./routes/sellRecordsRoutes";
+import dashboardRoutes from "./routes/dashboardRoutes";
+import monitorRulesRoutes from "./routes/monitorRulesRoutes";
+import abnormalMonitorRoutes from "./routes/abnormalMonitorRoutes";
 
 const app = express();
 const port = process.env.PORT || 3001;
@@ -50,6 +55,11 @@ app.use("/api", originalPriceRecordsRoutes);
 app.use("/api", annualPlansRoutes);
 app.use("/api", annualPlanItemsRoutes);
 app.use("/api", annualPlanItemChangesRoutes);
+app.use("/api", endedPositionsRoutes);
+app.use("/api", sellRecordsRoutes);
+app.use("/api/dashboard", dashboardRoutes);
+app.use("/api/monitor-rules", monitorRulesRoutes);
+app.use("/api/abnormal-monitor", abnormalMonitorRoutes);
 
 app.get("/db-test", async (req, res) => {
   try {
