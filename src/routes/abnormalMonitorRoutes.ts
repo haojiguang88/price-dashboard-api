@@ -75,22 +75,7 @@ const getPriceRecords = async (db: any, categoryId?: string) => {
   return groupedRecords;
 };
 
-// 获取启用的规则（支持按对象和品类获取）
-const getEnabledRules = async (db: any, categoryId?: string, objectId?: string) => {
-  // 获取全局规则
-  const globalRules = await db.all('SELECT * FROM monitor_rules WHERE status = ? AND scope_type = ?', ['enabled', 'global']);
-  
-  // 获取品类规则
-  const categoryRules = categoryId ? 
-    await db.all('SELECT * FROM monitor_rules WHERE status = ? AND scope_type = ? AND scope_id = ?', ['enabled', 'category', categoryId]) : 
-    [];
-  
-  // 获取对象规则
-  const objectRules = objectId ? 
-    await db.all('SELECT * FROM monitor_rules WHERE status = ? AND scope_type = ? AND scope_id = ?', ['enabled', 'object', objectId]) : 
-    [];
-  
-  // 定义规则类型
+// 定义规则类型
 interface MonitorRule {
   id: number;
   rule_code: string;
@@ -106,32 +91,49 @@ interface MonitorRule {
   updated_at: string;
 }
 
-// 合并规则，对象规则覆盖品类规则，品类规则覆盖全局规则
-  const mergedRules: MonitorRule[] = [];
-  const ruleTypes: Set<string> = new Set();
+// 获取启用的规则（支持按对象和品类获取）
+const getEnabledRules = async (db: any, categoryId?: string, objectId?: string) => {
+  // 获取全局规则
+  const globalRules = await db.all('SELECT * FROM monitor_rules WHERE status = ? AND scope_type = ?', ['enabled', 'global']);
   
-  // 先添加对象规则
-  objectRules.forEach((rule: MonitorRule) => {
-    mergedRules.push(rule);
-    ruleTypes.add(rule.rule_type);
-  });
+  // 获取品类规则
+  const categoryRules = categoryId ? 
+    await db.all('SELECT * FROM monitor_rules WHERE status = ? AND scope_type = ? AND scope_id = ?', ['enabled', 'category', categoryId]) : 
+    [];
   
-  // 再添加品类规则（排除已被对象规则覆盖的类型）
-  categoryRules.forEach((rule: MonitorRule) => {
-    if (!ruleTypes.has(rule.rule_type)) {
-      mergedRules.push(rule);
-      ruleTypes.add(rule.rule_type);
-    }
-  });
+  // 获取对象规则
+  const objectRules = objectId ? 
+    await db.all('SELECT * FROM monitor_rules WHERE status = ? AND scope_type = ? AND scope_id = ?', ['enabled', 'object', objectId]) : 
+    [];
   
-  // 再添加全局规则（排除已被覆盖的类型）
+  // 构建规则映射，按优先级排序：对象规则 > 品类规则 > 全局规则
+  const ruleMap: Record<string, MonitorRule[]> = {};
+  
+  // 先添加全局规则
   globalRules.forEach((rule: MonitorRule) => {
-    if (!ruleTypes.has(rule.rule_type)) {
-      mergedRules.push(rule);
+    if (!ruleMap[rule.rule_type]) {
+      ruleMap[rule.rule_type] = [];
     }
+    ruleMap[rule.rule_type].push(rule);
   });
   
-  return mergedRules;
+  // 再添加品类规则（优先级高于全局）
+  categoryRules.forEach((rule: MonitorRule) => {
+    if (!ruleMap[rule.rule_type]) {
+      ruleMap[rule.rule_type] = [];
+    }
+    ruleMap[rule.rule_type].push(rule);
+  });
+  
+  // 最后添加对象规则（优先级最高）
+  objectRules.forEach((rule: MonitorRule) => {
+    if (!ruleMap[rule.rule_type]) {
+      ruleMap[rule.rule_type] = [];
+    }
+    ruleMap[rule.rule_type].push(rule);
+  });
+  
+  return ruleMap;
 };
 
 // 计算单日涨跌幅
@@ -203,103 +205,121 @@ const calculateAlertLevel = (value: number): string => {
 };
 
 // 执行规则命中
-const executeRules = (target: any, prices: number[], rules: any[]) => {
+const executeRules = (target: any, prices: number[], ruleMap: Record<string, MonitorRule[]>) => {
   const hits: any[] = [];
 
-  rules.forEach(rule => {
-    try {
-      const params = JSON.parse(rule.params_json);
-      const days = params.days || 7;
-      const threshold = params.threshold || 5;
-      const direction = params.direction;
+  // 遍历每种规则类型
+  Object.keys(ruleMap).forEach(ruleType => {
+    const rules = ruleMap[ruleType];
+    let hitFound = false;
 
-      // 只取最近 N 条记录
-      const recentPrices = prices.slice(0, days);
-      if (recentPrices.length < 2) return;
+    // 按优先级从高到低执行规则（对象规则 > 品类规则 > 全局规则）
+    for (const rule of rules) {
+      try {
+        const params = JSON.parse(rule.params_json);
+        const days = params.days || 7;
+        const threshold = params.threshold || 5;
+        const direction = params.direction;
 
-      let hit = false;
-      let hitDirection = 'neutral';
-      let actualChangeValue: number | null = null;
+        // 只取最近 N 条记录
+        const recentPrices = prices.slice(0, days);
+        if (recentPrices.length < 2) continue;
 
-      switch (rule.rule_type) {
-        case 'price_change_daily': {
-          const change = calculateDailyChange(recentPrices);
-          if (change !== null) {
-            actualChangeValue = change;
-            if (direction === 'up' && change >= threshold) {
+        let hit = false;
+        let hitDirection = 'neutral';
+        let actualChangeValue: number | null = null;
+
+        switch (rule.rule_type) {
+          case 'price_change_daily': {
+            const change = calculateDailyChange(recentPrices);
+            if (change !== null) {
+              actualChangeValue = change;
+              if (direction === 'up' && change >= threshold) {
+                hit = true;
+                hitDirection = 'bullish';
+              } else if (direction === 'down' && change <= -threshold) {
+                hit = true;
+                hitDirection = 'bearish';
+              }
+            }
+            break;
+          }
+          case 'price_change_period': {
+            const change = calculatePeriodChange(recentPrices);
+            if (change !== null) {
+              actualChangeValue = change;
+              if (direction === 'up' && change >= threshold) {
+                hit = true;
+                hitDirection = 'bullish';
+              } else if (direction === 'down' && change <= -threshold) {
+                hit = true;
+                hitDirection = 'bearish';
+              }
+            }
+            break;
+          }
+          case 'consecutive_change': {
+            const consecutive = calculateConsecutiveChange(recentPrices);
+            if (consecutive.direction && consecutive.count >= (params.days || 3)) {
+              hit = true;
+              hitDirection = consecutive.direction === 'up' ? 'bullish' : 'bearish';
+            }
+            break;
+          }
+          case 'new_high': {
+            if (isNewHigh(recentPrices)) {
               hit = true;
               hitDirection = 'bullish';
-            } else if (direction === 'down' && change <= -threshold) {
+            }
+            break;
+          }
+          case 'new_low': {
+            if (isNewLow(recentPrices)) {
               hit = true;
               hitDirection = 'bearish';
             }
+            break;
           }
-          break;
-        }
-        case 'price_change_period': {
-          const change = calculatePeriodChange(recentPrices);
-          if (change !== null) {
-            actualChangeValue = change;
-            if (direction === 'up' && change >= threshold) {
+          case 'amplitude': {
+            const amplitude = calculateAmplitude(recentPrices);
+            if (amplitude !== null && amplitude >= threshold) {
+              actualChangeValue = amplitude;
               hit = true;
-              hitDirection = 'bullish';
-            } else if (direction === 'down' && change <= -threshold) {
-              hit = true;
-              hitDirection = 'bearish';
+              hitDirection = 'neutral';
             }
+            break;
           }
-          break;
-        }
-        case 'consecutive_change': {
-          const consecutive = calculateConsecutiveChange(recentPrices);
-          if (consecutive.direction && consecutive.count >= (params.days || 3)) {
-            hit = true;
-            hitDirection = consecutive.direction === 'up' ? 'bullish' : 'bearish';
+          case 'volatility': {
+            const amplitude = calculateAmplitude(recentPrices);
+            if (amplitude !== null && amplitude >= threshold) {
+              actualChangeValue = amplitude;
+              hit = true;
+              hitDirection = 'neutral';
+            }
+            break;
           }
-          break;
         }
-        case 'new_high': {
-          if (isNewHigh(recentPrices)) {
-            hit = true;
-            hitDirection = 'bullish';
-          }
-          break;
-        }
-        case 'new_low': {
-          if (isNewLow(recentPrices)) {
-            hit = true;
-            hitDirection = 'bearish';
-          }
-          break;
-        }
-        case 'amplitude': {
-          const amplitude = calculateAmplitude(recentPrices);
-          if (amplitude !== null && amplitude >= threshold) {
-            actualChangeValue = amplitude;
-            hit = true;
-            hitDirection = 'neutral';
-          }
-          break;
-        }
-      }
 
-      if (hit) {
-        hits.push({
-          rule_id: rule.id,
-          rule_code: rule.rule_code,
-          rule_name: rule.rule_name,
-          rule_type: rule.rule_type,
-          direction: hitDirection,
-          priority: rulePriority[rule.rule_type] || 0,
-          action_text: rule.action_text,
-          description: rule.description,
-          params_json: rule.params_json,
-          actual_change_value: actualChangeValue,
-          alert_level: actualChangeValue !== null ? calculateAlertLevel(actualChangeValue) : 'normal'
-        });
+        if (hit) {
+          hits.push({
+            rule_id: rule.id,
+            rule_code: rule.rule_code,
+            rule_name: rule.rule_name,
+            rule_type: rule.rule_type,
+            direction: hitDirection,
+            priority: rulePriority[rule.rule_type] || 0,
+            action_text: rule.action_text,
+            description: rule.description,
+            params_json: rule.params_json,
+            actual_change_value: actualChangeValue,
+            alert_level: actualChangeValue !== null ? calculateAlertLevel(actualChangeValue) : 'normal'
+          });
+          hitFound = true;
+          break; // 高优先级规则命中，停止该规则类型的后续判断
+        }
+      } catch (error) {
+        console.error('Error executing rule:', error);
       }
-    } catch (error) {
-      console.error('Error executing rule:', error);
     }
   });
 
@@ -378,10 +398,10 @@ const aggregateResults = async (db: any, groupedRecords: Record<string, any[]>) 
       console.error('Error getting master data IDs:', error);
     }
 
-    // 获取启用的规则（对象规则覆盖品类规则，品类规则覆盖全局规则）
-    const rules = await getEnabledRules(db, categoryId, objectId);
+    // 获取启用的规则（按优先级：对象规则 > 品类规则 > 全局规则）
+    const ruleMap = await getEnabledRules(db, categoryId, objectId);
 
-    const hits = executeRules(target, prices, rules);
+    const hits = executeRules(target, prices, ruleMap);
     if (hits.length === 0) continue;
 
     // 按优先级排序，选择主规则
