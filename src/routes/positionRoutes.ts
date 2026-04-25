@@ -85,7 +85,7 @@ router.get("/positions/:id/batches", async (req, res) => {
     
     // 获取该仓位的所有批次，按 batch_date 升序
     const batches = await db.all(
-      `SELECT id, source_id, position_id, batch_date, batch_price, batch_quantity, batch_amount, remaining_quantity, note, created_at, updated_at 
+      `SELECT id, source_id, position_id, batch_date, batch_price, batch_quantity, batch_cost, remaining_quantity, note, created_at, updated_at 
        FROM position_batches 
        WHERE position_id = ? 
        ORDER BY batch_date ASC`,
@@ -224,7 +224,7 @@ router.post("/position-batches", async (req, res) => {
       // 插入批次记录，确保 remaining_quantity 初始等于 batch_quantity
       const now = new Date().toISOString();
       const batchResult = await db.run(
-        "INSERT INTO position_batches (position_id, batch_price, batch_quantity, batch_amount, remaining_quantity, batch_date, note, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO position_batches (position_id, batch_price, batch_quantity, batch_cost, remaining_quantity, batch_date, note, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [position.id, batch_price, batch_quantity, batch_cost, batch_quantity, batch_date, note, now, now]
       );
       
@@ -300,13 +300,13 @@ router.put("/position-batches/:id", async (req, res) => {
         }
         
         // 计算批次成本
-        const batch_amount = batch_price * batch_quantity;
+        const batch_cost = batch_price * batch_quantity;
         
         // 更新批次记录
         const now = new Date().toISOString();
         await db.run(
-          "UPDATE position_batches SET batch_price = ?, batch_quantity = ?, batch_amount = ?, remaining_quantity = ?, batch_date = ?, note = ?, updated_at = ? WHERE id = ?",
-          [batch_price, batch_quantity, batch_amount, batch_quantity, batch_date, note, now, id]
+          "UPDATE position_batches SET batch_price = ?, batch_quantity = ?, batch_cost = ?, remaining_quantity = ?, batch_date = ?, note = ?, updated_at = ? WHERE id = ?",
+          [batch_price, batch_quantity, batch_cost, batch_quantity, batch_date, note, now, id]
         );
       }
       
@@ -359,7 +359,7 @@ router.post("/position-batches/:id/copy", async (req, res) => {
       // 插入新批次记录，确保 remaining_quantity 初始等于 batch_quantity
       const now = new Date().toISOString();
       const batchResult = await db.run(
-        "INSERT INTO position_batches (position_id, batch_price, batch_quantity, batch_amount, remaining_quantity, batch_date, note, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO position_batches (position_id, batch_price, batch_quantity, batch_cost, remaining_quantity, batch_date, note, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [existingBatch.position_id, existingBatch.batch_price, existingBatch.batch_quantity, existingBatch.batch_cost, existingBatch.batch_quantity, existingBatch.batch_date, existingBatch.note, now, now]
       );
       
