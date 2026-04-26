@@ -58,7 +58,7 @@ const getPriceRecords = async (db: any, categoryId?: string) => {
     params.push(categoryId);
   }
 
-  query += ' ORDER BY category, object_name, variant, date DESC';
+  query += ' ORDER BY category, object_name, variant, date DESC, created_at DESC, id DESC';
 
   const records = await db.all(query, params);
   
@@ -181,7 +181,7 @@ const isNewHigh = (prices: number[]) => {
   if (prices.length < 2) return false;
   const currentPrice = prices[0];
   const previousPrices = prices.slice(1);
-  return currentPrice >= Math.max(...previousPrices);
+  return currentPrice > Math.max(...previousPrices);
 };
 
 // 检查是否新低
@@ -189,7 +189,7 @@ const isNewLow = (prices: number[]) => {
   if (prices.length < 2) return false;
   const currentPrice = prices[0];
   const previousPrices = prices.slice(1);
-  return currentPrice <= Math.min(...previousPrices);
+  return currentPrice < Math.min(...previousPrices);
 };
 
 // 计算提醒等级
@@ -270,6 +270,14 @@ const executeRules = (target: any, prices: number[], ruleMap: Record<string, Mon
             if (isNewHigh(recentPrices)) {
               hit = true;
               hitDirection = 'bullish';
+              // 计算实际异动幅度
+              if (recentPrices.length >= 2) {
+                const currentPrice = recentPrices[0];
+                const previousPrice = recentPrices[1];
+                if (previousPrice !== 0) {
+                  actualChangeValue = ((currentPrice - previousPrice) / previousPrice) * 100;
+                }
+              }
             }
             break;
           }
@@ -277,6 +285,14 @@ const executeRules = (target: any, prices: number[], ruleMap: Record<string, Mon
             if (isNewLow(recentPrices)) {
               hit = true;
               hitDirection = 'bearish';
+              // 计算实际异动幅度
+              if (recentPrices.length >= 2) {
+                const currentPrice = recentPrices[0];
+                const previousPrice = recentPrices[1];
+                if (previousPrice !== 0) {
+                  actualChangeValue = ((currentPrice - previousPrice) / previousPrice) * 100;
+                }
+              }
             }
             break;
           }
