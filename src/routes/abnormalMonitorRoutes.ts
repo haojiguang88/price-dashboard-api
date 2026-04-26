@@ -109,15 +109,15 @@ const getEnabledRules = async (db: any, categoryId?: string, objectId?: string) 
   // 构建规则映射，按优先级排序：对象规则 > 品类规则 > 全局规则
   const ruleMap: Record<string, MonitorRule[]> = {};
   
-  // 先添加全局规则
-  globalRules.forEach((rule: MonitorRule) => {
+  // 先添加对象规则（优先级最高）
+  objectRules.forEach((rule: MonitorRule) => {
     if (!ruleMap[rule.rule_type]) {
       ruleMap[rule.rule_type] = [];
     }
     ruleMap[rule.rule_type].push(rule);
   });
   
-  // 再添加品类规则（优先级高于全局）
+  // 再添加品类规则（优先级次之）
   categoryRules.forEach((rule: MonitorRule) => {
     if (!ruleMap[rule.rule_type]) {
       ruleMap[rule.rule_type] = [];
@@ -125,8 +125,8 @@ const getEnabledRules = async (db: any, categoryId?: string, objectId?: string) 
     ruleMap[rule.rule_type].push(rule);
   });
   
-  // 最后添加对象规则（优先级最高）
-  objectRules.forEach((rule: MonitorRule) => {
+  // 最后添加全局规则（优先级最低）
+  globalRules.forEach((rule: MonitorRule) => {
     if (!ruleMap[rule.rule_type]) {
       ruleMap[rule.rule_type] = [];
     }
@@ -401,7 +401,16 @@ const aggregateResults = async (db: any, groupedRecords: Record<string, any[]>) 
     // 获取启用的规则（按优先级：对象规则 > 品类规则 > 全局规则）
     const ruleMap = await getEnabledRules(db, categoryId, objectId);
 
+    // 调试日志
+    console.log('Target:', target);
+    console.log('Category ID:', categoryId);
+    console.log('Object ID:', objectId);
+    console.log('Rule Map:', ruleMap);
+
     const hits = executeRules(target, prices, ruleMap);
+    
+    // 调试日志
+    console.log('Hits:', hits);
     if (hits.length === 0) continue;
 
     // 按优先级排序，选择主规则
