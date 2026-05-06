@@ -150,10 +150,31 @@ const calculateDailyChange = (prices: number[]) => {
   return ((prices[0] - prices[1]) / prices[1]) * 100;
 };
 
+// 计算单日价格差额
+const calculateDailyChangeAmount = (prices: number[]) => {
+  if (prices.length < 2) return null;
+  return prices[0] - prices[1];
+};
+
 // 计算区间涨跌幅
 const calculatePeriodChange = (prices: number[]) => {
   if (prices.length < 2) return null;
   return ((prices[0] - prices[prices.length - 1]) / prices[prices.length - 1]) * 100;
+};
+
+// 计算区间价格差额
+const calculatePeriodChangeAmount = (prices: number[]) => {
+  if (prices.length < 2) return null;
+  return prices[0] - prices[prices.length - 1];
+};
+
+const getThresholdUnit = (params: any): 'percent' | 'amount' => {
+  const explicitUnit = params.threshold_unit || params.unit || params.thresholdUnit;
+  if (explicitUnit === 'amount' || explicitUnit === 'price_amount') return 'amount';
+  if (explicitUnit === 'percent' || explicitUnit === 'percentage') return 'percent';
+
+  // 兼容旧数据：百分比规则通常是 5/10；像“单日上涨超过30”更像价格差额。
+  return Number(params.threshold) >= 20 ? 'amount' : 'percent';
 };
 
 // 计算连续涨跌
@@ -250,6 +271,7 @@ const executeRules = (target: any, prices: number[], ruleMap: Record<string, Mon
         const params = JSON.parse(rule.params_json);
         const days = Math.max(2, Number(params.days || params.period || 7) || 7);
         const threshold = params.threshold || 5;
+        const thresholdUnit = getThresholdUnit(params);
         const direction = params.direction;
 
         // 只取最近 N 条记录
@@ -259,12 +281,16 @@ const executeRules = (target: any, prices: number[], ruleMap: Record<string, Mon
         let hit = false;
         let hitDirection = 'neutral';
         let actualChangeValue: number | null = null;
+        let actualChangeUnit: 'percent' | 'amount' = 'percent';
 
         switch (rule.rule_type) {
           case 'price_change_daily': {
-            const change = calculateDailyChange(recentPrices);
+            const change = thresholdUnit === 'amount'
+              ? calculateDailyChangeAmount(recentPrices)
+              : calculateDailyChange(recentPrices);
             if (change !== null) {
               actualChangeValue = change;
+              actualChangeUnit = thresholdUnit;
               if (direction === 'up' && change >= threshold) {
                 hit = true;
                 hitDirection = 'bullish';
@@ -276,9 +302,12 @@ const executeRules = (target: any, prices: number[], ruleMap: Record<string, Mon
             break;
           }
           case 'price_change_period': {
-            const change = calculatePeriodChange(recentPrices);
+            const change = thresholdUnit === 'amount'
+              ? calculatePeriodChangeAmount(recentPrices)
+              : calculatePeriodChange(recentPrices);
             if (change !== null) {
               actualChangeValue = change;
+              actualChangeUnit = thresholdUnit;
               if (direction === 'up' && change >= threshold) {
                 hit = true;
                 hitDirection = 'bullish';
@@ -377,6 +406,7 @@ const executeRules = (target: any, prices: number[], ruleMap: Record<string, Mon
             description: rule.description,
             params_json: rule.params_json,
             actual_change_value: actualChangeValue,
+            actual_change_unit: actualChangeUnit,
             alert_level: actualChangeValue !== null ? calculateAlertLevel(actualChangeValue) : 'normal'
           });
           hitFound = true;
@@ -487,6 +517,7 @@ const aggregateResults = async (db: any, groupedRecords: Record<string, any[]>) 
 
     // 计算目标级别的实际异动幅度和提醒等级（取主规则的值）
     const actualChangeValue = primaryRule.actual_change_value || 0;
+    const actualChangeUnit = primaryRule.actual_change_unit || 'percent';
     const alertLevel = primaryRule.alert_level || 'normal';
 
     const result: any = {
@@ -501,6 +532,7 @@ const aggregateResults = async (db: any, groupedRecords: Record<string, any[]>) 
     effective_date: target.effective_date,
     hit_count: hits.length,
     actual_change_value: actualChangeValue,
+    actual_change_unit: actualChangeUnit,
     alert_level: alertLevel,
     primary_rule: primaryRule,
     secondary_rules: secondaryRules,
