@@ -29,6 +29,19 @@ import sellRecordsRoutes from "./routes/sellRecordsRoutes";
 import dashboardRoutes from "./routes/dashboardRoutes";
 import monitorRulesRoutes from "./routes/monitorRulesRoutes";
 import abnormalMonitorRoutes from "./routes/abnormalMonitorRoutes";
+import volatilityAnalysisRoutes from "./routes/volatilityAnalysisRoutes";
+import elasticityAnalysisRoutes from "./routes/elasticityAnalysisRoutes";
+import riskControlRoutes from "./routes/riskControlRoutes";
+import financeRoutes from "./routes/financeRoutes";
+import assetStructureRoutes from "./routes/assetStructureRoutes";
+import metalRoutes from "./routes/metalRoutes";
+import trendPhaseRoutes from "./routes/trendPhaseRoutes";
+import candidatePoolRoutes from "./routes/candidatePoolRoutes";
+import assetUniverseRoutes from "./routes/assetUniverseRoutes";
+import taskCenterRoutes, { startTaskCenterScheduler } from "./routes/taskCenterRoutes";
+import financialTradePlanRoutes from "./routes/financialTradePlanRoutes";
+import footballLotteryRoutes from "./routes/footballLotteryRoutes";
+import modelTrainingRoutes from "./routes/modelTrainingRoutes";
 
 const app = express();
 const port = process.env.PORT || 3001;
@@ -36,7 +49,7 @@ const port = process.env.PORT || 3001;
 // 配置 CORS
 app.use(cors({ origin: "http://localhost:5173" }));
 
-app.use(express.json());
+app.use(express.json({ limit: "20mb" }));
 app.use("/api", priceRoutes);
 app.use("/api", masterDataRoutes);
 app.use("/api", positionRoutes);
@@ -60,6 +73,19 @@ app.use("/api", sellRecordsRoutes);
 app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/monitor-rules", monitorRulesRoutes);
 app.use("/api/abnormal-monitor", abnormalMonitorRoutes);
+app.use("/api/volatility-analysis", volatilityAnalysisRoutes);
+app.use("/api/elasticity-analysis", elasticityAnalysisRoutes);
+app.use("/api/risk", riskControlRoutes);
+app.use("/api/finance", financeRoutes);
+app.use("/api/finance/assets", assetStructureRoutes);
+app.use("/api/finance/metals", metalRoutes);
+app.use("/api/finance/trend-phase", trendPhaseRoutes);
+app.use("/api/finance", candidatePoolRoutes);
+app.use("/api/finance", assetUniverseRoutes);
+app.use("/api/finance", financialTradePlanRoutes);
+app.use("/api", taskCenterRoutes);
+app.use("/api/football-lottery", footballLotteryRoutes);
+app.use("/api/model-training", modelTrainingRoutes);
 
 app.get("/db-test", async (req, res) => {
   try {
@@ -100,5 +126,6 @@ const initDatabase = async () => {
 initDatabase().then(() => {
   app.listen(port, () => {
     console.log(`Server running on port ${port}`);
+    startTaskCenterScheduler();
   });
 });

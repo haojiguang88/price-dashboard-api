@@ -3,11 +3,43 @@ import getDb from "../config/database";
 
 const router = express.Router();
 
+type ParsedFollowId = { value: number; error?: never } | { value?: never; error: string };
+
+const parseFollowId = (value: unknown, fieldName: string): ParsedFollowId => {
+  const numericValue = typeof value === "string" ? Number(value.trim()) : Number(value);
+  if (!Number.isInteger(numericValue) || numericValue <= 0) {
+    return { error: `${fieldName} 必须是正整数` };
+  }
+  return { value: numericValue };
+};
+
+const parseFollowVariantId = (value: unknown): ParsedFollowId => {
+  if (value === undefined) {
+    return { error: "缺少必填字段: variant_id；无变体请传 0" };
+  }
+  if (value === null || (typeof value === "string" && value.trim() === "")) {
+    return { error: "variant_id 禁止传空字符串；无变体请传 0" };
+  }
+
+  const numericValue = typeof value === "string" ? Number(value.trim()) : Number(value);
+  if (!Number.isInteger(numericValue) || numericValue < 0) {
+    return { error: "variant_id 必须是整数；有变体传整数 id，无变体传 0" };
+  }
+  return { value: numericValue };
+};
+
 // 获取关注列表接口
 router.get("/follows", async (req, res) => {
   try {
     const db = await getDb();
-    const follows = await db.all("SELECT * FROM follows ORDER BY created_at DESC");
+    const follows = await db.all(`
+      SELECT id, category_id, object_id,
+             CASE WHEN variant_id IS NULL OR TRIM(CAST(variant_id AS TEXT)) = '' THEN 0 ELSE CAST(variant_id AS INTEGER) END as variant_id,
+             category_name, object_name, variant_name,
+             NULL as track, 'manual' as type, 'standard' as market_type_preset, created_at
+      FROM follows
+      ORDER BY created_at DESC
+    `);
     res.json({ status: "success", data: follows });
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
@@ -19,12 +51,24 @@ router.get("/follows", async (req, res) => {
 router.post("/follows", async (req, res) => {
   try {
     const db = await getDb();
-    const { category_id, object_id, variant_id } = req.body;
-    
-    // 校验字段
-    if (!category_id || !object_id || variant_id === undefined) {
-      return res.status(400).json({ status: "error", message: "缺少必填字段: category_id, object_id, variant_id" });
+    const categoryIdResult = parseFollowId(req.body.category_id, "category_id");
+    if (categoryIdResult.error) {
+      return res.status(400).json({ status: "error", message: categoryIdResult.error });
     }
+
+    const objectIdResult = parseFollowId(req.body.object_id, "object_id");
+    if (objectIdResult.error) {
+      return res.status(400).json({ status: "error", message: objectIdResult.error });
+    }
+
+    const variantIdResult = parseFollowVariantId(req.body.variant_id);
+    if (variantIdResult.error) {
+      return res.status(400).json({ status: "error", message: variantIdResult.error });
+    }
+
+    const category_id = categoryIdResult.value as number;
+    const object_id = objectIdResult.value as number;
+    const variant_id = variantIdResult.value as number;
     
     // 校验品类是否存在
     const category = await db.get("SELECT * FROM categories WHERE id = ?", [category_id]);
@@ -84,12 +128,24 @@ router.post("/follows", async (req, res) => {
 router.delete("/follows", async (req, res) => {
   try {
     const db = await getDb();
-    const { category_id, object_id, variant_id } = req.body;
-    
-    // 校验字段
-    if (!category_id || !object_id || variant_id === undefined) {
-      return res.status(400).json({ status: "error", message: "缺少必填字段: category_id, object_id, variant_id" });
+    const categoryIdResult = parseFollowId(req.body.category_id, "category_id");
+    if (categoryIdResult.error) {
+      return res.status(400).json({ status: "error", message: categoryIdResult.error });
     }
+
+    const objectIdResult = parseFollowId(req.body.object_id, "object_id");
+    if (objectIdResult.error) {
+      return res.status(400).json({ status: "error", message: objectIdResult.error });
+    }
+
+    const variantIdResult = parseFollowVariantId(req.body.variant_id);
+    if (variantIdResult.error) {
+      return res.status(400).json({ status: "error", message: variantIdResult.error });
+    }
+
+    const category_id = categoryIdResult.value as number;
+    const object_id = objectIdResult.value as number;
+    const variant_id = variantIdResult.value as number;
     
     // 删除关注记录
     const result = await db.run(
@@ -121,7 +177,12 @@ router.get("/follow-cards", async (req, res) => {
     for (const category of categories) {
       // 查询该品类下的所有关注记录
       const follows = await db.all(
-        "SELECT * FROM follows WHERE category_id = ?",
+        `SELECT id, category_id, object_id,
+                CASE WHEN variant_id IS NULL OR TRIM(CAST(variant_id AS TEXT)) = '' THEN 0 ELSE CAST(variant_id AS INTEGER) END as variant_id,
+                category_name, object_name, variant_name,
+                NULL as track, 'manual' as type, 'standard' as market_type_preset, created_at
+         FROM follows
+         WHERE category_id = ?`,
         [category.id]
       );
       

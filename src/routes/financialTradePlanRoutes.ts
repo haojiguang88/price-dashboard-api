@@ -1,0 +1,903 @@
+import { Router, Request, Response } from 'express';
+import getDb from '../config/database';
+
+const router = Router();
+
+function bucketStructureScore(score: number | null | undefined): string {
+  if (score === null || score === undefined) return 'unknown';
+  if (score >= 80) return '80-100';
+  if (score >= 65) return '65-79';
+  if (score >= 50) return '50-64';
+  return '0-49';
+}
+
+function roundMoney(value: number): number {
+  return Math.round(value * 100) / 100;
+}
+
+function buildPositionPlan(totalCapital: number, triggerAction: string, structureScore: number, maxLossPercent: number | null) {
+  let baseRatio = 0.4;
+  let tacticalRatio = 0.4;
+  let observationRatio = 0.2;
+
+  if (triggerAction !== 'READY_TO_PLAN') {
+    baseRatio = 0.2;
+    tacticalRatio = 0.2;
+    observationRatio = 0.6;
+  } else if (structureScore >= 80 && maxLossPercent !== null && maxLossPercent <= 0.04) {
+    baseRatio = 0.5;
+    tacticalRatio = 0.3;
+    observationRatio = 0.2;
+  } else if (structureScore < 65 || (maxLossPercent !== null && maxLossPercent > 0.08)) {
+    baseRatio = 0.25;
+    tacticalRatio = 0.35;
+    observationRatio = 0.4;
+  }
+
+  return {
+    principle_snapshot: [
+      '底仓负责站对位置，机动仓负责执行纪律，观察仓负责不乱想。',
+      '所有止损、止盈、追踪止盈只对机动仓有效。底仓只按结构退出。',
+      '不参与任何短期兑现。'
+    ].join('\n'),
+    base_amount: roundMoney(totalCapital * baseRatio),
+    tactical_amount: roundMoney(totalCapital * tacticalRatio),
+    observation_amount: roundMoney(totalCapital * observationRatio),
+    base_ratio: Math.round(baseRatio * 100),
+    tactical_ratio: Math.round(tacticalRatio * 100),
+    observation_ratio: Math.round(observationRatio * 100)
+  };
+}
+
+function toNumber(value: any, fallback = 0): number {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : fallback;
+}
+
+async function buildInvalidationControl(
+  db: any,
+  symbol: string,
+  source: string,
+  invalidationLine: number,
+  fallbackClose: number
+) {
+  const rows = await db.all(
+    `SELECT trade_date, close, amount, volume
+     FROM financial_daily_prices
+     WHERE symbol = ? AND source = ?
+     ORDER BY trade_date DESC
+     LIMIT 25`,
+    [symbol, source || 'tushare']
+  );
+  const latest = rows[0] || null;
+  const close = toNumber(latest?.close, fallbackClose);
+  const line = toNumber(invalidationLine);
+  const distance = close > 0 && line > 0 ? (close - line) / close : null;
+  const priorRows = rows.slice(1, 21);
+  const latestAmount = toNumber(latest?.amount);
+  const latestVolume = toNumber(latest?.volume);
+  const amountAvg = priorRows.length
+    ? priorRows.reduce((sum: number, row: any) => sum + toNumber(row.amount), 0) / priorRows.length
+    : 0;
+  const volumeAvg = priorRows.length
+    ? priorRows.reduce((sum: number, row: any) => sum + toNumber(row.volume), 0) / priorRows.length
+    : 0;
+  const amountRatio = amountAvg > 0 && latestAmount > 0 ? latestAmount / amountAvg : null;
+  const volumeRatio = volumeAvg > 0 && latestVolume > 0 ? latestVolume / volumeAvg : null;
+  const heavyBreak = close > 0 && line > 0 && close < line && ((amountRatio !== null && amountRatio >= 1.5) || (volumeRatio !== null && volumeRatio >= 1.5));
+  const consecutiveBreak = rows.length >= 2 && rows.slice(0, 2).every((row: any) => toNumber(row.close) > 0 && line > 0 && toNumber(row.close) < line);
+  const deepBreak = close > 0 && line > 0 && close < line * 0.99;
+  const latestBelow = close > 0 && line > 0 && close < line;
+  const recoveringCooldown = close > 0 && line > 0 && close >= line && rows.slice(1, 3).some((row: any) => toNumber(row.close) > 0 && toNumber(row.close) < line);
+
+  let status = 'SAFE';
+  let label = '正常';
+  let reason = '价格仍在失效线之上，按原计划观察。';
+
+  if (!close || !line) {
+    status = 'UNKNOWN';
+    label = '失效线不足';
+    reason = '缺少有效价格或失效线，暂不触发失效判断。';
+  } else if (latestBelow && (consecutiveBreak || heavyBreak || deepBreak)) {
+    status = 'CONFIRMED_BREAK';
+    label = '确认失效';
+    reason = consecutiveBreak
+      ? '连续2个交易日收盘跌破失效线，按确认失效处理。'
+      : heavyBreak
+        ? '收盘跌破失效线且成交放大，按确认失效处理。'
+        : '收盘明显跌破失效线超过1%，按确认失效处理。';
+  } else if (latestBelow) {
+    status = 'LIGHT_BREAK';
+    label = '轻微跌破';
+    reason = '收盘轻微跌破失效线，但尚未连续确认或放量破位，先处理机动风险。';
+  } else if (recoveringCooldown) {
+    status = 'RECOVERING_COOLDOWN';
+    label = '收回冷静期';
+    reason = '刚从失效线下方收回，至少观察1-2天重新站稳，不立刻买回或加仓。';
+  } else if (distance !== null && distance >= 0 && distance <= 0.01) {
+    status = 'BATTLE_ZONE';
+    label = '失效线争夺区';
+    reason = '收盘价距离失效线不足1%，不加仓，等待方向确认。';
+  }
+
+  return {
+    status,
+    label,
+    reason,
+    close_price: close || null,
+    invalidation_line: line || null,
+    distance_percent: distance,
+    latest_trade_date: latest?.trade_date || null,
+    consecutive_break: consecutiveBreak,
+    heavy_break: heavyBreak,
+    amount_ratio: amountRatio,
+    volume_ratio: volumeRatio,
+    no_add: ['BATTLE_ZONE', 'LIGHT_BREAK', 'CONFIRMED_BREAK', 'RECOVERING_COOLDOWN'].includes(status),
+    confirmed_break: status === 'CONFIRMED_BREAK'
+  };
+}
+
+async function getPositionAmounts(db: any, planId: number) {
+  const rows = await db.all(
+    `SELECT sleeve_type,
+            SUM(CASE
+              WHEN action_type IN ('buy', 'add') THEN execution_amount
+              WHEN action_type IN ('sell', 'reduce', 'stop_loss', 'exit') THEN -execution_amount
+              ELSE 0
+            END) as amount
+     FROM financial_trade_executions
+     WHERE plan_id = ?
+     GROUP BY sleeve_type`,
+    [planId]
+  );
+  const result = { base: 0, tactical: 0, observation: 0, total: 0 };
+  rows.forEach((row: any) => {
+    const amount = Math.max(0, toNumber(row.amount));
+    if (row.sleeve_type === 'base') result.base = amount;
+    if (row.sleeve_type === 'tactical') result.tactical = amount;
+    if (row.sleeve_type === 'observation') result.observation = amount;
+  });
+  result.total = result.base + result.tactical + result.observation;
+  return result;
+}
+
+async function getSuggestionFromSnapshot(db: any, snapshot: any, positions: { base: number; tactical: number; observation: number; total: number }) {
+  const structureScore = toNumber(snapshot.structure_score?.score);
+  const trendPhase = snapshot.trend_phase_code || 'UNKNOWN';
+  const entryAction = snapshot.action || 'OBSERVE';
+  const close = toNumber(snapshot.close);
+  const invalidationLine = toNumber(snapshot.invalidation_line);
+  const invalidationControl = await buildInvalidationControl(
+    db,
+    snapshot.symbol,
+    snapshot.data_source_used || snapshot.source || 'tushare',
+    invalidationLine,
+    close
+  );
+  const hasBase = positions.base > 0;
+  const hasTactical = positions.tactical > 0;
+
+  if (invalidationControl.status === 'CONFIRMED_BREAK' || entryAction === 'INVALIDATED') {
+    return {
+      action_code: hasBase ? 'EXIT_BASE' : hasTactical ? 'STOP_LOSS_TACTICAL' : 'NO_ADD',
+      action_label: hasBase ? '底仓退出' : hasTactical ? '机动仓止损' : '禁止新增',
+      action_reason: `${invalidationControl.reason} 优先执行退出纪律。`,
+      priority: 'high',
+      invalidation_control: invalidationControl
+    };
+  }
+
+  if (invalidationControl.status === 'LIGHT_BREAK') {
+    return {
+      action_code: hasTactical ? 'STOP_LOSS_TACTICAL' : 'NO_ADD',
+      action_label: hasTactical ? '机动仓先处理' : '失效线下方观察',
+      action_reason: hasTactical
+        ? `${invalidationControl.reason} 底仓先进入退出观察，机动仓优先处理。`
+        : `${invalidationControl.reason} 暂不新增仓位，底仓先进入退出观察。`,
+      priority: 'high',
+      invalidation_control: invalidationControl
+    };
+  }
+
+  if (invalidationControl.status === 'BATTLE_ZONE' || invalidationControl.status === 'RECOVERING_COOLDOWN') {
+    return {
+      action_code: 'NO_ADD',
+      action_label: invalidationControl.status === 'BATTLE_ZONE' ? '失效线争夺' : '收回冷静',
+      action_reason: invalidationControl.reason,
+      priority: 'normal',
+      invalidation_control: invalidationControl
+    };
+  }
+
+  if (['CRASH_DROP', 'SLOW_BLEED', 'REBOUND'].includes(trendPhase)) {
+    return {
+      action_code: hasBase ? 'BASE_EXIT_WATCH' : 'NO_ADD',
+      action_label: hasBase ? '底仓退出观察' : '禁止加仓',
+      action_reason: `${trendPhase} 阶段风险偏高，不新增仓位；已有底仓进入退出观察。`,
+      priority: 'high',
+      invalidation_control: invalidationControl
+    };
+  }
+
+  if (trendPhase === 'SURGE' || snapshot.metrics?.not_chasing === false) {
+    return {
+      action_code: hasTactical ? 'REDUCE_TACTICAL_WATCH' : 'NO_ADD',
+      action_label: hasTactical ? '机动仓减仓观察' : '禁止追高',
+      action_reason: '急涨或偏离过远阶段，不追高；已有机动仓优先观察是否减仓。',
+      priority: 'normal',
+      invalidation_control: invalidationControl
+    };
+  }
+
+  if (entryAction === 'READY_TO_PLAN' && positions.tactical <= 0 && hasBase) {
+    return {
+      action_code: 'TACTICAL_CAN_ENTER',
+      action_label: '机动仓可执行',
+      action_reason: '入场触发仍成立，且已有底仓站位，可考虑执行机动仓。',
+      priority: 'high',
+      invalidation_control: invalidationControl
+    };
+  }
+
+  if (entryAction === 'READY_TO_PLAN' && positions.total <= 0) {
+    return {
+      action_code: 'BASE_CAN_ENTER',
+      action_label: '底仓可执行',
+      action_reason: '入场触发成立，尚无持仓，可先执行底仓。',
+      priority: 'high',
+      invalidation_control: invalidationControl
+    };
+  }
+
+  if (trendPhase === 'SLOW_GRIND_UP' && structureScore >= 70 && hasBase) {
+    return {
+      action_code: hasTactical ? 'HOLD_BASE_AND_TACTICAL' : 'HOLD_BASE',
+      action_label: hasTactical ? '底仓与机动仓继续持有' : '底仓继续持有',
+      action_reason: hasTactical
+        ? '慢涨阶段且结构分仍可用，底仓按结构持有，机动仓继续按短线防守和止损规则管理。'
+        : '慢涨阶段且结构分仍可用，底仓按结构持有，不做短期兑现。',
+      priority: 'normal',
+      invalidation_control: invalidationControl
+    };
+  }
+
+  return {
+    action_code: 'WATCH',
+    action_label: '继续观察',
+    action_reason: snapshot.trigger_reason || '当前未出现明确执行动作，继续跟踪结构和触发条件。',
+    priority: 'normal',
+    invalidation_control: invalidationControl
+  };
+}
+
+function getTrendLabel(value?: string) {
+  switch (value) {
+    case 'BREAKOUT': return '突破';
+    case 'SLOW_GRIND_UP': return '慢涨';
+    case 'RECOVERY': return '修复';
+    case 'SURGE': return '急涨';
+    case 'HIGH_BASE': return '高位横盘';
+    case 'TREND_UP': return '趋势上行';
+    case 'REBOUND': return '反抽';
+    case 'SLOW_BLEED': return '阴跌';
+    case 'CRASH_DROP': return '暴跌';
+    case 'SIDEWAYS': return '横盘震荡';
+    case 'CONSOLIDATION': return '震荡待确认';
+    case 'TREND_TRANSITION': return '趋势转换中';
+    case 'UNKNOWN': return '状态未确认';
+    default: return value || '状态未确认';
+  }
+}
+
+function getLatestSuggestionLike(plan: any, suggestion: any | null) {
+  return {
+    action_code: suggestion?.action_code || 'WATCH',
+    action_label: suggestion?.action_label || '继续观察',
+    action_reason: suggestion?.action_reason || plan.trigger_reason || '等待下一次行情和结构确认。',
+    priority: suggestion?.priority || 'normal',
+    trend_phase_code: suggestion?.trend_phase_code || plan.trend_phase_code || 'UNKNOWN',
+    trigger_score: toNumber(suggestion?.trigger_score ?? plan.trigger_score),
+    close_price: toNumber(suggestion?.close_price ?? plan.close_price),
+    invalidation_line: toNumber(suggestion?.invalidation_line ?? plan.invalidation_line),
+    structure_score: toNumber(suggestion?.structure_score ?? plan.structure_score)
+  };
+}
+
+async function buildSleeveDiscipline(db: any, plan: any, positions: { base: number; tactical: number; observation: number; total: number }, suggestionRow: any | null) {
+  const suggestion = getLatestSuggestionLike(plan, suggestionRow);
+  const actionCode = suggestion.action_code;
+  const trendPhase = suggestion.trend_phase_code;
+  const close = suggestion.close_price;
+  const invalidationLine = suggestion.invalidation_line;
+  const invalidationControl = await buildInvalidationControl(db, plan.symbol, plan.source || 'tushare', invalidationLine, close);
+  const isInvalidated = actionCode === 'EXIT_BASE'
+    || invalidationControl.status === 'CONFIRMED_BREAK';
+  const isNoAdd = ['NO_ADD', 'BASE_EXIT_WATCH', 'REDUCE_TACTICAL_WATCH', 'STOP_LOSS_TACTICAL'].includes(actionCode)
+    || invalidationControl.no_add;
+  const isChasingRisk = actionCode === 'NO_ADD' || String(suggestion.action_label || '').includes('追高');
+  const baseRemaining = Math.max(0, toNumber(plan.base_amount) - positions.base);
+  const tacticalRemaining = Math.max(0, toNumber(plan.tactical_amount) - positions.tactical);
+  const observationRemaining = Math.max(0, toNumber(plan.observation_amount) - positions.observation);
+
+  const baseBuyTriggered = actionCode === 'BASE_CAN_ENTER' && positions.base <= 0 && !isInvalidated && !isNoAdd;
+  const tacticalBuyTriggered = actionCode === 'TACTICAL_CAN_ENTER' && positions.base > 0 && positions.tactical <= 0 && !isInvalidated && !isNoAdd;
+  const observationBuyTriggered = ['BREAKOUT', 'SLOW_GRIND_UP'].includes(trendPhase)
+    && positions.base > 0
+    && positions.tactical > 0
+    && positions.observation <= 0
+    && !isInvalidated
+    && !isChasingRisk
+    && suggestion.structure_score >= 75;
+
+  const baseSellTriggered = actionCode === 'EXIT_BASE' || (isInvalidated && positions.base > 0) || (actionCode === 'BASE_EXIT_WATCH' && positions.base > 0);
+  const tacticalSellTriggered = actionCode === 'STOP_LOSS_TACTICAL'
+    || actionCode === 'REDUCE_TACTICAL_WATCH'
+    || (isInvalidated && positions.tactical > 0);
+  const observationSellTriggered = positions.observation > 0
+    && (isInvalidated || actionCode === 'NO_ADD' || actionCode === 'REDUCE_TACTICAL_WATCH' || actionCode === 'STOP_LOSS_TACTICAL' || ['SURGE', 'SLOW_BLEED', 'CRASH_DROP'].includes(trendPhase));
+
+  const baseHoldReason = positions.base > 0
+    ? '底仓已经站位，除非结构破坏、跌破失效线或市场进入冻结风险，否则不做短期兑现。'
+    : '底仓还没买，只有入场触发成立且不追高时才允许第一笔。';
+  const tacticalHoldReason = positions.tactical > 0
+    ? '机动仓已执行，后续按短线防守、止损和急涨滞涨规则管理。'
+    : '机动仓等底仓站稳后，再看回踩不破、重新站上短线或突破不跌回。';
+  const observationHoldReason = positions.observation > 0
+    ? '观察仓已经动用，风险优先级高于收益幻想。'
+    : '观察仓默认是预留资金，不出现二次确认或主升强化就不动。';
+
+  const rules = [
+    {
+      sleeve_type: 'base',
+      sleeve_label: '底仓',
+      role: '站位仓',
+      target_amount: toNumber(plan.base_amount),
+      current_amount: positions.base,
+      remaining_amount: baseRemaining,
+      buy_condition: '入场触发成立、结构未失效、不是追高状态，且不在失效线争夺/冷静期时，允许第一笔底仓。',
+      buy_triggered: baseBuyTriggered,
+      buy_action_type: 'buy',
+      sell_condition: '连续2日收盘跌破失效线、放量跌破、明显破位、结构破坏或市场风险冻结，底仓才退出。',
+      sell_triggered: baseSellTriggered,
+      sell_action_type: actionCode === 'BASE_EXIT_WATCH' ? 'sell' : 'exit',
+      next_action_label: baseSellTriggered ? '底仓退出/退出观察' : baseBuyTriggered ? '可记录底仓建仓' : '底仓不动',
+      next_action_reason: baseSellTriggered ? suggestion.action_reason : baseBuyTriggered ? suggestion.action_reason : baseHoldReason,
+      lock_reason: isInvalidated ? '结构或失效线已经确认失效，禁止新增底仓。' : isNoAdd ? `${invalidationControl.label}：当前规则禁止新增仓位。` : ''
+    },
+    {
+      sleeve_type: 'tactical',
+      sleeve_label: '机动仓',
+      role: '执行仓',
+      target_amount: toNumber(plan.tactical_amount),
+      current_amount: positions.tactical,
+      remaining_amount: tacticalRemaining,
+      buy_condition: '底仓已有、入场触发仍成立，且回踩不破/重新站上短线/突破不跌回时再执行。',
+      buy_triggered: tacticalBuyTriggered,
+      buy_action_type: 'add',
+      sell_condition: '轻微跌破失效线、急涨后滞涨、跌破短线防守位或结构失效时优先减掉。',
+      sell_triggered: tacticalSellTriggered,
+      sell_action_type: actionCode === 'STOP_LOSS_TACTICAL' ? 'stop_loss' : 'reduce',
+      next_action_label: tacticalSellTriggered ? '机动仓减仓/止损' : tacticalBuyTriggered ? '可记录机动仓加仓' : '机动仓等待',
+      next_action_reason: tacticalSellTriggered ? suggestion.action_reason : tacticalBuyTriggered ? suggestion.action_reason : tacticalHoldReason,
+      lock_reason: positions.base <= 0 ? '底仓还没站位，机动仓不能先动。' : isInvalidated ? '结构或失效线已经确认失效，禁止新增机动仓。' : isNoAdd ? `${invalidationControl.label}：当前规则禁止加仓。` : ''
+    },
+    {
+      sleeve_type: 'observation',
+      sleeve_label: '观察仓',
+      role: '预留仓',
+      target_amount: toNumber(plan.observation_amount),
+      current_amount: positions.observation,
+      remaining_amount: observationRemaining,
+      buy_condition: '只有底仓和机动仓都成立、走势进入主升强化且仍不追高时，才考虑动用。',
+      buy_triggered: observationBuyTriggered,
+      buy_action_type: 'add',
+      sell_condition: '观察仓一旦动用，遇到失效、急涨滞涨或市场走弱，优先回收。',
+      sell_triggered: observationSellTriggered,
+      sell_action_type: isInvalidated ? 'stop_loss' : 'reduce',
+      next_action_label: observationSellTriggered ? '观察仓回收' : observationBuyTriggered ? '可考虑观察仓补充' : '观察仓保留',
+      next_action_reason: observationSellTriggered ? suggestion.action_reason : observationBuyTriggered ? '主升强化且三层条件满足，可考虑动用观察仓。' : observationHoldReason,
+      lock_reason: positions.base <= 0 || positions.tactical <= 0 ? '底仓和机动仓没有完成前，观察仓保持预留。' : isNoAdd ? `${invalidationControl.label}：观察仓先保留或回收。` : isChasingRisk ? '追高或急涨状态，不动用观察仓。' : ''
+    }
+  ];
+
+  let overall_label = '继续趴着';
+  let overall_reason = '当前没有必须执行的动作，按计划继续观察。';
+  if (isInvalidated) {
+    overall_label = '先处理失效/止损';
+    overall_reason = suggestion.action_reason;
+  } else if (rules.some(rule => rule.sell_triggered)) {
+    overall_label = '有卖出/减仓触发';
+    overall_reason = rules.find(rule => rule.sell_triggered)?.next_action_reason || suggestion.action_reason;
+  } else if (rules.some(rule => rule.buy_triggered)) {
+    overall_label = '有买入/加仓触发';
+    overall_reason = rules.find(rule => rule.buy_triggered)?.next_action_reason || suggestion.action_reason;
+  } else if (isNoAdd) {
+    overall_label = '禁止新增仓位';
+    overall_reason = suggestion.action_reason;
+  }
+
+  return {
+    guard: {
+      overall_label,
+      overall_reason,
+      trend_phase_label: getTrendLabel(trendPhase),
+      can_record_buy: rules.some(rule => rule.buy_triggered),
+      can_record_sell: rules.some(rule => rule.sell_triggered),
+      no_add: isNoAdd || isChasingRisk,
+      invalidated: isInvalidated,
+      just_hold: overall_label === '继续趴着',
+      close_price: invalidationControl.close_price || close || null,
+      invalidation_line: invalidationControl.invalidation_line || invalidationLine || null,
+      invalidation_control: invalidationControl,
+      latest_action_code: actionCode,
+      latest_action_label: suggestion.action_label,
+      latest_action_reason: suggestion.action_reason
+    },
+    positions: {
+      base: { target: toNumber(plan.base_amount), current: positions.base, remaining: baseRemaining, ratio: toNumber(plan.base_ratio) },
+      tactical: { target: toNumber(plan.tactical_amount), current: positions.tactical, remaining: tacticalRemaining, ratio: toNumber(plan.tactical_ratio) },
+      observation: { target: toNumber(plan.observation_amount), current: positions.observation, remaining: observationRemaining, ratio: toNumber(plan.observation_ratio) },
+      total_current: positions.total,
+      total_target: toNumber(plan.total_capital)
+    },
+    sleeve_rules: rules
+  };
+}
+
+async function getEntryTriggerSnapshot(req: Request | { body: any; protocol?: string; get?: (name: string) => string | undefined }) {
+  const host = typeof req.get === 'function'
+    ? req.get('host')
+    : `127.0.0.1:${process.env.PORT || 3001}`;
+  const baseUrl = `${req.protocol || 'http'}://${host}`;
+  const response = await fetch(`${baseUrl}/api/finance/assets/entry-trigger`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      symbol: req.body.symbol,
+      asset_type: req.body.asset_type,
+      source: req.body.source || 'tushare'
+    })
+  });
+  const data = await response.json() as { success?: boolean; data?: any; message?: string };
+  if (!data.success || !data.data) {
+    throw new Error(data.message || '入场触发计算失败');
+  }
+  return data.data;
+}
+
+router.post('/trade-plans/from-entry-trigger', async (req: Request, res: Response) => {
+  try {
+    const db = await getDb();
+    const symbol = String(req.body.symbol || '').trim();
+    const assetType = String(req.body.asset_type || '').trim();
+    const source = String(req.body.source || 'tushare').trim();
+    const totalCapital = Number(req.body.total_capital);
+
+    if (!symbol || !['stock', 'etf', 'index'].includes(assetType)) {
+      return res.status(400).json({ success: false, message: '缺少有效的 symbol 或 asset_type' });
+    }
+    if (!Number.isFinite(totalCapital) || totalCapital <= 0) {
+      return res.status(400).json({ success: false, message: '总投入金额必须大于 0' });
+    }
+
+    const existingPlan = await db.get(
+      `SELECT id, plan_name, status, total_capital, updated_at
+       FROM financial_trade_plans
+       WHERE symbol = ?
+         AND asset_type = ?
+         AND source = ?
+         AND is_deleted = 0
+         AND status IN ('draft', 'watching', 'active')
+       ORDER BY updated_at DESC, id DESC
+       LIMIT 1`,
+      [symbol, assetType, source]
+    );
+    if (existingPlan) {
+      return res.status(409).json({
+        success: false,
+        message: `已存在未结束的金融买入计划：${existingPlan.plan_name}（${existingPlan.status}），不要重复生成。`,
+        data: { existing_plan: existingPlan }
+      });
+    }
+
+    const snapshot = await getEntryTriggerSnapshot(req);
+    if (snapshot.action !== 'READY_TO_PLAN') {
+      return res.status(409).json({
+        success: false,
+        message: `入场触发未通过：${snapshot.trigger_reason || snapshot.action_label || '当前不能生成买入计划'}`
+      });
+    }
+    const structureScore = Number(snapshot.structure_score?.score || 0);
+    const maxLossPercent = snapshot.plan_draft?.max_loss_percent ?? null;
+    const positionPlan = buildPositionPlan(totalCapital, snapshot.action, structureScore, maxLossPercent);
+    const now = new Date().toISOString();
+    const planName = req.body.plan_name || `${snapshot.name || symbol} 入场计划 ${snapshot.trade_date || now.slice(0, 10)}`;
+    const triggerTypes = (snapshot.triggered_items || [])
+      .filter((item: any) => item.code !== 'NOT_CHASING_TODAY')
+      .map((item: any) => item.name)
+      .join(' / ') || snapshot.plan_draft?.trigger_condition || '等待触发';
+
+    const result = await db.run(
+      `INSERT INTO financial_trade_plans (
+        plan_name, symbol, name, asset_type, source, trade_date, status,
+        total_capital, base_amount, tactical_amount, observation_amount,
+        base_ratio, tactical_ratio, observation_ratio, principle_snapshot,
+        entry_action, trigger_score, trigger_type, trigger_reason,
+        structure_score, structure_score_bucket, structure_level, structure_status, safe_zone_status,
+        trend_phase_code, trend_action, market_regime, entry_permission,
+        close_price, ma20, ma60, invalidation_line, max_loss_percent,
+        suggested_entry_zone, entry_reason, trigger_snapshot_json, note,
+        created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        planName,
+        symbol,
+        snapshot.name || symbol,
+        assetType,
+        source,
+        snapshot.trade_date || null,
+        snapshot.action === 'READY_TO_PLAN' ? 'draft' : 'watching',
+        totalCapital,
+        positionPlan.base_amount,
+        positionPlan.tactical_amount,
+        positionPlan.observation_amount,
+        positionPlan.base_ratio,
+        positionPlan.tactical_ratio,
+        positionPlan.observation_ratio,
+        positionPlan.principle_snapshot,
+        snapshot.action,
+        snapshot.trigger_score || 0,
+        triggerTypes,
+        snapshot.trigger_reason || '',
+        structureScore,
+        bucketStructureScore(structureScore),
+        snapshot.structure_score?.level_label || '',
+        snapshot.structure_status || '',
+        snapshot.safe_zone_status || '',
+        snapshot.trend_phase_code || '',
+        snapshot.trend_action || '',
+        snapshot.market_regime || '',
+        snapshot.entry_permission || '',
+        snapshot.close || null,
+        snapshot.ma20 || null,
+        snapshot.ma60 || null,
+        snapshot.invalidation_line || null,
+        maxLossPercent,
+        snapshot.plan_draft?.suggested_entry_zone || '',
+        snapshot.plan_draft?.entry_reason || snapshot.trigger_reason || '',
+        JSON.stringify(snapshot),
+        req.body.note || '',
+        now,
+        now
+      ]
+    );
+
+    const plan = await db.get('SELECT * FROM financial_trade_plans WHERE id = ?', [result.lastID]);
+    res.json({ success: true, data: plan, message: '金融买入计划已生成' });
+  } catch (error) {
+    console.error('Error creating financial trade plan:', error);
+    res.status(500).json({ success: false, message: `生成金融买入计划失败：${(error as Error).message}` });
+  }
+});
+
+router.get('/trade-plans', async (req: Request, res: Response) => {
+  try {
+    const db = await getDb();
+    const status = req.query.status as string | undefined;
+    const params: any[] = [];
+    let sql = 'SELECT * FROM financial_trade_plans WHERE is_deleted = 0';
+    if (status) {
+      sql += ' AND status = ?';
+      params.push(status);
+    }
+    sql += ' ORDER BY created_at DESC LIMIT 300';
+    const items = await db.all(sql, params);
+    for (const item of items) {
+      item.latest_suggestion = await db.get(
+        `SELECT * FROM financial_action_suggestions
+         WHERE plan_id = ?
+         ORDER BY suggestion_date DESC, id DESC LIMIT 1`,
+        [item.id]
+      );
+      const positions = await getPositionAmounts(db, item.id);
+      item.positions = positions;
+      item.execution_discipline = await buildSleeveDiscipline(db, item, positions, item.latest_suggestion || null);
+    }
+    res.json({ success: true, data: { items } });
+  } catch (error) {
+    res.status(500).json({ success: false, message: `获取金融买入计划失败：${(error as Error).message}` });
+  }
+});
+
+router.get('/trade-plans/:id/execution-discipline', async (req: Request, res: Response) => {
+  try {
+    const db = await getDb();
+    const id = Number(req.params.id);
+    const plan = await db.get('SELECT * FROM financial_trade_plans WHERE id = ? AND is_deleted = 0', [id]);
+    if (!plan) return res.status(404).json({ success: false, message: '计划不存在' });
+    const latestSuggestion = await db.get(
+      `SELECT * FROM financial_action_suggestions
+       WHERE plan_id = ?
+       ORDER BY suggestion_date DESC, id DESC LIMIT 1`,
+      [id]
+    );
+    const positions = await getPositionAmounts(db, id);
+    res.json({
+      success: true,
+      data: await buildSleeveDiscipline(db, plan, positions, latestSuggestion || null)
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: `获取执行纪律失败：${(error as Error).message}` });
+  }
+});
+
+router.get('/trade-plans/:id/executions', async (req: Request, res: Response) => {
+  try {
+    const db = await getDb();
+    const id = Number(req.params.id);
+    const items = await db.all(
+      `SELECT * FROM financial_trade_executions
+       WHERE plan_id = ?
+       ORDER BY execution_date DESC, id DESC`,
+      [id]
+    );
+    res.json({ success: true, data: { items } });
+  } catch (error) {
+    res.status(500).json({ success: false, message: `获取执行记录失败：${(error as Error).message}` });
+  }
+});
+
+router.post('/trade-plans/:id/executions', async (req: Request, res: Response) => {
+  try {
+    const db = await getDb();
+    const id = Number(req.params.id);
+    const plan = await db.get('SELECT * FROM financial_trade_plans WHERE id = ? AND is_deleted = 0', [id]);
+    if (!plan) return res.status(404).json({ success: false, message: '计划不存在' });
+
+    const actionType = String(req.body.action_type || '').trim();
+    const sleeveType = String(req.body.sleeve_type || '').trim();
+    const executionDate = String(req.body.execution_date || '').trim();
+    const executionPrice = Number(req.body.execution_price);
+    const executionAmount = Number(req.body.execution_amount);
+    const validActions = ['buy', 'add', 'sell', 'reduce', 'stop_loss', 'exit'];
+    const validSleeves = ['base', 'tactical', 'observation'];
+    if (!validActions.includes(actionType) || !validSleeves.includes(sleeveType) || !executionDate) {
+      return res.status(400).json({ success: false, message: '缺少有效的动作、仓位类型或执行日期' });
+    }
+    if (!Number.isFinite(executionPrice) || executionPrice <= 0 || !Number.isFinite(executionAmount) || executionAmount <= 0) {
+      return res.status(400).json({ success: false, message: '执行价格和金额必须大于 0' });
+    }
+    const quantity = executionPrice > 0 ? executionAmount / executionPrice : null;
+    const now = new Date().toISOString();
+    const result = await db.run(
+      `INSERT INTO financial_trade_executions (
+        plan_id, symbol, action_type, sleeve_type, execution_date, execution_price,
+        execution_amount, execution_quantity, trigger_phase, trigger_rule, position_decision,
+        note, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        id,
+        plan.symbol,
+        actionType,
+        sleeveType,
+        executionDate,
+        executionPrice,
+        executionAmount,
+        quantity,
+        req.body.trigger_phase || plan.trend_phase_code || '',
+        req.body.trigger_rule || plan.trigger_type || '',
+        req.body.position_decision || '',
+        req.body.note || '',
+        now,
+        now
+      ]
+    );
+
+    const positions = await getPositionAmounts(db, id);
+    await db.run(
+      `UPDATE financial_trade_plans
+       SET is_bought = ?, status = ?, buy_date = COALESCE(buy_date, ?), buy_price = COALESCE(buy_price, ?),
+           buy_amount = ?, updated_at = ?
+       WHERE id = ?`,
+      [
+        positions.total > 0 ? 1 : 0,
+        positions.total > 0 ? 'active' : plan.status,
+        executionDate,
+        executionPrice,
+        positions.total,
+        now,
+        id
+      ]
+    );
+    const execution = await db.get('SELECT * FROM financial_trade_executions WHERE id = ?', [result.lastID]);
+    res.json({ success: true, data: execution, message: '执行记录已保存' });
+  } catch (error) {
+    res.status(500).json({ success: false, message: `保存执行记录失败：${(error as Error).message}` });
+  }
+});
+
+router.get('/trade-plans/:id/suggestions', async (req: Request, res: Response) => {
+  try {
+    const db = await getDb();
+    const id = Number(req.params.id);
+    const items = await db.all(
+      `SELECT * FROM financial_action_suggestions
+       WHERE plan_id = ?
+       ORDER BY suggestion_date DESC, id DESC LIMIT 60`,
+      [id]
+    );
+    res.json({ success: true, data: { items } });
+  } catch (error) {
+    res.status(500).json({ success: false, message: `获取动作建议失败：${(error as Error).message}` });
+  }
+});
+
+router.post('/trade-plans/:id/sync-suggestion', async (req: Request, res: Response) => {
+  try {
+    const db = await getDb();
+    const id = Number(req.params.id);
+    const plan = await db.get('SELECT * FROM financial_trade_plans WHERE id = ? AND is_deleted = 0', [id]);
+    if (!plan) return res.status(404).json({ success: false, message: '计划不存在' });
+
+    req.body.symbol = plan.symbol;
+    req.body.asset_type = plan.asset_type;
+    req.body.source = plan.source;
+    const snapshot = await getEntryTriggerSnapshot(req);
+    const positions = await getPositionAmounts(db, id);
+    const suggestion = await getSuggestionFromSnapshot(db, snapshot, positions);
+    const now = new Date().toISOString();
+    const result = await db.run(
+      `INSERT INTO financial_action_suggestions (
+        plan_id, symbol, trade_date, suggestion_date, action_code, action_label, action_reason,
+        priority, structure_score, trend_phase_code, trigger_score, entry_action, close_price,
+        invalidation_line, base_position_amount, tactical_position_amount, observation_position_amount,
+        suggestion_snapshot_json, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        id,
+        plan.symbol,
+        snapshot.trade_date || null,
+        now,
+        suggestion.action_code,
+        suggestion.action_label,
+        suggestion.action_reason,
+        suggestion.priority,
+        toNumber(snapshot.structure_score?.score),
+        snapshot.trend_phase_code || '',
+        toNumber(snapshot.trigger_score),
+        snapshot.action || '',
+        snapshot.close || null,
+        snapshot.invalidation_line || null,
+        positions.base,
+        positions.tactical,
+        positions.observation,
+        JSON.stringify(snapshot),
+        now,
+        now
+      ]
+    );
+    const saved = await db.get('SELECT * FROM financial_action_suggestions WHERE id = ?', [result.lastID]);
+    res.json({ success: true, data: saved, message: '动作建议已同步' });
+  } catch (error) {
+    res.status(500).json({ success: false, message: `同步动作建议失败：${(error as Error).message}` });
+  }
+});
+
+router.post('/trade-plans/sync-active-suggestions', async (req: Request, res: Response) => {
+  try {
+    const db = await getDb();
+    const plans = await db.all(
+      `SELECT * FROM financial_trade_plans
+       WHERE is_deleted = 0 AND status IN ('draft', 'watching', 'paper_tracking', 'active')
+       ORDER BY is_bought DESC, updated_at DESC
+       LIMIT ?`,
+      [Math.max(1, Math.min(Number(req.body.limit || 50), 200))]
+    );
+    const results: any[] = [];
+    for (const plan of plans) {
+      const fakeReq = {
+        ...req,
+        body: { symbol: plan.symbol, asset_type: plan.asset_type, source: plan.source }
+      } as Request;
+      const snapshot = await getEntryTriggerSnapshot(fakeReq);
+      const positions = await getPositionAmounts(db, plan.id);
+      const suggestion = await getSuggestionFromSnapshot(db, snapshot, positions);
+      const now = new Date().toISOString();
+      const insert = await db.run(
+        `INSERT INTO financial_action_suggestions (
+          plan_id, symbol, trade_date, suggestion_date, action_code, action_label, action_reason,
+          priority, structure_score, trend_phase_code, trigger_score, entry_action, close_price,
+          invalidation_line, base_position_amount, tactical_position_amount, observation_position_amount,
+          suggestion_snapshot_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          plan.id, plan.symbol, snapshot.trade_date || null, now, suggestion.action_code,
+          suggestion.action_label, suggestion.action_reason, suggestion.priority,
+          toNumber(snapshot.structure_score?.score), snapshot.trend_phase_code || '',
+          toNumber(snapshot.trigger_score), snapshot.action || '', snapshot.close || null,
+          snapshot.invalidation_line || null, positions.base, positions.tactical, positions.observation,
+          JSON.stringify({ snapshot, invalidation_control: suggestion.invalidation_control || null }), now, now
+        ]
+      );
+      results.push({ plan_id: plan.id, suggestion_id: insert.lastID, action_label: suggestion.action_label });
+    }
+    res.json({ success: true, data: { items: results }, message: `已同步 ${results.length} 个计划的动作建议` });
+  } catch (error) {
+    res.status(500).json({ success: false, message: `批量同步动作建议失败：${(error as Error).message}` });
+  }
+});
+
+router.patch('/trade-plans/:id/feedback', async (req: Request, res: Response) => {
+  try {
+    const db = await getDb();
+    const id = Number(req.params.id);
+    const now = new Date().toISOString();
+    const allowed = [
+      'status', 'is_bought', 'buy_date', 'buy_price', 'buy_amount',
+      'perf_5d', 'perf_10d', 'perf_20d', 'perf_60d',
+      'stopped_out', 'entered_main_rise', 'false_breakout', 'chased_high',
+      'feedback_note'
+    ];
+    const updates: string[] = [];
+    const params: any[] = [];
+    allowed.forEach((key) => {
+      if (Object.prototype.hasOwnProperty.call(req.body, key)) {
+        updates.push(`${key} = ?`);
+        params.push(req.body[key]);
+      }
+    });
+    if (updates.length === 0) {
+      return res.status(400).json({ success: false, message: '没有可更新字段' });
+    }
+    updates.push('updated_at = ?');
+    params.push(now, id);
+    await db.run(`UPDATE financial_trade_plans SET ${updates.join(', ')} WHERE id = ? AND is_deleted = 0`, params);
+    const plan = await db.get('SELECT * FROM financial_trade_plans WHERE id = ?', [id]);
+    res.json({ success: true, data: plan });
+  } catch (error) {
+    res.status(500).json({ success: false, message: `更新反馈失败：${(error as Error).message}` });
+  }
+});
+
+router.get('/trade-plans/stats/summary', async (_req: Request, res: Response) => {
+  try {
+    const db = await getDb();
+    const byStructure = await db.all(
+      `SELECT structure_score_bucket as bucket,
+              COUNT(*) as total,
+              SUM(CASE WHEN is_bought = 1 THEN 1 ELSE 0 END) as bought_count,
+              AVG(perf_20d) as avg_perf_20d,
+              SUM(CASE WHEN perf_20d > 0 THEN 1 ELSE 0 END) as win_20d
+       FROM financial_trade_plans
+       WHERE is_deleted = 0
+       GROUP BY structure_score_bucket
+       ORDER BY bucket DESC`
+    );
+    const byTrend = await db.all(
+      `SELECT trend_phase_code,
+              COUNT(*) as total,
+              AVG(perf_20d) as avg_perf_20d,
+              SUM(CASE WHEN false_breakout = 1 THEN 1 ELSE 0 END) as false_breakout_count,
+              SUM(CASE WHEN chased_high = 1 THEN 1 ELSE 0 END) as chased_high_count
+       FROM financial_trade_plans
+       WHERE is_deleted = 0
+       GROUP BY trend_phase_code
+       ORDER BY total DESC`
+    );
+    const byTrigger = await db.all(
+      `SELECT trigger_type,
+              COUNT(*) as total,
+              AVG(perf_20d) as avg_perf_20d,
+              SUM(CASE WHEN perf_20d > 0 THEN 1 ELSE 0 END) as win_20d
+       FROM financial_trade_plans
+       WHERE is_deleted = 0
+       GROUP BY trigger_type
+       ORDER BY total DESC`
+    );
+    res.json({ success: true, data: { by_structure: byStructure, by_trend: byTrend, by_trigger: byTrigger } });
+  } catch (error) {
+    res.status(500).json({ success: false, message: `获取统计失败：${(error as Error).message}` });
+  }
+});
+
+export default router;

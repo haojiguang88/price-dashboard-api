@@ -4,7 +4,15 @@ import getDb from '../config/database';
 const router = express.Router();
 
 // 合法的规则类型
-const validRuleTypes = ['price_change_daily', 'price_change_period', 'new_high', 'new_low', 'volatility'];
+const validRuleTypes = [
+  'price_change_daily',
+  'price_change_period',
+  'new_high',
+  'new_low',
+  'historical_new_high',
+  'historical_new_low',
+  'volatility'
+];
 
 // 合法的范围类型
 const validScopeTypes = ['global', 'category', 'object'];

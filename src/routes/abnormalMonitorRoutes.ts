@@ -5,6 +5,8 @@ const router = express.Router();
 
 // 规则类型优先级
 const rulePriority: Record<string, number> = {
+  historical_new_high: 95,
+  historical_new_low: 95,
   new_high: 90,
   new_low: 90,
   price_change_period: 80,
@@ -31,6 +33,12 @@ const ruleDirectionMap: Record<string, Record<string, string>> = {
     default: 'bullish'
   },
   new_low: {
+    default: 'bearish'
+  },
+  historical_new_high: {
+    default: 'bullish'
+  },
+  historical_new_low: {
     default: 'bearish'
   },
   amplitude: {
@@ -192,6 +200,29 @@ const isNewLow = (prices: number[]) => {
   return currentPrice < Math.min(...previousPrices);
 };
 
+const calculateHistoricalBreak = (prices: number[], direction: 'high' | 'low') => {
+  if (prices.length < 2) return null;
+  const currentPrice = prices[0];
+  const previousPrices = prices.slice(1);
+  const historyExtreme = direction === 'high'
+    ? Math.max(...previousPrices)
+    : Math.min(...previousPrices);
+
+  const hit = direction === 'high'
+    ? currentPrice > historyExtreme
+    : currentPrice < historyExtreme;
+
+  if (!hit || historyExtreme === 0) {
+    return null;
+  }
+
+  return {
+    hit,
+    historyExtreme,
+    breakRate: ((currentPrice - historyExtreme) / historyExtreme) * 100
+  };
+};
+
 // 计算提醒等级
 const calculateAlertLevel = (value: number): string => {
   const absValue = Math.abs(value);
@@ -217,7 +248,7 @@ const executeRules = (target: any, prices: number[], ruleMap: Record<string, Mon
     for (const rule of rules) {
       try {
         const params = JSON.parse(rule.params_json);
-        const days = params.days || 7;
+        const days = Math.max(2, Number(params.days || params.period || 7) || 7);
         const threshold = params.threshold || 5;
         const direction = params.direction;
 
@@ -293,6 +324,24 @@ const executeRules = (target: any, prices: number[], ruleMap: Record<string, Mon
                   actualChangeValue = ((currentPrice - previousPrice) / previousPrice) * 100;
                 }
               }
+            }
+            break;
+          }
+          case 'historical_new_high': {
+            const result = calculateHistoricalBreak(prices, 'high');
+            if (result?.hit) {
+              hit = true;
+              hitDirection = 'bullish';
+              actualChangeValue = result.breakRate;
+            }
+            break;
+          }
+          case 'historical_new_low': {
+            const result = calculateHistoricalBreak(prices, 'low');
+            if (result?.hit) {
+              hit = true;
+              hitDirection = 'bearish';
+              actualChangeValue = result.breakRate;
             }
             break;
           }
