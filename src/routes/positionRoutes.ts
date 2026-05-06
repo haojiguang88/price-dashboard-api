@@ -3,6 +3,277 @@ import getDb from "../config/database";
 
 const router = express.Router();
 
+interface PositionInsightRow {
+  id: number;
+  category_name: string;
+  object_name: string;
+  variant_name: string;
+  total_quantity: number;
+  total_cost: number;
+  avg_price: number;
+  current_price: number | null;
+  latest_price_date: string | null;
+  first_buy_date: string | null;
+  last_buy_date: string | null;
+  batch_count: number;
+  category_id: number | null;
+  object_id: number | null;
+  variant_id: number | null;
+}
+
+interface PositionInsightItem extends PositionInsightRow {
+  label: string;
+  current_value: number | null;
+  total_profit: number | null;
+  profit_rate: number | null;
+  cost_percent: number;
+  days_since_price_update: number | null;
+}
+
+const POSITION_DAY_MS = 24 * 60 * 60 * 1000;
+
+const toFiniteNumber = (value: any, fallback = 0) => {
+  const numberValue = Number(value);
+  return Number.isFinite(numberValue) ? numberValue : fallback;
+};
+
+const roundMetric = (value: number | null, digits = 2) => {
+  if (value === null || !Number.isFinite(value)) return null;
+  return Number(value.toFixed(digits));
+};
+
+const toDateValue = (date: string) => new Date(`${date}T00:00:00`).getTime();
+
+const diffDays = (fromDate: string, toDate: string) => {
+  return Math.round((toDateValue(toDate) - toDateValue(fromDate)) / POSITION_DAY_MS);
+};
+
+const buildPositionLabel = (item: { category_name: string; object_name: string; variant_name?: string }) => {
+  return [item.category_name, item.object_name, item.variant_name].filter(Boolean).join(' / ');
+};
+
+const compactPositionItem = (item: PositionInsightItem) => ({
+  id: item.id,
+  label: item.label,
+  category_name: item.category_name,
+  object_name: item.object_name,
+  variant_name: item.variant_name,
+  category_id: item.category_id,
+  object_id: item.object_id,
+  variant_id: item.variant_id,
+  total_quantity: roundMetric(item.total_quantity, 0),
+  total_cost: roundMetric(item.total_cost),
+  avg_price: roundMetric(item.avg_price),
+  current_price: roundMetric(item.current_price),
+  current_value: roundMetric(item.current_value),
+  total_profit: roundMetric(item.total_profit),
+  profit_rate: roundMetric(item.profit_rate),
+  cost_percent: roundMetric(item.cost_percent),
+  latest_price_date: item.latest_price_date,
+  days_since_price_update: item.days_since_price_update,
+  first_buy_date: item.first_buy_date,
+  last_buy_date: item.last_buy_date,
+  batch_count: item.batch_count
+});
+
+const buildPositionInsights = (rows: PositionInsightRow[], referenceLatestDate?: string | null) => {
+  const latestPositionPriceDates = rows
+    .map(row => row.latest_price_date)
+    .filter((date): date is string => Boolean(date))
+    .sort((a, b) => toDateValue(a) - toDateValue(b));
+  const latestPositionPriceDate = latestPositionPriceDates.length > 0 ? latestPositionPriceDates[latestPositionPriceDates.length - 1] : null;
+  const latestPriceDateValue = referenceLatestDate || latestPositionPriceDate;
+
+  const totalCost = rows.reduce((sum, row) => sum + toFiniteNumber(row.total_cost), 0);
+  const items: PositionInsightItem[] = rows.map(row => {
+    const totalQuantity = toFiniteNumber(row.total_quantity);
+    const totalCostValue = toFiniteNumber(row.total_cost);
+    const currentPrice = row.current_price === null ? null : toFiniteNumber(row.current_price);
+    const currentValue = currentPrice === null ? null : currentPrice * totalQuantity;
+    const totalProfit = currentValue === null ? null : currentValue - totalCostValue;
+    const profitRate = totalCostValue > 0 && totalProfit !== null ? (totalProfit / totalCostValue) * 100 : null;
+
+    return {
+      ...row,
+      total_quantity: totalQuantity,
+      total_cost: totalCostValue,
+      avg_price: toFiniteNumber(row.avg_price),
+      current_price: currentPrice,
+      current_value: currentValue,
+      total_profit: totalProfit,
+      profit_rate: profitRate,
+      cost_percent: totalCost > 0 ? (totalCostValue / totalCost) * 100 : 0,
+      days_since_price_update: row.latest_price_date && latestPriceDateValue ? diffDays(row.latest_price_date, latestPriceDateValue) : null,
+      label: buildPositionLabel(row)
+    };
+  });
+
+  const pricedItems = items.filter(item => item.current_value !== null);
+  const currentMarketValue = pricedItems.reduce((sum, item) => sum + (item.current_value || 0), 0);
+  const totalProfit = pricedItems.reduce((sum, item) => sum + (item.total_profit || 0), 0);
+  const pricedCost = pricedItems.reduce((sum, item) => sum + item.total_cost, 0);
+  const staleItems = items.filter(item => (item.days_since_price_update || 0) >= 14);
+  const missingPriceItems = items.filter(item => item.current_price === null);
+
+  const categoryMap = new Map<string, {
+    category_name: string;
+    position_count: number;
+    total_cost: number;
+    current_value: number;
+    total_profit: number;
+  }>();
+
+  items.forEach(item => {
+    const current = categoryMap.get(item.category_name) || {
+      category_name: item.category_name,
+      position_count: 0,
+      total_cost: 0,
+      current_value: 0,
+      total_profit: 0
+    };
+    current.position_count += 1;
+    current.total_cost += item.total_cost;
+    current.current_value += item.current_value || 0;
+    current.total_profit += item.total_profit || 0;
+    categoryMap.set(item.category_name, current);
+  });
+
+  const categoryExposure = [...categoryMap.values()]
+    .map(category => ({
+      ...category,
+      cost_percent: totalCost > 0 ? roundMetric((category.total_cost / totalCost) * 100) : 0,
+      profit_rate: category.total_cost > 0 ? roundMetric((category.total_profit / category.total_cost) * 100) : null,
+      total_cost: roundMetric(category.total_cost),
+      current_value: roundMetric(category.current_value),
+      total_profit: roundMetric(category.total_profit)
+    }))
+    .sort((a, b) => (b.total_cost || 0) - (a.total_cost || 0));
+
+  const actionItems = [
+    ...items
+      .filter(item => item.cost_percent >= 15)
+      .map(item => ({
+        type: 'high_exposure',
+        severity: item.cost_percent >= 25 ? 'critical' : 'important',
+        title: '单仓占比偏高',
+        reason: `成本占比 ${roundMetric(item.cost_percent, 1)}%`,
+        item: compactPositionItem(item)
+      })),
+    ...items
+      .filter(item => item.days_since_price_update !== null && item.days_since_price_update >= 14 && item.cost_percent >= 2)
+      .map(item => ({
+        type: 'stale_price',
+        severity: (item.days_since_price_update || 0) >= 30 ? 'critical' : 'important',
+        title: '价格更新过期',
+        reason: `最近价格距最新记录 ${item.days_since_price_update} 天`,
+        item: compactPositionItem(item)
+      })),
+    ...items
+      .filter(item => item.total_profit !== null && ((item.profit_rate || 0) <= -15 || (item.total_profit || 0) <= -5000))
+      .map(item => ({
+        type: 'heavy_loss',
+        severity: (item.profit_rate || 0) <= -30 || (item.total_profit || 0) <= -8000 ? 'critical' : 'important',
+        title: '浮亏压力较大',
+        reason: `浮盈亏 ${roundMetric(item.total_profit)} / ${roundMetric(item.profit_rate, 1)}%`,
+        item: compactPositionItem(item)
+      })),
+    ...items
+      .filter(item => item.total_profit !== null && ((item.profit_rate || 0) >= 10 || (item.total_profit || 0) >= 3000))
+      .map(item => ({
+        type: 'profit_take',
+        severity: 'normal',
+        title: '已有可兑现浮盈',
+        reason: `浮盈 ${roundMetric(item.total_profit)} / ${roundMetric(item.profit_rate, 1)}%`,
+        item: compactPositionItem(item)
+      })),
+    ...missingPriceItems.map(item => ({
+      type: 'missing_price',
+      severity: 'critical',
+      title: '缺少当前参考价',
+      reason: '无法计算当前盈亏',
+      item: compactPositionItem(item)
+    }))
+  ]
+    .sort((a, b) => {
+      const severityRank: Record<string, number> = { critical: 3, important: 2, normal: 1 };
+      return (severityRank[b.severity] || 0) - (severityRank[a.severity] || 0)
+        || ((b.item.total_cost || 0) - (a.item.total_cost || 0));
+    })
+    .slice(0, 16);
+
+  const qualityBuckets = [
+    {
+      key: 'profit',
+      label: '盈利仓位',
+      items: items.filter(item => (item.total_profit || 0) > 0)
+    },
+    {
+      key: 'light_loss',
+      label: '轻度亏损',
+      items: items.filter(item => item.profit_rate !== null && item.profit_rate < 0 && item.profit_rate > -15)
+    },
+    {
+      key: 'heavy_loss',
+      label: '重度亏损',
+      items: items.filter(item => item.profit_rate !== null && item.profit_rate <= -15)
+    },
+    {
+      key: 'stale_price',
+      label: '价格过期',
+      items: staleItems
+    },
+    {
+      key: 'missing_price',
+      label: '缺少价格',
+      items: missingPriceItems
+    }
+  ].map(bucket => ({
+    key: bucket.key,
+    label: bucket.label,
+    count: bucket.items.length,
+    total_cost: roundMetric(bucket.items.reduce((sum, item) => sum + item.total_cost, 0)),
+    total_profit: roundMetric(bucket.items.reduce((sum, item) => sum + (item.total_profit || 0), 0))
+  }));
+
+  const stressTests = [-10, -5, 5, 10].map(changePercent => {
+    const multiplier = 1 + changePercent / 100;
+    const stressedValue = pricedItems.reduce((sum, item) => sum + (item.current_value || 0) * multiplier, 0);
+    const stressedProfit = stressedValue - pricedCost;
+    return {
+      change_percent: changePercent,
+      market_value: roundMetric(stressedValue),
+      total_profit: roundMetric(stressedProfit),
+      profit_rate: pricedCost > 0 ? roundMetric((stressedProfit / pricedCost) * 100) : null,
+      profit_change: roundMetric(stressedProfit - totalProfit)
+    };
+  });
+
+  return {
+    overview: {
+      position_count: items.length,
+      category_count: categoryMap.size,
+      total_cost: roundMetric(totalCost),
+      priced_cost: roundMetric(pricedCost),
+      current_market_value: roundMetric(currentMarketValue),
+      total_profit: roundMetric(totalProfit),
+      profit_rate: pricedCost > 0 ? roundMetric((totalProfit / pricedCost) * 100) : null,
+      missing_price_count: missingPriceItems.length,
+      stale_price_count: staleItems.length,
+      latest_price_date: latestPriceDateValue,
+      latest_position_price_date: latestPositionPriceDate,
+      largest_position_percent: items.length > 0 ? roundMetric(Math.max(...items.map(item => item.cost_percent))) : 0
+    },
+    category_exposure: categoryExposure,
+    top_exposures: [...items].sort((a, b) => b.total_cost - a.total_cost).slice(0, 10).map(compactPositionItem),
+    profit_leaders: [...items].filter(item => item.total_profit !== null).sort((a, b) => (b.total_profit || 0) - (a.total_profit || 0)).slice(0, 8).map(compactPositionItem),
+    loss_leaders: [...items].filter(item => item.total_profit !== null).sort((a, b) => (a.total_profit || 0) - (b.total_profit || 0)).slice(0, 8).map(compactPositionItem),
+    stale_prices: staleItems.sort((a, b) => (b.days_since_price_update || 0) - (a.days_since_price_update || 0)).slice(0, 10).map(compactPositionItem),
+    action_items: actionItems,
+    quality_buckets: qualityBuckets,
+    stress_tests: stressTests
+  };
+};
+
 
 
 // 持仓列表接口
@@ -68,6 +339,99 @@ router.get("/positions", async (req, res) => {
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     res.status(500).json({ status: "error", message: "获取持仓列表失败", error: errorMessage });
+  }
+});
+
+// 持仓洞察接口：用于可视化分析页，只读
+router.get("/positions/insights", async (req, res) => {
+  try {
+    const db = await getDb();
+    const [rows, latestPriceRow] = await Promise.all([
+      db.all(`
+      WITH latest_prices AS (
+        SELECT 
+          category,
+          object_name,
+          COALESCE(variant, '') as variant,
+          price,
+          date
+        FROM (
+          SELECT 
+            category,
+            object_name,
+            COALESCE(variant, '') as variant,
+            price,
+            date,
+            ROW_NUMBER() OVER (
+              PARTITION BY category, object_name, COALESCE(variant, '') 
+              ORDER BY date DESC, created_at DESC, id DESC
+            ) as rn
+          FROM price_records
+        )
+        WHERE rn = 1
+      ),
+      position_summary AS (
+        SELECT
+          p.id,
+          p.category_name,
+          p.object_name,
+          COALESCE(p.variant_name, '') as variant_name,
+          SUM(pb.remaining_quantity) as total_quantity,
+          SUM(pb.batch_price * pb.remaining_quantity) as total_cost,
+          CASE WHEN SUM(pb.remaining_quantity) > 0
+            THEN SUM(pb.batch_price * pb.remaining_quantity) / SUM(pb.remaining_quantity)
+            ELSE 0
+          END as avg_price,
+          MIN(pb.batch_date) as first_buy_date,
+          MAX(pb.batch_date) as last_buy_date,
+          COUNT(pb.id) as batch_count
+        FROM positions p
+        JOIN position_batches pb ON p.id = pb.position_id
+        GROUP BY p.id, p.category_name, p.object_name, COALESCE(p.variant_name, '')
+        HAVING SUM(pb.remaining_quantity) > 0
+      )
+      SELECT
+        ps.*,
+        lp.price as current_price,
+        lp.date as latest_price_date,
+        c.id as category_id,
+        o.id as object_id,
+        v.id as variant_id
+      FROM position_summary ps
+      LEFT JOIN latest_prices lp
+        ON ps.category_name = lp.category
+        AND ps.object_name = lp.object_name
+        AND ps.variant_name = lp.variant
+      LEFT JOIN categories c ON c.name = ps.category_name
+      LEFT JOIN objects o ON o.category_id = c.id AND o.name = ps.object_name
+      LEFT JOIN variants v ON v.object_id = o.id AND v.name = ps.variant_name AND ps.variant_name <> ''
+      ORDER BY ps.total_cost DESC, ps.id DESC
+    `),
+      db.get('SELECT MAX(date) as latest_date FROM price_records')
+    ]);
+
+    const normalizedRows: PositionInsightRow[] = rows.map((row: any) => ({
+      id: Number(row.id),
+      category_name: String(row.category_name || ''),
+      object_name: String(row.object_name || ''),
+      variant_name: String(row.variant_name || ''),
+      total_quantity: toFiniteNumber(row.total_quantity),
+      total_cost: toFiniteNumber(row.total_cost),
+      avg_price: toFiniteNumber(row.avg_price),
+      current_price: row.current_price === null || row.current_price === undefined ? null : toFiniteNumber(row.current_price),
+      latest_price_date: row.latest_price_date || null,
+      first_buy_date: row.first_buy_date || null,
+      last_buy_date: row.last_buy_date || null,
+      batch_count: Number(row.batch_count) || 0,
+      category_id: row.category_id === null || row.category_id === undefined ? null : Number(row.category_id),
+      object_id: row.object_id === null || row.object_id === undefined ? null : Number(row.object_id),
+      variant_id: row.variant_id === null || row.variant_id === undefined ? null : Number(row.variant_id)
+    }));
+
+    res.json({ status: "success", data: buildPositionInsights(normalizedRows, latestPriceRow?.latest_date || null) });
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    res.status(500).json({ status: "error", message: "获取持仓洞察失败", error: errorMessage });
   }
 });
 
