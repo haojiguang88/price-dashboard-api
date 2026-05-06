@@ -322,6 +322,56 @@ router.patch('/task-center/tasks/:id', async (req: Request, res: Response) => {
   }
 });
 
+router.delete('/task-center/tasks/:id', async (req: Request, res: Response) => {
+  try {
+    const db = await getDb();
+    const task = await db.get(`SELECT * FROM task_center_tasks WHERE id = ?`, [req.params.id]);
+    if (!task) return res.status(404).json({ success: false, message: '任务不存在' });
+
+    const running = await db.get(
+      `SELECT id, started_at
+       FROM task_center_runs
+       WHERE task_id = ? AND status = 'running'
+       ORDER BY started_at DESC, id DESC
+       LIMIT 1`,
+      [task.id]
+    );
+    if (running) {
+      return res.status(409).json({ success: false, message: '任务正在执行中，完成后再删除' });
+    }
+
+    await db.run('BEGIN');
+    let runsDeleted = 0;
+    try {
+      const runResult = await db.run(
+        `DELETE FROM task_center_runs
+         WHERE task_id = ? OR task_key = ?`,
+        [task.id, task.task_key]
+      );
+      runsDeleted = Number(runResult?.changes || 0);
+
+      await db.run(`DELETE FROM task_center_tasks WHERE id = ?`, [task.id]);
+      await db.run('COMMIT');
+    } catch (error) {
+      await db.run('ROLLBACK');
+      throw error;
+    }
+
+    lastRunByTaskDate.delete(task.task_key);
+    res.json({
+      success: true,
+      message: `任务「${task.name}」已删除`,
+      data: {
+        id: task.id,
+        task_key: task.task_key,
+        runs_deleted: runsDeleted
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: `删除任务失败: ${(error as Error).message}` });
+  }
+});
+
 router.post('/task-center/tasks/:id/run', async (req: Request, res: Response) => {
   try {
     const db = await getDb();

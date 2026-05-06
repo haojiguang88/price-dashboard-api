@@ -689,19 +689,6 @@ const migrations: Migration[] = [
         (task_key, name, domain, task_type, enabled, schedule_time, schedule_days, priority, config_json, last_status, last_message)
       VALUES
         (
-          'finance_daily_close_update',
-          'A股每日收盘更新',
-          'finance',
-          'daily_close_update',
-          0,
-          '16:00',
-          'trade_days',
-          10,
-          '{"source":"tushare","candidate_limit":20,"universe_limit":50,"interval_ms":1200}',
-          'pending',
-          '收盘后更新A股日线，优先更新备选池并刷新备选池'
-        ),
-        (
           'metals_daily_update',
           '贵金属每日行情更新',
           'metals',
@@ -943,24 +930,10 @@ const migrations: Migration[] = [
   },
   {
     id: '20260503_003',
-    name: 'Create secondary confirmation scan task',
+    name: 'Skip standalone secondary confirmation scan task',
     sql: `
-      INSERT OR IGNORE INTO task_center_tasks
-        (task_key, name, domain, task_type, enabled, schedule_time, schedule_days, priority, config_json, last_status, last_message)
-      VALUES
-        (
-          'finance_secondary_confirmation_scan',
-          '金融二次确认扫描',
-          'finance',
-          'secondary_confirmation_scan',
-          0,
-          '09:20',
-          'trade_days',
-          15,
-          '{"limit":80}',
-          'pending',
-          '扫描等待二次确认和入场观察记录，只更新状态，不自动生成买入计划'
-        );
+      -- 金融日终流水线已包含二次确认扫描，避免新库再生成重复任务。
+      SELECT 1;
     `
   },
   {
@@ -1005,6 +978,17 @@ const migrations: Migration[] = [
           END,
           updated_at = CURRENT_TIMESTAMP
       WHERE task_key = 'metals_daily_update';
+    `
+  },
+  {
+    id: '20260506_003',
+    name: 'Remove task center jobs covered by finance pipeline',
+    sql: `
+      DELETE FROM task_center_runs
+      WHERE task_key IN ('finance_daily_close_update', 'finance_secondary_confirmation_scan');
+
+      DELETE FROM task_center_tasks
+      WHERE task_key IN ('finance_daily_close_update', 'finance_secondary_confirmation_scan');
     `
   }
 ];
