@@ -1053,6 +1053,41 @@ const migrations: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_user_preferences_user_key
       ON user_preferences(user_key, preference_key);
     `
+  },
+  {
+    id: '20260507_004',
+    name: 'Create rejected opportunities',
+    sql: `
+      CREATE TABLE IF NOT EXISTS rejected_opportunities (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT NOT NULL,
+        track TEXT,
+        project_name TEXT,
+        related_object TEXT,
+        decision_date TEXT NOT NULL,
+        decision_stage TEXT NOT NULL DEFAULT 'actively_rejected',
+        risk_result TEXT,
+        rejection_reason TEXT NOT NULL,
+        information_snapshot TEXT,
+        risk_rules_snapshot TEXT,
+        risk_tolerance TEXT,
+        execution_consistency TEXT,
+        decision_quality TEXT NOT NULL DEFAULT 'valid',
+        later_status TEXT NOT NULL DEFAULT 'not_tracked',
+        later_summary TEXT,
+        review_link TEXT,
+        note TEXT,
+        is_deleted INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_rejected_opportunities_decision_date
+      ON rejected_opportunities(decision_date DESC);
+
+      CREATE INDEX IF NOT EXISTS idx_rejected_opportunities_status
+      ON rejected_opportunities(track, decision_quality, later_status);
+    `
   }
 ];
 

@@ -45,6 +45,7 @@ import modelTrainingRoutes from "./routes/modelTrainingRoutes";
 import analysisAnnotationRoutes from "./routes/analysisAnnotationRoutes";
 import auditLogRoutes from "./routes/auditLogRoutes";
 import userPreferenceRoutes from "./routes/userPreferenceRoutes";
+import rejectedOpportunitiesRoutes from "./routes/rejectedOpportunitiesRoutes";
 
 const app = express();
 const port = process.env.PORT || 3001;
@@ -92,6 +93,7 @@ app.use("/api/model-training", modelTrainingRoutes);
 app.use("/api", analysisAnnotationRoutes);
 app.use("/api", auditLogRoutes);
 app.use("/api", userPreferenceRoutes);
+app.use("/api", rejectedOpportunitiesRoutes);
 
 app.get("/db-test", async (req, res) => {
   try {
