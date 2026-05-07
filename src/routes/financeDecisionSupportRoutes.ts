@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import getDb from '../config/database';
+import { buildFinancePlanQuality } from '../services/financePlanQuality';
 
 const router = Router();
 
@@ -87,7 +88,43 @@ function summarize(items: any[]) {
   };
 }
 
+function getPlanScoreBucket(score: number | null | undefined) {
+  if (score === null || score === undefined || !Number.isFinite(Number(score))) {
+    return { key: 'unknown', label: '未知分' };
+  }
+  if (Number(score) >= 80) return { key: '80-100', label: '80分以上' };
+  if (Number(score) >= 65) return { key: '65-79', label: '65-79分' };
+  if (Number(score) >= 50) return { key: '50-64', label: '50-64分' };
+  return { key: '0-49', label: '50分以下' };
+}
+
+function summarizeScoreBuckets(items: any[], getScore: (item: any) => number | null | undefined) {
+  const order = ['80-100', '65-79', '50-64', '0-49', 'unknown'];
+  const bucketMap = new Map<string, any[]>();
+  items.forEach(item => {
+    const bucket = getPlanScoreBucket(getScore(item));
+    bucketMap.set(bucket.key, [...(bucketMap.get(bucket.key) || []), item]);
+  });
+
+  return order
+    .map(key => {
+      const rows = bucketMap.get(key) || [];
+      const label = getPlanScoreBucket(
+        key === '80-100' ? 80 : key === '65-79' ? 65 : key === '50-64' ? 50 : key === '0-49' ? 0 : null
+      ).label;
+      return {
+        key,
+        label,
+        total: rows.length,
+        invalidated: rows.filter(item => item.metrics?.brokeInvalidation).length,
+        summary: summarize(rows)
+      };
+    })
+    .filter(row => row.total > 0);
+}
+
 function compactSample(row: any, metrics: ForwardMetrics) {
+  const planQuality = row.plan_quality || null;
   return {
     id: row.id,
     symbol: row.symbol,
@@ -97,6 +134,13 @@ function compactSample(row: any, metrics: ForwardMetrics) {
     tradeDate: row.trade_date,
     status: row.pool_status || row.status || row.review_status,
     score: row.priority_score ?? row.structure_score ?? null,
+    structureScore: row.structure_score ?? null,
+    triggerScore: row.trigger_score ?? null,
+    planQualityScore: planQuality?.score ?? null,
+    planQualityLabel: planQuality?.label ?? null,
+    invalidationLine: row.invalidation_line ?? null,
+    entryPrice: row.close ?? row.close_price ?? null,
+    maxLossPercent: row.max_loss_percent ?? null,
     trendPhase: row.trend_phase_code || null,
     reason: row.first_blocking_gate_label || row.forbidden_reason || row.downgrade_reason || row.risk_note || row.trigger_reason || row.entry_reason || '',
     metrics
@@ -361,7 +405,7 @@ router.get('/sample-validation/summary', async (_req: Request, res: Response) =>
     const planRows = await db.all(
       `SELECT id, plan_name, symbol, name, asset_type, source, trade_date, close_price as close,
               status, structure_score, trigger_score, trend_phase_code, invalidation_line,
-              trigger_reason, entry_reason, created_at, updated_at
+              max_loss_percent, suggested_entry_zone, trigger_type, trigger_reason, entry_reason, created_at, updated_at
        FROM financial_trade_plans
        WHERE is_deleted = 0
        ORDER BY created_at DESC
@@ -396,11 +440,15 @@ router.get('/sample-validation/summary', async (_req: Request, res: Response) =>
     );
 
     const candidates = await Promise.all(candidateRows.map(async (row: any) => compactSample(row, await getForwardMetrics(db, row))));
-    const plans = await Promise.all(planRows.map(async (row: any) => compactSample(row, await getForwardMetrics(db, row))));
+    const plans = await Promise.all(planRows.map(async (row: any) => {
+      const planQuality = buildFinancePlanQuality(row);
+      return compactSample({ ...row, plan_quality: planQuality }, await getForwardMetrics(db, row));
+    }));
     const modelConflicts = await Promise.all(modelConflictRows.map(async (row: any) => compactSample(row, await getForwardMetrics(db, row))));
 
     const enteredCandidates = candidates.filter(item => ['active', 'planned'].includes(String(item.status)));
     const blockedCandidates = candidates.filter(item => String(item.status) === 'expired');
+    const planInvalidations = plans.filter(item => item.metrics.brokeInvalidation);
     const planFailures = plans.filter(item => item.metrics.brokeInvalidation || (item.metrics.ret20 !== null && item.metrics.ret20 < 0));
 
     res.json({
@@ -416,9 +464,31 @@ router.get('/sample-validation/summary', async (_req: Request, res: Response) =>
           enteredCandidates: { title: '进入备选池后的表现', summary: summarize(enteredCandidates), items: enteredCandidates.slice(0, 30) },
           blockedCandidates: { title: '被规则/风控拦截后的表现', summary: summarize(blockedCandidates), items: blockedCandidates.slice(0, 30) },
           plans: { title: '进入计划池后的表现', summary: summarize(plans), items: plans.slice(0, 30) },
+          planInvalidations: { title: '跌破失效线计划', summary: summarize(planInvalidations), items: planInvalidations.slice(0, 30) },
           modelConflicts: { title: '模型高分但规则未通过', summary: summarize(modelConflicts), items: modelConflicts.slice(0, 30) },
           planFailures: { title: '计划失败样本', summary: summarize(planFailures), items: planFailures.slice(0, 30) }
         },
+        scoreBucketGroups: [
+          {
+            key: 'triggerScore',
+            title: '触发分桶验证',
+            note: '更偏执行触发质量，能观察“触发偏弱是否更容易跌破失效线”。',
+            buckets: summarizeScoreBuckets(plans, item => item.triggerScore)
+          },
+          {
+            key: 'structureScore',
+            title: '结构分桶验证',
+            note: '更偏结构质量，能观察“结构分低是否更容易失败”。',
+            buckets: summarizeScoreBuckets(plans, item => item.structureScore)
+          },
+          {
+            key: 'planQualityScore',
+            title: '计划质量分桶验证',
+            note: '复用金融买入计划的综合计划质量分。',
+            buckets: summarizeScoreBuckets(plans, item => item.planQualityScore)
+          }
+        ],
+        planScoreBuckets: summarizeScoreBuckets(plans, item => item.planQualityScore),
         trendFailure: groupByTrend([...plans, ...blockedCandidates].filter(item => item.metrics.brokeInvalidation || (item.metrics.ret20 !== null && item.metrics.ret20 < 0))),
         rejectedOpportunities: {
           total: rejectedRows.length,
