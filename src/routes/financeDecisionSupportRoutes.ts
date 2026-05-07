@@ -114,6 +114,238 @@ function groupByTrend(items: any[]) {
     .sort((a, b) => b.total - a.total);
 }
 
+function splitUniverseTypes(value: string | null | undefined): string[] {
+  return String(value || '')
+    .split(',')
+    .map(item => item.trim())
+    .filter(Boolean);
+}
+
+function classifyAssetRoute(row: any) {
+  const symbol = String(row.symbol || '');
+  const assetType = String(row.asset_type || '');
+  const name = String(row.name || '');
+  const text = `${name} ${symbol}`;
+  const typeSet = new Set(splitUniverseTypes(row.universe_type));
+
+  if (assetType === 'stock') {
+    return {
+      key: 'stock',
+      label: 'A股个股',
+      targetPool: '个股备选池',
+      currentWorkflow: '个股安全区 + 结构 + 流动性/市值 + 模型辅助',
+      currentPoolApplicable: true,
+      requiredChecks: ['ST/退市过滤', '近20日成交额', '近5日最低成交额', '流通市值', '极端交易状态'],
+      note: '个股可以进入当前权益流程，但必须先过流动性、市值和极端交易过滤。'
+    };
+  }
+
+  if (assetType === 'index') {
+    return {
+      key: 'market_anchor',
+      label: '市场锚/宽基指数',
+      targetPool: '市场总闸',
+      currentWorkflow: '只做环境判断，不直接生成买入计划',
+      currentPoolApplicable: false,
+      requiredChecks: ['市场阶段', '趋势方向', '风险开关'],
+      note: '指数主要用于判断环境和总闸，不当作交易标的直接入池。'
+    };
+  }
+
+  if (assetType !== 'etf') {
+    return {
+      key: 'other',
+      label: '其它金融资产',
+      targetPool: '待归类池',
+      currentWorkflow: '暂不进入权益主升流程',
+      currentPoolApplicable: false,
+      requiredChecks: ['先补资产类型', '再定义策略池'],
+      note: '资产类型未接入当前路由，需要先明确底层资产和退出规则。'
+    };
+  }
+
+  if (typeSet.has('bond_cash_etf') || /货币|快线|现金(?!流)|债|国债|地债|政金|城投|信用债|可转债|短融|同业存单|存单/.test(text)) {
+    return {
+      key: 'bond_cash_etf',
+      label: '债券/货币ETF',
+      targetPool: '低波动/配置池',
+      currentWorkflow: '不走权益主升策略',
+      currentPoolApplicable: false,
+      requiredChecks: ['利率环境', '久期风险', '信用风险', '流动性'],
+      note: '债券/货币ETF不适合用主升结构筛选，后续应单独做配置型规则。'
+    };
+  }
+
+  if (typeSet.has('commodity_etf') || /黄金ETF|上海金|金ETF|白银|豆粕|商品|原油|能源化工|有色期货/.test(text)) {
+    return {
+      key: 'commodity_etf',
+      label: '商品/黄金ETF',
+      targetPool: '商品/贵金属观察池',
+      currentWorkflow: '走商品或贵金属逻辑，不走A股权益总闸',
+      currentPoolApplicable: false,
+      requiredChecks: ['商品周期', '美元/利率', '避险状态', '期现结构', '流动性'],
+      note: '商品/黄金ETF需要独立路由，不能和权益ETF混在同一套入池规则里。'
+    };
+  }
+
+  if (typeSet.has('cross_border_etf') || /QDII|纳指|纳斯达克|标普|德国|法国|日经|东证|恒生|港股|中概|海外|美国|亚太|东南亚|沙特|印度/.test(text) || symbol.startsWith('513')) {
+    return {
+      key: 'cross_border_etf',
+      label: 'QDII/跨境ETF',
+      targetPool: '跨境ETF观察池',
+      currentWorkflow: '先处理海外市场、汇率和折溢价，再谈计划',
+      currentPoolApplicable: false,
+      requiredChecks: ['海外市场趋势', '汇率', '折溢价', '额度/暂停申购', '交易时差'],
+      note: '跨境ETF不能直接套A股节奏，必须先过折溢价和海外市场检查。'
+    };
+  }
+
+  if (typeSet.has('special_fund') || /LOF|封闭|REIT|REITS|基础设施|创新未来|定开/.test(text)) {
+    return {
+      key: 'special_fund',
+      label: 'LOF/特殊基金',
+      targetPool: '特殊基金观察池',
+      currentWorkflow: '高溢价一票否决，结构只做辅助',
+      currentPoolApplicable: false,
+      requiredChecks: ['折溢价', '场内流动性', '基金结构', '申赎限制'],
+      note: 'LOF/特殊基金要先处理折溢价和基金结构风险，不能只看日线形态。'
+    };
+  }
+
+  if (typeSet.has('broad_etf')) {
+    return {
+      key: 'broad_etf',
+      label: '宽基权益ETF',
+      targetPool: '宽基结构池',
+      currentWorkflow: '市场总闸 + 自身结构 + 安全区',
+      currentPoolApplicable: true,
+      requiredChecks: ['市场总闸', '自身结构', '安全区', '成交额'],
+      note: '宽基ETF可以走当前权益流程，但不需要行业强度层。'
+    };
+  }
+
+  if (typeSet.has('industry_etf')) {
+    return {
+      key: 'industry_etf',
+      label: '行业/主题权益ETF',
+      targetPool: '行业主题池',
+      currentWorkflow: '行业强度 + 自身结构 + 安全区',
+      currentPoolApplicable: true,
+      requiredChecks: ['行业强度', '相对沪深300强度', '自身结构', '安全区', '成交额'],
+      note: '行业/主题ETF要先看行业强度，再看自身结构，不和宽基完全同路。'
+    };
+  }
+
+  return {
+    key: 'unknown_etf',
+    label: '未归类ETF',
+    targetPool: '待归类池',
+    currentWorkflow: '暂不进入权益主升流程',
+    currentPoolApplicable: false,
+    requiredChecks: ['补充ETF分组', '确认底层资产', '定义适用规则'],
+    note: 'ETF未识别为宽基、行业、商品、跨境、债券/货币或特殊基金，先别让它自动进交易池。'
+  };
+}
+
+router.get('/asset-routing/summary', async (_req: Request, res: Response) => {
+  try {
+    const db = await getDb();
+    const universeRows = await db.all(
+      `SELECT symbol,
+              COALESCE(MAX(NULLIF(name, '')), '') as name,
+              asset_type,
+              source,
+              GROUP_CONCAT(DISTINCT universe_type) as universe_type,
+              MAX(total_count) as total_count,
+              MAX(last_trade_date) as last_trade_date,
+              MAX(update_status) as update_status
+       FROM financial_asset_universe
+       WHERE enabled = 1
+       GROUP BY symbol, asset_type, source`
+    );
+    const candidateRows = await db.all(
+      `SELECT symbol, asset_type, source, COUNT(*) as active_count
+       FROM financial_candidate_pool
+       WHERE pool_status = 'active'
+       GROUP BY symbol, asset_type, source`
+    );
+    const planRows = await db.all(
+      `SELECT symbol, asset_type, source, COUNT(*) as active_count
+       FROM financial_trade_plans
+       WHERE is_deleted = 0
+         AND status IN ('draft', 'watching', 'paper_tracking', 'active')
+       GROUP BY symbol, asset_type, source`
+    );
+
+    const candidateMap = new Map(candidateRows.map((row: any) => [`${row.symbol}|${row.asset_type}|${row.source}`, toNumber(row.active_count)]));
+    const planMap = new Map(planRows.map((row: any) => [`${row.symbol}|${row.asset_type}|${row.source}`, toNumber(row.active_count)]));
+    const routeMap = new Map<string, any>();
+
+    const items = universeRows.map((row: any) => {
+      const route = classifyAssetRoute(row);
+      const key = `${row.symbol}|${row.asset_type}|${row.source}`;
+      const item = {
+        symbol: row.symbol,
+        name: row.name,
+        assetType: row.asset_type,
+        source: row.source,
+        universeType: row.universe_type,
+        totalCount: row.total_count,
+        lastTradeDate: row.last_trade_date,
+        updateStatus: row.update_status,
+        activeCandidates: candidateMap.get(key) || 0,
+        activePlans: planMap.get(key) || 0,
+        route
+      };
+      const current = routeMap.get(route.key) || {
+        key: route.key,
+        label: route.label,
+        targetPool: route.targetPool,
+        currentWorkflow: route.currentWorkflow,
+        currentPoolApplicable: route.currentPoolApplicable,
+        requiredChecks: route.requiredChecks,
+        note: route.note,
+        total: 0,
+        activeCandidates: 0,
+        activePlans: 0,
+        samples: []
+      };
+      current.total += 1;
+      current.activeCandidates += item.activeCandidates;
+      current.activePlans += item.activePlans;
+      if (current.samples.length < 10) current.samples.push(item);
+      routeMap.set(route.key, current);
+      return item;
+    });
+
+    const routeOrder = ['stock', 'broad_etf', 'industry_etf', 'commodity_etf', 'cross_border_etf', 'special_fund', 'bond_cash_etf', 'market_anchor', 'unknown_etf', 'other'];
+    const routes = Array.from(routeMap.values()).sort((a, b) => {
+      const orderA = routeOrder.indexOf(a.key);
+      const orderB = routeOrder.indexOf(b.key);
+      return (orderA === -1 ? 99 : orderA) - (orderB === -1 ? 99 : orderB);
+    });
+
+    res.json({
+      success: true,
+      data: {
+        routes,
+        items: items
+          .sort((a: any, b: any) => (b.activePlans + b.activeCandidates) - (a.activePlans + a.activeCandidates))
+          .slice(0, 120),
+        totals: {
+          assets: items.length,
+          currentWorkflowAssets: items.filter((item: any) => item.route.currentPoolApplicable).length,
+          outsideWorkflowAssets: items.filter((item: any) => !item.route.currentPoolApplicable).length,
+          activeCandidates: items.reduce((sum: number, item: any) => sum + item.activeCandidates, 0),
+          activePlans: items.reduce((sum: number, item: any) => sum + item.activePlans, 0)
+        }
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: `获取资产类型路由失败：${(error as Error).message}` });
+  }
+});
+
 router.get('/sample-validation/summary', async (_req: Request, res: Response) => {
   try {
     const db = await getDb();
