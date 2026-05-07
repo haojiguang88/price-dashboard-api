@@ -1872,6 +1872,89 @@ async function upsertCandidate(db: any, evaluation: any, name = '') {
   );
 }
 
+async function recordRejectedCandidateEvaluation(db: any, evaluation: any) {
+  const now = new Date().toISOString();
+  const structure = evaluation.structure || {};
+  const trendPhase = evaluation.trend_phase;
+  const marketRegime = evaluation.market_regime;
+  const reason = evaluation.candidate_reason || evaluation.reason || '本次复核未满足入池条件';
+
+  await db.run(
+    `UPDATE financial_candidate_pool
+     SET trade_date = ?,
+         close = ?,
+         ma20 = ?,
+         ma60 = ?,
+         ma120 = ?,
+         distance_to_ma60 = ?,
+         above_ma60_days = ?,
+         structure_status = ?,
+         structure_reason = ?,
+         safe_zone_status = ?,
+         safe_zone_reason = ?,
+         trend_phase_code = ?,
+         trend_phase_reason = ?,
+         market_regime = ?,
+         entry_permission = ?,
+         final_status = 'REJECTED',
+         pool_status = 'expired',
+         priority = ?,
+         priority_score = ?,
+         invalidation_line = ?,
+         candidate_reason = ?,
+         forbidden_reason = ?,
+         downgrade_reason = ?,
+         risk_note = ?,
+         gate_trace_json = ?,
+         first_blocking_gate_key = ?,
+         first_blocking_gate_label = ?,
+         blocking_gate_labels = ?,
+         last_checked_at = ?,
+         last_review_at = ?,
+         review_action = 'excluded_recheck',
+         updated_at = ?
+     WHERE symbol = ?
+       AND asset_type = ?
+       AND source = ?
+       AND rule_version = ?`,
+    [
+      structure.trade_date || null,
+      structure.close ?? null,
+      structure.ma20 ?? null,
+      structure.ma60 ?? null,
+      structure.ma120 ?? null,
+      structure.distance_to_ma60 ?? null,
+      structure.above_ma60_days ?? null,
+      structure.structure_status || 'UNKNOWN',
+      structure.structure_reason || null,
+      structure.safe_zone_status || 'UNKNOWN',
+      structure.safe_zone_reason || null,
+      trendPhase?.trend_phase_code || null,
+      trendPhase?.trend_phase_reason || null,
+      marketRegime?.market_regime || 'UNKNOWN',
+      marketRegime?.entry_permission || 'OBSERVE_ONLY',
+      evaluation.priority || 'medium',
+      evaluation.priority_score || 0,
+      structure.invalidation_line ?? null,
+      reason,
+      evaluation.forbidden_reason || evaluation.reason || reason,
+      evaluation.downgrade_reason || null,
+      evaluation.risk_note || '',
+      evaluation.gate_trace ? JSON.stringify(evaluation.gate_trace) : null,
+      evaluation.first_blocking_gate_key || null,
+      evaluation.first_blocking_gate_label || null,
+      evaluation.blocking_gate_labels || null,
+      now,
+      now,
+      now,
+      evaluation.symbol,
+      evaluation.asset_type,
+      evaluation.source,
+      CANDIDATE_RULE_VERSION
+    ]
+  );
+}
+
 router.get('/candidate-pool', async (req: Request, res: Response) => {
   try {
     const db = await getDb();
@@ -2026,6 +2109,8 @@ router.post('/candidate-pool/evaluate-one', async (req: Request, res: Response) 
 
     if (evaluation.selected) {
       await upsertCandidate(db, evaluation);
+    } else {
+      await recordRejectedCandidateEvaluation(db, evaluation);
     }
 
     res.json({
