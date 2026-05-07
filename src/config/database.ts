@@ -50,6 +50,9 @@ const initDatabase = async (db: Database) => {
   await db.exec("CREATE TABLE IF NOT EXISTS risk_check_records (id INTEGER PRIMARY KEY AUTOINCREMENT, review_type TEXT NOT NULL DEFAULT 'general_filter', category_name TEXT, object_name TEXT, variant_name TEXT, category_risk_type TEXT, rule_version TEXT DEFAULT 'v1', system_result TEXT NOT NULL, result_reason TEXT, summary TEXT, extra_result_json TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP)");
   await db.exec("CREATE TABLE IF NOT EXISTS risk_check_record_items (id INTEGER PRIMARY KEY AUTOINCREMENT, record_id INTEGER NOT NULL, item_key TEXT, item_label TEXT NOT NULL, group_name TEXT, item_value TEXT, trigger_type TEXT DEFAULT 'none', trigger_reason TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (record_id) REFERENCES risk_check_records(id) ON DELETE CASCADE)");
 
+  await db.exec("CREATE TABLE IF NOT EXISTS analysis_annotations (id INTEGER PRIMARY KEY AUTOINCREMENT, module TEXT NOT NULL, entity_type TEXT NOT NULL, entity_key TEXT NOT NULL, annotation_key TEXT NOT NULL, annotation_value TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(module, entity_type, entity_key, annotation_key))");
+  await db.exec("CREATE INDEX IF NOT EXISTS idx_analysis_annotations_scope ON analysis_annotations(module, entity_type, annotation_key)");
+
   console.log("SQLite database connected and base tables created if not exists");
   console.log("Record tables will be created via migrations");
 };

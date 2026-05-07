@@ -990,6 +990,26 @@ const migrations: Migration[] = [
       DELETE FROM task_center_tasks
       WHERE task_key IN ('finance_daily_close_update', 'finance_secondary_confirmation_scan');
     `
+  },
+  {
+    id: '20260507_001',
+    name: 'Create analysis annotations',
+    sql: `
+      CREATE TABLE IF NOT EXISTS analysis_annotations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        module TEXT NOT NULL,
+        entity_type TEXT NOT NULL,
+        entity_key TEXT NOT NULL,
+        annotation_key TEXT NOT NULL,
+        annotation_value TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(module, entity_type, entity_key, annotation_key)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_analysis_annotations_scope
+      ON analysis_annotations(module, entity_type, annotation_key);
+    `
   }
 ];
 
