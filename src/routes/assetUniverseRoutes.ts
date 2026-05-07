@@ -32,6 +32,54 @@ const autoUpdateState: {
   last_results: []
 };
 
+type DailyCloseProgressEvent = {
+  type: 'start' | 'finish';
+  stage: string;
+  stageLabel: string;
+  index: number;
+  total: number;
+  item: UniverseItem;
+  result?: any;
+};
+
+type DailyCloseUpdateState = {
+  running: boolean;
+  run_id: string | null;
+  phase: string;
+  phase_label: string;
+  total_count: number;
+  processed_count: number;
+  success_count: number;
+  failed_count: number;
+  skipped_count: number;
+  current_symbol: string | null;
+  current_name: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  last_updated_at: string | null;
+  last_message: string;
+  last_results: any[];
+};
+
+const dailyCloseUpdateState: DailyCloseUpdateState = {
+  running: false,
+  run_id: null,
+  phase: 'idle',
+  phase_label: '未运行',
+  total_count: 0,
+  processed_count: 0,
+  success_count: 0,
+  failed_count: 0,
+  skipped_count: 0,
+  current_symbol: null,
+  current_name: null,
+  started_at: null,
+  finished_at: null,
+  last_updated_at: null,
+  last_message: '每日收盘更新未运行',
+  last_results: []
+};
+
 interface UniverseItem {
   id: number;
   symbol: string;
@@ -49,6 +97,9 @@ interface ProcessAssetOptions {
   staleUpdatingMinutes?: number;
   incremental?: boolean;
   lookbackDays?: number;
+  progressStage?: string;
+  progressStageLabel?: string;
+  onProgress?: (event: DailyCloseProgressEvent) => void;
 }
 
 interface ProcessDueAssetsOptions extends ProcessAssetOptions {
@@ -58,6 +109,7 @@ interface ProcessDueAssetsOptions extends ProcessAssetOptions {
   excludeKeys?: Set<string>;
   preferMissingStock?: boolean;
   skipKnownInsufficient?: boolean;
+  onItemsSelected?: (items: UniverseItem[]) => void;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -95,6 +147,71 @@ function parseUniverseLimit(value: any, defaultLimit: number | null = null): num
     return null;
   }
   return Math.floor(numeric);
+}
+
+function getDailyCloseProgressPercent() {
+  if (dailyCloseUpdateState.total_count <= 0) {
+    return dailyCloseUpdateState.running ? 3 : 100;
+  }
+  const raw = (dailyCloseUpdateState.processed_count / dailyCloseUpdateState.total_count) * 100;
+  if (dailyCloseUpdateState.running) return Math.min(99, Math.max(1, Math.round(raw)));
+  return Math.min(100, Math.max(0, Math.round(raw)));
+}
+
+function resetDailyCloseUpdateState(runId: string) {
+  Object.assign(dailyCloseUpdateState, {
+    running: true,
+    run_id: runId,
+    phase: 'preparing',
+    phase_label: '准备更新',
+    total_count: 0,
+    processed_count: 0,
+    success_count: 0,
+    failed_count: 0,
+    skipped_count: 0,
+    current_symbol: null,
+    current_name: null,
+    started_at: new Date().toISOString(),
+    finished_at: null,
+    last_updated_at: new Date().toISOString(),
+    last_message: '正在统计需要更新的标的...',
+    last_results: []
+  });
+}
+
+function applyDailyCloseProgress(event: DailyCloseProgressEvent) {
+  dailyCloseUpdateState.phase = event.stage;
+  dailyCloseUpdateState.phase_label = event.stageLabel;
+  dailyCloseUpdateState.current_symbol = event.item.symbol;
+  dailyCloseUpdateState.current_name = event.item.name || null;
+  dailyCloseUpdateState.last_updated_at = new Date().toISOString();
+
+  if (event.type === 'start') {
+    dailyCloseUpdateState.last_message = `${event.stageLabel}：正在更新 ${event.item.symbol} ${event.item.name || ''}`.trim();
+    return;
+  }
+
+  dailyCloseUpdateState.processed_count += 1;
+  if (event.result?.skipped) dailyCloseUpdateState.skipped_count += 1;
+  else if (event.result?.success) dailyCloseUpdateState.success_count += 1;
+  else dailyCloseUpdateState.failed_count += 1;
+  dailyCloseUpdateState.last_message = `${event.stageLabel}：${event.item.symbol} ${event.result?.message || '处理完成'}`;
+  dailyCloseUpdateState.last_results = [{
+    symbol: event.item.symbol,
+    name: event.item.name,
+    stage: event.stage,
+    stage_label: event.stageLabel,
+    status: event.result?.skipped ? 'skipped' : event.result?.success ? 'success' : 'error',
+    message: event.result?.message || '',
+    at: new Date().toISOString()
+  }, ...dailyCloseUpdateState.last_results].slice(0, 20);
+}
+
+function publicDailyCloseUpdateState() {
+  return {
+    ...dailyCloseUpdateState,
+    percent: getDailyCloseProgressPercent()
+  };
 }
 
 function buildScriptErrorMessage(defaultMessage: string, stdout: string, stderr: string, error?: Error | null) {
@@ -308,19 +425,39 @@ async function persistDailyPrices(db: any, item: UniverseItem, data: any) {
 }
 
 async function processAssetList(db: any, items: UniverseItem[], options: ProcessAssetOptions = {}) {
-  const results = [];
+  const results: any[] = [];
+  const progressStage = options.progressStage || 'asset_update';
+  const progressStageLabel = options.progressStageLabel || '资产更新';
 
   for (let index = 0; index < items.length; index++) {
     const item = items[index];
     const now = new Date();
+    options.onProgress?.({
+      type: 'start',
+      stage: progressStage,
+      stageLabel: progressStageLabel,
+      index,
+      total: items.length,
+      item
+    });
 
     if (!options.forceUpdate && item.last_fetch_at) {
       const lastFetchTime = new Date(item.last_fetch_at).getTime();
       if (Number.isFinite(lastFetchTime) && now.getTime() - lastFetchTime < DEFAULT_MIN_FETCH_INTERVAL_MS) {
-        results.push({
+        const skippedResult = {
           symbol: item.symbol,
           skipped: true,
           message: '距离上次请求不足6小时，跳过以保护数据源频率'
+        };
+        results.push(skippedResult);
+        options.onProgress?.({
+          type: 'finish',
+          stage: progressStage,
+          stageLabel: progressStageLabel,
+          index,
+          total: items.length,
+          item,
+          result: skippedResult
         });
         continue;
       }
@@ -348,7 +485,7 @@ async function processAssetList(db: any, items: UniverseItem[], options: Process
           `update_status = 'success', last_fetch_message = ?, updated_at = ?`,
           [`${fetchModeLabel}：无新增行情，可能停牌或数据源暂未更新`, new Date().toISOString()]
         );
-        results.push({
+        const emptyResult = {
           symbol: item.symbol,
           success: true,
           noNewData: true,
@@ -358,6 +495,16 @@ async function processAssetList(db: any, items: UniverseItem[], options: Process
           fetchMode: fetchStartDate ? 'incremental' : 'full',
           fetchStartDate,
           message: `${fetchModeLabel}：无新增行情，可能停牌或数据源暂未更新`
+        };
+        results.push(emptyResult);
+        options.onProgress?.({
+          type: 'finish',
+          stage: progressStage,
+          stageLabel: progressStageLabel,
+          index,
+          total: items.length,
+          item,
+          result: emptyResult
         });
         continue;
       }
@@ -368,12 +515,22 @@ async function processAssetList(db: any, items: UniverseItem[], options: Process
         `update_status = 'error', last_fetch_message = ?, updated_at = ?`,
         [`${fetchModeLabel}：${data.message || '请求数据源失败'}`, new Date().toISOString()]
       );
-      results.push({
+      const failedResult = {
         symbol: item.symbol,
         success: false,
         fetchMode: fetchStartDate ? 'incremental' : 'full',
         fetchStartDate,
         message: `${fetchModeLabel}：${data.message || '请求数据源失败'}`
+      };
+      results.push(failedResult);
+      options.onProgress?.({
+        type: 'finish',
+        stage: progressStage,
+        stageLabel: progressStageLabel,
+        index,
+        total: items.length,
+        item,
+        result: failedResult
       });
     } else {
       const saved = await persistDailyPrices(db, item, data);
@@ -393,7 +550,7 @@ async function processAssetList(db: any, items: UniverseItem[], options: Process
         ]
       );
       await refreshUniverseStatusForItem(db, item);
-      results.push({
+      const successResult = {
         symbol: item.symbol,
         success: true,
         noNewData: saved.insertedCount === 0,
@@ -401,6 +558,16 @@ async function processAssetList(db: any, items: UniverseItem[], options: Process
         fetchStartDate,
         message: saved.insertedCount === 0 ? `${fetchModeLabel}：无新增行情，可能停牌或当日数据已存在` : `${fetchModeLabel}：已存本地`,
         ...saved
+      };
+      results.push(successResult);
+      options.onProgress?.({
+        type: 'finish',
+        stage: progressStage,
+        stageLabel: progressStageLabel,
+        index,
+        total: items.length,
+        item,
+        result: successResult
       });
     }
 
@@ -503,6 +670,7 @@ async function processDueAssets(options: ProcessDueAssetsOptions) {
     params
   );
 
+  options.onItemsSelected?.(items);
   const results = await processAssetList(db, items, options);
 
   return { processed_count: items.length, results };
@@ -929,7 +1097,22 @@ router.post('/asset-universe/update-one', async (req: Request, res: Response) =>
   }
 });
 
+router.get('/asset-universe/daily-close-update/status', async (_req: Request, res: Response) => {
+  res.json({ success: true, data: publicDailyCloseUpdateState() });
+});
+
 router.post('/asset-universe/daily-close-update', async (req: Request, res: Response) => {
+  if (dailyCloseUpdateState.running) {
+    return res.status(409).json({
+      success: false,
+      message: '每日收盘更新正在运行，请等待当前任务完成',
+      data: publicDailyCloseUpdateState()
+    });
+  }
+
+  const runId = `${Date.now()}`;
+  resetDailyCloseUpdateState(runId);
+
   try {
     const db = await getDb();
     const source = req.body.source || 'tushare';
@@ -962,13 +1145,6 @@ router.post('/asset-universe/daily-close-update', async (req: Request, res: Resp
     );
 
     const activePlanKeys = new Set(activePlanItems.map(item => `${item.symbol}|${item.asset_type}|${item.source}`));
-    const activePlanResults = await processAssetList(db, activePlanItems, {
-      forceUpdate: true,
-      intervalMs,
-      incremental: true,
-      lookbackDays: 10
-    });
-
     const candidateItems: UniverseItem[] = await db.all(
       `SELECT
          MIN(u.id) as id,
@@ -1001,11 +1177,28 @@ router.post('/asset-universe/daily-close-update', async (req: Request, res: Resp
     );
 
     const candidateKeys = new Set([...activePlanKeys, ...candidateItems.map(item => `${item.symbol}|${item.asset_type}|${item.source}`)]);
+    dailyCloseUpdateState.total_count = activePlanItems.length + candidateItems.length;
+    dailyCloseUpdateState.last_updated_at = new Date().toISOString();
+    dailyCloseUpdateState.last_message = `待更新标的已统计：持仓/计划 ${activePlanItems.length} 个，备选池 ${candidateItems.length} 个，正在补全全市场队列...`;
+
+    const activePlanResults = await processAssetList(db, activePlanItems, {
+      forceUpdate: true,
+      intervalMs,
+      incremental: true,
+      lookbackDays: 10,
+      progressStage: 'active_plans',
+      progressStageLabel: '持仓/计划优先',
+      onProgress: applyDailyCloseProgress
+    });
+
     const candidateResults = await processAssetList(db, candidateItems, {
       forceUpdate: true,
       intervalMs,
       incremental: true,
-      lookbackDays: 10
+      lookbackDays: 10,
+      progressStage: 'candidate_pool',
+      progressStageLabel: '备选池优先',
+      onProgress: applyDailyCloseProgress
     });
     const universeResult = await processDueAssets({
       universeType: 'all',
@@ -1015,12 +1208,28 @@ router.post('/asset-universe/daily-close-update', async (req: Request, res: Resp
       intervalMs,
       incremental: true,
       lookbackDays: 10,
-      excludeKeys: candidateKeys
+      excludeKeys: candidateKeys,
+      progressStage: 'full_universe',
+      progressStageLabel: '全市场补齐',
+      onProgress: applyDailyCloseProgress,
+      onItemsSelected: (items) => {
+        dailyCloseUpdateState.total_count += items.length;
+        dailyCloseUpdateState.phase = 'full_universe';
+        dailyCloseUpdateState.phase_label = '全市场补齐';
+        dailyCloseUpdateState.last_updated_at = new Date().toISOString();
+        dailyCloseUpdateState.last_message = `全市场补齐队列 ${items.length} 个，总计 ${dailyCloseUpdateState.total_count} 个标的。`;
+      }
     });
 
     const allResults = [...activePlanResults, ...candidateResults, ...universeResult.results];
     const successCount = allResults.filter((item: any) => item.success).length;
     const failedCount = allResults.filter((item: any) => !item.success && !item.skipped).length;
+    dailyCloseUpdateState.running = false;
+    dailyCloseUpdateState.phase = 'completed';
+    dailyCloseUpdateState.phase_label = '行情更新完成';
+    dailyCloseUpdateState.finished_at = new Date().toISOString();
+    dailyCloseUpdateState.last_updated_at = dailyCloseUpdateState.finished_at;
+    dailyCloseUpdateState.last_message = `每日收盘行情更新完成：成功 ${successCount} 个，失败 ${failedCount} 个，准备刷新备选池。`;
 
     res.json({
       success: true,
@@ -1036,6 +1245,12 @@ router.post('/asset-universe/daily-close-update', async (req: Request, res: Resp
       }
     });
   } catch (error) {
+    dailyCloseUpdateState.running = false;
+    dailyCloseUpdateState.phase = 'error';
+    dailyCloseUpdateState.phase_label = '更新失败';
+    dailyCloseUpdateState.finished_at = new Date().toISOString();
+    dailyCloseUpdateState.last_updated_at = dailyCloseUpdateState.finished_at;
+    dailyCloseUpdateState.last_message = `每日收盘行情更新失败: ${(error as Error).message}`;
     res.status(500).json({ success: false, message: `每日收盘行情更新失败: ${(error as Error).message}` });
   }
 });
