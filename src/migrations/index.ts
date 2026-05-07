@@ -1035,6 +1035,24 @@ const migrations: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_audit_logs_module
       ON audit_logs(module, action, status);
     `
+  },
+  {
+    id: '20260507_003',
+    name: 'Create user preferences',
+    sql: `
+      CREATE TABLE IF NOT EXISTS user_preferences (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_key TEXT NOT NULL DEFAULT 'default',
+        preference_key TEXT NOT NULL,
+        preference_value TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(user_key, preference_key)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_user_preferences_user_key
+      ON user_preferences(user_key, preference_key);
+    `
   }
 ];
 
