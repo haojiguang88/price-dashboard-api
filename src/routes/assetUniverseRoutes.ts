@@ -88,6 +88,7 @@ interface UniverseItem {
   universe_type: string;
   source: string;
   last_fetch_at?: string;
+  last_trade_date?: string | null;
   update_status?: string;
 }
 
@@ -97,6 +98,8 @@ interface ProcessAssetOptions {
   staleUpdatingMinutes?: number;
   incremental?: boolean;
   lookbackDays?: number;
+  targetTradeDate?: string | null;
+  skipUpToDate?: boolean;
   progressStage?: string;
   progressStageLabel?: string;
   onProgress?: (event: DailyCloseProgressEvent) => void;
@@ -244,6 +247,48 @@ async function resolveIncrementalStartDate(db: any, item: UniverseItem, lookback
   );
   const lastTradeDate = latest?.last_trade_date || null;
   return shiftIsoDate(lastTradeDate, -Math.max(lookbackDays, 0));
+}
+
+async function resolveItemLatestTradeDate(db: any, item: UniverseItem) {
+  if (item.last_trade_date) return item.last_trade_date;
+  const latest = await db.get(
+    `SELECT MAX(trade_date) as last_trade_date
+     FROM financial_daily_prices
+     WHERE symbol = ?
+       AND asset_type = ?
+       AND source = ?`,
+    [item.symbol, item.asset_type, item.source]
+  );
+  return latest?.last_trade_date || null;
+}
+
+async function resolveDailyCloseTargetTradeDate(db: any, source: string) {
+  const latestIndex = await db.get(
+    `SELECT MAX(trade_date) as trade_date
+     FROM financial_daily_prices
+     WHERE asset_type = 'index'
+       AND source = ?
+       AND symbol IN ('000300', '000905', '399006', '000688')`,
+    [source]
+  );
+  if (latestIndex?.trade_date) return latestIndex.trade_date;
+
+  const latestRegime = await db.get(
+    `SELECT MAX(trade_date) as trade_date
+     FROM financial_market_regime
+     WHERE symbol = '000300'`
+  );
+  return latestRegime?.trade_date || null;
+}
+
+function prioritizeItemsByLocalFreshness(items: UniverseItem[], targetTradeDate?: string | null) {
+  if (!targetTradeDate) return items;
+  return [...items].sort((left, right) => {
+    const leftMissing = !left.last_trade_date || left.last_trade_date < targetTradeDate;
+    const rightMissing = !right.last_trade_date || right.last_trade_date < targetTradeDate;
+    if (leftMissing !== rightMissing) return leftMissing ? -1 : 1;
+    return left.symbol.localeCompare(right.symbol);
+  });
 }
 
 async function refreshUniverseStatus(db: any, id?: number) {
@@ -441,6 +486,38 @@ async function processAssetList(db: any, items: UniverseItem[], options: Process
       item
     });
 
+    if (options.skipUpToDate && options.targetTradeDate) {
+      const localLatestTradeDate = await resolveItemLatestTradeDate(db, item);
+      if (localLatestTradeDate && localLatestTradeDate >= options.targetTradeDate) {
+        const skippedResult = {
+          symbol: item.symbol,
+          success: true,
+          skipped: true,
+          noRequest: true,
+          latestTradeDate: localLatestTradeDate,
+          targetTradeDate: options.targetTradeDate,
+          message: `本地已到最新交易日 ${localLatestTradeDate}，跳过请求`
+        };
+        await updateUniverseRows(
+          db,
+          item,
+          `update_status = 'success', last_fetch_message = ?, updated_at = ?`,
+          [skippedResult.message, new Date().toISOString()]
+        );
+        results.push(skippedResult);
+        options.onProgress?.({
+          type: 'finish',
+          stage: progressStage,
+          stageLabel: progressStageLabel,
+          index,
+          total: items.length,
+          item,
+          result: skippedResult
+        });
+        continue;
+      }
+    }
+
     if (!options.forceUpdate && item.last_fetch_at) {
       const lastFetchTime = new Date(item.last_fetch_at).getTime();
       if (Number.isFinite(lastFetchTime) && now.getTime() - lastFetchTime < DEFAULT_MIN_FETCH_INTERVAL_MS) {
@@ -582,7 +659,7 @@ async function processAssetList(db: any, items: UniverseItem[], options: Process
 async function processDueAssets(options: ProcessDueAssetsOptions) {
   const db = await getDb();
   const params: any[] = [options.source];
-  let where = 'WHERE enabled = 1 AND source = ?';
+  let where = 'WHERE u.enabled = 1 AND u.source = ?';
 
   await db.run(
     `UPDATE financial_asset_universe
@@ -595,32 +672,37 @@ async function processDueAssets(options: ProcessDueAssetsOptions) {
   );
 
   if (options.universeType && options.universeType !== 'all') {
-    where += ' AND universe_type = ?';
+    where += ' AND u.universe_type = ?';
     params.push(options.universeType);
   }
 
   if (!options.forceUpdate) {
-    where += ` AND (last_fetch_at IS NULL OR datetime(last_fetch_at) <= datetime('now', '-6 hours'))`;
+    where += ` AND (u.last_fetch_at IS NULL OR datetime(u.last_fetch_at) <= datetime('now', '-6 hours'))`;
   }
 
   if (options.skipKnownInsufficient) {
     where += `
       AND NOT (
-        local_data_ready = 0
-        AND update_status = 'success'
-        AND COALESCE(total_count, 0) > 0
-        AND COALESCE(total_count, 0) < 120
+        u.local_data_ready = 0
+        AND u.update_status = 'success'
+        AND COALESCE(u.total_count, 0) > 0
+        AND COALESCE(u.total_count, 0) < 120
       )`;
   }
 
   if (options.excludeKeys?.size) {
     const excluded = Array.from(options.excludeKeys);
-    where += ` AND (symbol || '|' || asset_type || '|' || source) NOT IN (${excluded.map(() => '?').join(',')})`;
+    where += ` AND (u.symbol || '|' || u.asset_type || '|' || u.source) NOT IN (${excluded.map(() => '?').join(',')})`;
     params.push(...excluded);
   }
 
+  const freshnessOrder = options.targetTradeDate
+    ? `CASE WHEN COALESCE(last_trade_date, '') < ? THEN 0 ELSE 1 END,`
+    : '';
+  const orderParams = options.targetTradeDate ? [options.targetTradeDate] : [];
   const orderBy = options.preferMissingStock
     ? `ORDER BY
+       ${freshnessOrder}
        CASE WHEN local_data_ready = 1 THEN 1 ELSE 0 END,
        CASE WHEN asset_type = 'stock' THEN 0 WHEN asset_type = 'etf' THEN 1 ELSE 2 END,
        CASE WHEN COALESCE(total_count, 0) = 0 THEN 0 ELSE 1 END,
@@ -629,6 +711,7 @@ async function processDueAssets(options: ProcessDueAssetsOptions) {
        COALESCE(total_count, 0) ASC,
        symbol`
     : `ORDER BY
+       ${freshnessOrder}
        CASE WHEN local_data_ready = 1 THEN 1 ELSE 0 END,
        CASE WHEN update_status = 'error' THEN 1 ELSE 0 END,
        COALESCE(total_count, 0) DESC,
@@ -639,35 +722,46 @@ async function processDueAssets(options: ProcessDueAssetsOptions) {
     ? Math.floor(Number(options.limit))
     : null;
   const limitSql = fetchLimit ? 'LIMIT ?' : '';
-  if (fetchLimit) params.push(fetchLimit);
+  const queryParams = [...params, ...orderParams];
+  if (fetchLimit) queryParams.push(fetchLimit);
 
   const items: UniverseItem[] = await db.all(
-    `WITH grouped AS (
+    `WITH daily_latest AS (
+       SELECT symbol, asset_type, source, MAX(trade_date) as last_trade_date
+       FROM financial_daily_prices
+       GROUP BY symbol, asset_type, source
+     ),
+     grouped AS (
        SELECT
-         MIN(id) as id,
-         symbol,
-         MAX(name) as name,
-         asset_type,
-         GROUP_CONCAT(DISTINCT universe_type) as universe_type,
-         source,
-         MAX(last_fetch_at) as last_fetch_at,
+         MIN(u.id) as id,
+         u.symbol,
+         MAX(u.name) as name,
+         u.asset_type,
+         GROUP_CONCAT(DISTINCT u.universe_type) as universe_type,
+         u.source,
+         MAX(u.last_fetch_at) as last_fetch_at,
          CASE
-           WHEN SUM(CASE WHEN update_status = 'updating' THEN 1 ELSE 0 END) > 0 THEN 'updating'
-           WHEN SUM(CASE WHEN update_status = 'error' THEN 1 ELSE 0 END) > 0 THEN 'error'
-           WHEN SUM(CASE WHEN update_status = 'success' THEN 1 ELSE 0 END) > 0 THEN 'success'
+           WHEN SUM(CASE WHEN u.update_status = 'updating' THEN 1 ELSE 0 END) > 0 THEN 'updating'
+           WHEN SUM(CASE WHEN u.update_status = 'error' THEN 1 ELSE 0 END) > 0 THEN 'error'
+           WHEN SUM(CASE WHEN u.update_status = 'success' THEN 1 ELSE 0 END) > 0 THEN 'success'
            ELSE 'pending'
          END as update_status,
-         MAX(total_count) as total_count,
-         MAX(local_data_ready) as local_data_ready
-       FROM financial_asset_universe
+         MAX(u.total_count) as total_count,
+         MAX(u.local_data_ready) as local_data_ready,
+         COALESCE(MAX(dl.last_trade_date), MAX(u.last_trade_date)) as last_trade_date
+       FROM financial_asset_universe u
+       LEFT JOIN daily_latest dl
+         ON dl.symbol = u.symbol
+        AND dl.asset_type = u.asset_type
+        AND dl.source = u.source
        ${where}
-       GROUP BY symbol, asset_type, source
+       GROUP BY u.symbol, u.asset_type, u.source
      )
      SELECT *
      FROM grouped
      ${orderBy}
      ${limitSql}`,
-    params
+    queryParams
   );
 
   options.onItemsSelected?.(items);
@@ -681,6 +775,7 @@ async function runFullUniverseDailyCloseUpdate(params: {
   universeLimit: number | null;
   intervalMs: number;
   excludeKeys: Set<string>;
+  targetTradeDate: string | null;
 }) {
   try {
     dailyCloseUpdateState.phase = 'full_universe';
@@ -696,6 +791,8 @@ async function runFullUniverseDailyCloseUpdate(params: {
       intervalMs: params.intervalMs,
       incremental: true,
       lookbackDays: 10,
+      targetTradeDate: params.targetTradeDate,
+      skipUpToDate: true,
       excludeKeys: params.excludeKeys,
       progressStage: 'full_universe',
       progressStageLabel: '全市场补齐',
@@ -1171,8 +1268,9 @@ router.post('/asset-universe/daily-close-update', async (req: Request, res: Resp
     const candidateLimit = Math.max(Math.min(Number(req.body.candidate_limit || 20), 100), 1);
     const universeLimit = parseUniverseLimit(req.body.universe_limit, null);
     const intervalMs = Math.max(Number(req.body.interval_ms || 1500), 800);
+    const targetTradeDate = await resolveDailyCloseTargetTradeDate(db, source);
 
-    const activePlanItems: UniverseItem[] = await db.all(
+    const rawActivePlanItems: UniverseItem[] = await db.all(
       `SELECT
          COALESCE(MIN(u.id), 0) as id,
          p.symbol,
@@ -1180,7 +1278,8 @@ router.post('/asset-universe/daily-close-update', async (req: Request, res: Resp
          p.asset_type,
          COALESCE(MAX(u.universe_type), 'financial_position') as universe_type,
          p.source,
-         MAX(u.last_fetch_at) as last_fetch_at
+         MAX(u.last_fetch_at) as last_fetch_at,
+         MAX(u.last_trade_date) as last_trade_date
        FROM financial_trade_plans p
        LEFT JOIN financial_asset_universe u
          ON u.symbol = p.symbol
@@ -1191,12 +1290,13 @@ router.post('/asset-universe/daily-close-update', async (req: Request, res: Resp
          AND (p.is_bought = 1 OR p.status IN ('active', 'paper_tracking'))
        GROUP BY p.symbol, p.asset_type, p.source
        ORDER BY MAX(p.updated_at) DESC, p.symbol
-       LIMIT ?`,
+      LIMIT ?`,
       [source, activePlanLimit]
     );
+    const activePlanItems = prioritizeItemsByLocalFreshness(rawActivePlanItems, targetTradeDate);
 
     const activePlanKeys = new Set(activePlanItems.map(item => `${item.symbol}|${item.asset_type}|${item.source}`));
-    const candidateItems: UniverseItem[] = await db.all(
+    const rawCandidateItems: UniverseItem[] = await db.all(
       `SELECT
          MIN(u.id) as id,
          c.symbol,
@@ -1204,7 +1304,8 @@ router.post('/asset-universe/daily-close-update', async (req: Request, res: Resp
          c.asset_type,
          COALESCE(MAX(u.universe_type), 'candidate_pool') as universe_type,
          c.source,
-         MAX(u.last_fetch_at) as last_fetch_at
+         MAX(u.last_fetch_at) as last_fetch_at,
+         MAX(u.last_trade_date) as last_trade_date
        FROM financial_candidate_pool c
        JOIN financial_asset_universe u
          ON u.symbol = c.symbol
@@ -1223,20 +1324,23 @@ router.post('/asset-universe/daily-close-update', async (req: Request, res: Resp
          )
        GROUP BY c.symbol, c.asset_type, c.source
        ORDER BY MAX(c.priority = 'high') DESC, MAX(c.last_checked_at) DESC, c.symbol
-       LIMIT ?`,
+      LIMIT ?`,
       [source, candidateLimit]
     );
+    const candidateItems = prioritizeItemsByLocalFreshness(rawCandidateItems, targetTradeDate);
 
     const candidateKeys = new Set([...activePlanKeys, ...candidateItems.map(item => `${item.symbol}|${item.asset_type}|${item.source}`)]);
     dailyCloseUpdateState.total_count = activePlanItems.length + candidateItems.length;
     dailyCloseUpdateState.last_updated_at = new Date().toISOString();
-    dailyCloseUpdateState.last_message = `待更新标的已统计：持仓/计划 ${activePlanItems.length} 个，备选池 ${candidateItems.length} 个，正在补全全市场队列...`;
+    dailyCloseUpdateState.last_message = `待更新标的已统计：持仓/计划 ${activePlanItems.length} 个，备选池 ${candidateItems.length} 个${targetTradeDate ? `，目标交易日 ${targetTradeDate}` : ''}，正在补全全市场队列...`;
 
     const activePlanResults = await processAssetList(db, activePlanItems, {
       forceUpdate: true,
       intervalMs,
       incremental: true,
       lookbackDays: 10,
+      targetTradeDate,
+      skipUpToDate: true,
       progressStage: 'active_plans',
       progressStageLabel: '持仓/计划优先',
       onProgress: applyDailyCloseProgress
@@ -1247,6 +1351,8 @@ router.post('/asset-universe/daily-close-update', async (req: Request, res: Resp
       intervalMs,
       incremental: true,
       lookbackDays: 10,
+      targetTradeDate,
+      skipUpToDate: true,
       progressStage: 'candidate_pool',
       progressStageLabel: '备选池优先',
       onProgress: applyDailyCloseProgress
@@ -1254,7 +1360,8 @@ router.post('/asset-universe/daily-close-update', async (req: Request, res: Resp
 
     if (universeLimit === null) {
       const priorityResults = [...activePlanResults, ...candidateResults];
-      const prioritySuccessCount = priorityResults.filter((item: any) => item.success).length;
+      const prioritySuccessCount = priorityResults.filter((item: any) => item.success && !item.skipped).length;
+      const prioritySkippedCount = priorityResults.filter((item: any) => item.skipped).length;
       const priorityFailedCount = priorityResults.filter((item: any) => !item.success && !item.skipped).length;
       dailyCloseUpdateState.phase = 'full_universe_queued';
       dailyCloseUpdateState.phase_label = '全市场补齐排队';
@@ -1265,18 +1372,21 @@ router.post('/asset-universe/daily-close-update', async (req: Request, res: Resp
         source,
         universeLimit,
         intervalMs,
-        excludeKeys: candidateKeys
+        excludeKeys: candidateKeys,
+        targetTradeDate
       });
 
       return res.json({
         success: true,
-        message: `每日收盘优先更新完成：持仓计划 ${activePlanResults.length} 个，备选池 ${candidateResults.length} 个，成功 ${prioritySuccessCount} 个，失败 ${priorityFailedCount} 个；全市场补齐已在后台继续`,
+        message: `每日收盘优先更新完成：持仓计划 ${activePlanResults.length} 个，备选池 ${candidateResults.length} 个，成功 ${prioritySuccessCount} 个，跳过 ${prioritySkippedCount} 个，失败 ${priorityFailedCount} 个；全市场补齐已在后台继续`,
         data: {
           active_plan_count: activePlanResults.length,
           candidate_count: candidateResults.length,
           universe_count: null,
           universe_limit: 'all',
+          target_trade_date: targetTradeDate,
           success_count: prioritySuccessCount,
+          skipped_count: prioritySkippedCount,
           failed_count: priorityFailedCount,
           background_full_universe: true,
           progress: publicDailyCloseUpdateState(),
@@ -1293,6 +1403,8 @@ router.post('/asset-universe/daily-close-update', async (req: Request, res: Resp
       intervalMs,
       incremental: true,
       lookbackDays: 10,
+      targetTradeDate,
+      skipUpToDate: true,
       excludeKeys: candidateKeys,
       progressStage: 'full_universe',
       progressStageLabel: '全市场补齐',
@@ -1307,24 +1419,27 @@ router.post('/asset-universe/daily-close-update', async (req: Request, res: Resp
     });
 
     const allResults = [...activePlanResults, ...candidateResults, ...universeResult.results];
-    const successCount = allResults.filter((item: any) => item.success).length;
+    const successCount = allResults.filter((item: any) => item.success && !item.skipped).length;
+    const skippedCount = allResults.filter((item: any) => item.skipped).length;
     const failedCount = allResults.filter((item: any) => !item.success && !item.skipped).length;
     dailyCloseUpdateState.running = false;
     dailyCloseUpdateState.phase = 'completed';
     dailyCloseUpdateState.phase_label = '行情更新完成';
     dailyCloseUpdateState.finished_at = new Date().toISOString();
     dailyCloseUpdateState.last_updated_at = dailyCloseUpdateState.finished_at;
-    dailyCloseUpdateState.last_message = `每日收盘行情更新完成：成功 ${successCount} 个，失败 ${failedCount} 个，准备刷新备选池。`;
+    dailyCloseUpdateState.last_message = `每日收盘行情更新完成：成功 ${successCount} 个，跳过 ${skippedCount} 个，失败 ${failedCount} 个，准备刷新备选池。`;
 
     res.json({
       success: true,
-      message: `每日收盘行情更新完成：优先增量更新持仓计划 ${activePlanResults.length} 个，备选池 ${candidateResults.length} 个，全市场增量补充${universeLimit === null ? '（全部标的）' : ''} ${universeResult.processed_count} 个，成功 ${successCount} 个，失败 ${failedCount} 个`,
+      message: `每日收盘行情更新完成：优先增量更新持仓计划 ${activePlanResults.length} 个，备选池 ${candidateResults.length} 个，全市场增量补充${universeLimit === null ? '（全部标的）' : ''} ${universeResult.processed_count} 个，成功 ${successCount} 个，跳过 ${skippedCount} 个，失败 ${failedCount} 个`,
       data: {
         active_plan_count: activePlanResults.length,
         candidate_count: candidateResults.length,
         universe_count: universeResult.processed_count,
         universe_limit: universeLimit === null ? 'all' : universeLimit,
+        target_trade_date: targetTradeDate,
         success_count: successCount,
+        skipped_count: skippedCount,
         failed_count: failedCount,
         results: allResults
       }
