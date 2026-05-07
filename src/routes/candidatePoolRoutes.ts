@@ -19,6 +19,7 @@ const CANDIDATE_POOL_ASSET_TYPES = ['stock', 'etf'];
 const STOCK_AVG20_AMOUNT_MIN_YUAN = 100_000_000;
 const STOCK_MIN5_AMOUNT_MIN_YUAN = 30_000_000;
 const STOCK_CIRC_MARKET_CAP_MIN_YUAN = 5_000_000_000;
+const ETF_HARD_BLOCK_TREND_PHASES = new Set(['SURGE', 'REBOUND', 'SLOW_BLEED', 'CRASH_DROP']);
 const trainingRoot = process.env.MODEL_TRAINING_ROOT || '/Volumes/7100/model-training';
 const trainingPython = process.env.MODEL_TRAINING_PYTHON || path.join(trainingRoot, 'venv', 'bin', 'python');
 let candidateReviewSchemaReady = false;
@@ -265,7 +266,6 @@ function buildStoredGateTrace(item: any) {
   const safeZone = item.safe_zone_status === 'SAFE_ZONE';
   const trendConfirmed = Boolean(item.trend_phase_code && item.trend_phase_code !== 'UNKNOWN');
   const hasForbidden = Boolean(item.forbidden_reason);
-  const hasDowngrade = Boolean(item.downgrade_reason);
   const priorityScore = Number(item.priority_score || 0);
 
   return buildGateTrace([
@@ -312,9 +312,17 @@ function buildStoredGateTrace(item: any) {
     isEtf
       ? makeGate(
           'trend_phase_gate',
-          trendConfirmed ? 'passed' : 'failed',
-          trendConfirmed ? `ETF走势阶段已确认：${getTrendPhaseLabel(item.trend_phase_code)}。` : 'ETF走势阶段未确认，先压出备选池。',
-          !trendConfirmed
+          trendConfirmed
+            ? ETF_HARD_BLOCK_TREND_PHASES.has(item.trend_phase_code)
+              ? 'failed'
+              : 'passed'
+            : 'not_applicable',
+          trendConfirmed
+            ? ETF_HARD_BLOCK_TREND_PHASES.has(item.trend_phase_code)
+              ? `ETF走势阶段为${getTrendPhaseLabel(item.trend_phase_code)}，不进入权益主升备选池。`
+              : `ETF走势阶段已确认：${getTrendPhaseLabel(item.trend_phase_code)}。`
+            : 'ETF走势阶段未确认，仅用于优先级降权和复核提示，不再一票否决。',
+          Boolean(trendConfirmed && ETF_HARD_BLOCK_TREND_PHASES.has(item.trend_phase_code))
         )
       : makeGate(
           'trend_phase_gate',
@@ -334,9 +342,9 @@ function buildStoredGateTrace(item: any) {
     isEtf
       ? makeGate(
           'risk_downgrade_gate',
-          hasDowngrade ? 'failed' : 'passed',
-          item.downgrade_reason ? `ETF存在降级项：${item.downgrade_reason}` : 'ETF未命中降级项。',
-          hasDowngrade
+          'passed',
+          item.downgrade_reason ? `ETF存在降级项：${item.downgrade_reason}；仅降权和提示复核，不作为入池硬阻断。` : 'ETF未命中降级项。',
+          false
         )
       : makeGate(
           'risk_downgrade_gate',
@@ -632,18 +640,11 @@ async function calculateStockTradeQualification(
 function getEtfGateReason(
   assetType: string,
   route: EtfStrategyRoute | null | undefined,
-  trendPhaseCode: string | undefined,
   priorityResult: CandidatePriorityResult
 ): string | null {
   if (assetType !== 'etf') return null;
   if (route && !route.current_pool_applicable) {
     return null;
-  }
-  if (!trendPhaseCode || trendPhaseCode === 'UNKNOWN') {
-    return 'ETF走势阶段未确认，先压出备选池。';
-  }
-  if (priorityResult.downgrade_reason) {
-    return `ETF存在降级项：${priorityResult.downgrade_reason}`;
   }
   if (priorityResult.priority_score < 70) {
     return `ETF优先分 ${priorityResult.priority_score} 低于入池阈值70。`;
@@ -1581,7 +1582,6 @@ async function evaluateCandidate(
   const etfGateReason = getEtfGateReason(
     assetType,
     etfRoute,
-    trendPhase?.trend_phase_code,
     priorityResult
   );
   const etfPreGateReason = etfPreGate?.forbidden_reason
@@ -1654,11 +1654,17 @@ async function evaluateCandidate(
     assetType === 'etf'
       ? makeGate(
           'trend_phase_gate',
-          trendPhase?.trend_phase_code && trendPhase.trend_phase_code !== 'UNKNOWN' ? 'passed' : 'failed',
-          trendPhase?.trend_phase_code && trendPhase.trend_phase_code !== 'UNKNOWN'
-            ? `ETF走势阶段已确认：${getTrendPhaseLabel(trendPhase.trend_phase_code)}。`
-            : 'ETF走势阶段未确认，先压出备选池。',
           !trendPhase?.trend_phase_code || trendPhase.trend_phase_code === 'UNKNOWN'
+            ? 'not_applicable'
+            : ETF_HARD_BLOCK_TREND_PHASES.has(trendPhase.trend_phase_code)
+              ? 'failed'
+              : 'passed',
+          !trendPhase?.trend_phase_code || trendPhase.trend_phase_code === 'UNKNOWN'
+            ? 'ETF走势阶段未确认，仅用于优先级降权和复核提示，不再一票否决。'
+            : ETF_HARD_BLOCK_TREND_PHASES.has(trendPhase.trend_phase_code)
+              ? `ETF走势阶段为${getTrendPhaseLabel(trendPhase.trend_phase_code)}，不进入权益主升备选池。`
+              : `ETF走势阶段已确认：${getTrendPhaseLabel(trendPhase.trend_phase_code)}。`,
+          Boolean(trendPhase?.trend_phase_code && ETF_HARD_BLOCK_TREND_PHASES.has(trendPhase.trend_phase_code))
         )
       : makeGate(
           'trend_phase_gate',
@@ -1685,9 +1691,9 @@ async function evaluateCandidate(
     assetType === 'etf'
       ? makeGate(
           'risk_downgrade_gate',
-          priorityResult.downgrade_reason ? 'failed' : 'passed',
-          priorityResult.downgrade_reason ? `ETF存在降级项：${priorityResult.downgrade_reason}` : 'ETF未命中降级项。',
-          Boolean(priorityResult.downgrade_reason)
+          'passed',
+          priorityResult.downgrade_reason ? `ETF存在降级项：${priorityResult.downgrade_reason}；仅降权和提示复核，不作为入池硬阻断。` : 'ETF未命中降级项。',
+          false
         )
       : makeGate(
           'risk_downgrade_gate',
