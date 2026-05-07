@@ -1791,6 +1791,13 @@ router.get('/entry-trigger-observations', async (req: Request, res: Response) =>
         }
         return new Date(b.updated_at || b.created_at || 0).getTime() - new Date(a.updated_at || a.created_at || 0).getTime();
       });
+      const seen = new Set<string>();
+      items = items.filter((item: any) => {
+        const key = `${item.symbol}|${item.asset_type}|${item.source}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
       items = items.slice(0, requestedLimit);
     }
 

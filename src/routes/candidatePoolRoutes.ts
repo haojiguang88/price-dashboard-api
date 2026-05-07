@@ -651,7 +651,7 @@ function getEtfGateReason(
   return null;
 }
 
-function runCandidateScoreWorker(limit: number): Promise<Record<string, any>> {
+function runCandidateScoreWorker(limit: number, poolStatus: 'active' | 'expired' | 'all' = 'active'): Promise<Record<string, any>> {
   return new Promise((resolve, reject) => {
     const dbPath = process.env.DB_PATH || path.join(process.cwd(), 'db', 'price_dashboard_dev.db');
     const scriptPath = path.join(process.cwd(), 'scripts', 'model_training', 'score_candidate_pool.py');
@@ -659,6 +659,7 @@ function runCandidateScoreWorker(limit: number): Promise<Record<string, any>> {
       scriptPath,
       '--db', dbPath,
       '--rule-version', CANDIDATE_RULE_VERSION,
+      '--pool-status', poolStatus,
       '--limit', String(limit)
     ], {
       cwd: process.cwd(),
@@ -1881,9 +1882,9 @@ router.get('/candidate-pool', async (req: Request, res: Response) => {
       params
     );
 
-    if (includeModel && status === 'active') {
+    if (includeModel && ['active', 'expired', 'all'].includes(status)) {
       try {
-        const scoreMap = await runCandidateScoreWorker(limit);
+        const scoreMap = await runCandidateScoreWorker(limit, status === 'all' ? 'all' : status as 'active' | 'expired');
         items = items.map((item: any) => {
           const score = scoreMap[`${item.symbol}|${item.asset_type}|${item.source}`];
           return {

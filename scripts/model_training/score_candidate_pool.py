@@ -16,6 +16,7 @@ def main():
     parser.add_argument("--rule-version", default="candidate_pool_v1")
     parser.add_argument("--domain", choices=["stock", "etf"])
     parser.add_argument("--model-key")
+    parser.add_argument("--pool-status", choices=["active", "expired", "all"], default="active")
     parser.add_argument("--limit", type=int, default=500)
     args = parser.parse_args()
 
@@ -24,6 +25,10 @@ def main():
     try:
         params = [args.rule_version]
         domain_filter = ""
+        status_filter = ""
+        if args.pool_status != "all":
+            status_filter = " AND pool_status = ?"
+            params.append(args.pool_status)
         if args.domain:
             domain_filter = " AND asset_type = ?"
             params.append(args.domain)
@@ -32,8 +37,8 @@ def main():
             f"""
             SELECT symbol, name, asset_type, source
             FROM financial_candidate_pool
-            WHERE pool_status = 'active'
-              AND rule_version = ?
+            WHERE rule_version = ?
+              {status_filter}
               {domain_filter}
             ORDER BY priority_score DESC, last_checked_at DESC
             LIMIT ?
