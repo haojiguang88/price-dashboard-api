@@ -53,6 +53,15 @@ interface RecentRiskProfile {
 }
 
 interface StockTradeQualification {
+  data_freshness: {
+    status: GateStatus;
+    blocking: boolean;
+    reason: string;
+    forbidden_reason: string | null;
+    note: string;
+    latest_trade_date: string | null;
+    market_trade_date: string | null;
+  };
   liquidity: {
     passed: boolean;
     reason: string;
@@ -120,6 +129,7 @@ interface OpportunityTypeTag {
 const CANDIDATE_GATE_DEFINITIONS = [
   { key: 'asset_applicability', label: '资产适用性' },
   { key: 'data_ready', label: '数据充足' },
+  { key: 'data_freshness_gate', label: '日线同步' },
   { key: 'special_treatment', label: 'ST/退市过滤' },
   { key: 'liquidity_gate', label: '流动性' },
   { key: 'market_cap_gate', label: '市值/流通市值' },
@@ -276,6 +286,9 @@ function buildStoredGateTrace(item: any) {
       !isSupportedAsset
     ),
     makeGate('data_ready', 'passed', '该记录已进入备选池，历史日线已满足入池时的数据要求。'),
+    assetType === 'stock'
+      ? makeGate('data_freshness_gate', 'not_applicable', '历史入池记录未保存日线同步明细，等待下次扫描按新规则重算。')
+      : makeGate('data_freshness_gate', 'not_applicable', 'ETF日线同步由ETF流程单独复核。'),
     makeGate(
       'special_treatment',
       isSpecialTreatmentName(item.name) ? 'failed' : 'passed',
@@ -476,6 +489,32 @@ function getLimitLikeThreshold(symbol: string): number {
   return 0.095;
 }
 
+function calculateStockDataFreshnessGate(
+  prices: DailyPrice[],
+  latestMarketDate?: string | null
+): StockTradeQualification['data_freshness'] {
+  const latest = prices[prices.length - 1];
+  const latestTradeDate = latest?.trade_date || null;
+  const marketTradeDate = latestMarketDate || null;
+  const stale = Boolean(marketTradeDate && latestTradeDate && latestTradeDate < marketTradeDate);
+  const note = marketTradeDate
+    ? `本地最新 ${latestTradeDate || '--'}，市场最新交易日 ${marketTradeDate}。`
+    : `本地最新 ${latestTradeDate || '--'}，市场最新交易日未确认。`;
+  const reason = stale
+    ? `本地日线没有同步到市场最新交易日。${note}节假日没有交易数据，不需要补；只需要补齐缺失的实际交易日。`
+    : `${note}日线同步满足当前扫描要求。`;
+
+  return {
+    status: stale ? 'failed' : 'passed',
+    blocking: stale,
+    reason,
+    forbidden_reason: stale ? reason : null,
+    note,
+    latest_trade_date: latestTradeDate,
+    market_trade_date: marketTradeDate
+  };
+}
+
 function calculateStockLiquidityGate(prices: DailyPrice[], source: string): StockTradeQualification['liquidity'] {
   const last20 = prices.slice(-20);
   const last5 = prices.slice(-5);
@@ -551,10 +590,8 @@ function calculateStockMarketCapGate(snapshot: any): StockTradeQualification['ma
 
 function calculateStockExtremeTradeGate(
   prices: DailyPrice[],
-  symbol: string,
-  latestMarketDate?: string | null
+  symbol: string
 ): StockTradeQualification['extreme_trade'] {
-  const latest = prices[prices.length - 1];
   const last10 = prices.slice(-11);
   const threshold = getLimitLikeThreshold(symbol);
   const failures: string[] = [];
@@ -562,10 +599,6 @@ function calculateStockExtremeTradeGate(
   let oneLineBoardCount = 0;
   let maxConsecutiveLimitLike = 0;
   let currentConsecutiveLimitLike = 0;
-
-  if (latestMarketDate && latest?.trade_date && latest.trade_date < latestMarketDate) {
-    failures.push(`最新日线停留在 ${latest.trade_date}，市场最新交易日为 ${latestMarketDate}，疑似停牌或数据断档`);
-  }
 
   for (let index = 1; index < last10.length; index += 1) {
     const previous = last10[index - 1];
@@ -618,17 +651,20 @@ async function calculateStockTradeQualification(
     [source]
   );
   const marketCapSnapshot = await getStockMarketCapSnapshot(db, symbol, source);
+  const dataFreshness = calculateStockDataFreshnessGate(prices, latestMarket?.trade_date || null);
   const liquidity = calculateStockLiquidityGate(prices, source);
   const marketCap = calculateStockMarketCapGate(marketCapSnapshot);
-  const extremeTrade = calculateStockExtremeTradeGate(prices, symbol, latestMarket?.trade_date || null);
+  const extremeTrade = calculateStockExtremeTradeGate(prices, symbol);
   const forbiddenReasons = [
+    dataFreshness.forbidden_reason,
     liquidity.forbidden_reason,
     marketCap.forbidden_reason,
     extremeTrade.forbidden_reason
   ].filter((reason): reason is string => Boolean(reason));
-  const notes = [liquidity.note, marketCap.note, extremeTrade.note].filter(Boolean);
+  const notes = [dataFreshness.note, liquidity.note, marketCap.note, extremeTrade.note].filter(Boolean);
 
   return {
+    data_freshness: dataFreshness,
     liquidity,
     market_cap: marketCap,
     extreme_trade: extremeTrade,
@@ -1606,6 +1642,14 @@ async function evaluateCandidate(
   const gateTrace = attachGateTrace({}, [
     makeGate('asset_applicability', 'passed', `${assetType === 'etf' ? '权益类ETF' : 'A股个股'}属于当前备选池可评估类型。`),
     makeGate('data_ready', 'passed', `本地日线 ${prices.length} 条，满足至少120日要求。`),
+    assetType === 'stock'
+      ? makeGate(
+          'data_freshness_gate',
+          stockTradeQualification?.data_freshness.status || 'not_applicable',
+          stockTradeQualification?.data_freshness.reason || '日线同步状态未计算。',
+          Boolean(stockTradeQualification?.data_freshness.blocking)
+        )
+      : makeGate('data_freshness_gate', 'not_applicable', 'ETF日线同步由ETF流程单独复核。'),
     makeGate('special_treatment', 'passed', '未命中 ST / 退市过滤。'),
     assetType === 'stock'
       ? makeGate(
