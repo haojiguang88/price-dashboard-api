@@ -1695,6 +1695,8 @@ router.get('/entry-trigger-observations', async (req: Request, res: Response) =>
     if (observationStatus) {
       where += ' AND observation_status = ?';
       params.push(observationStatus);
+    } else if (String(req.query.status_scope || '').trim() === 'active') {
+      where += " AND observation_status IN ('watching', 'plan_candidate')";
     }
     const excludeExistingPlan = String(req.query.exclude_existing_plan || '').trim() === '1';
     if (excludeExistingPlan) {
