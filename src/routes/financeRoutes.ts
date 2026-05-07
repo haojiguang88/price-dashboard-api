@@ -445,6 +445,14 @@ function countBy<T>(items: T[], getKey: (item: T) => string | undefined | null) 
   }, {});
 }
 
+function assetTypeBreakdown(items: any[], predicate: (item: any) => boolean = () => true) {
+  const filtered = items.filter(predicate);
+  return {
+    stock: filtered.filter((item: any) => item.asset_type === 'stock').length,
+    etf: filtered.filter((item: any) => item.asset_type === 'etf').length
+  };
+}
+
 function marketRegimeText(value?: string | null) {
   switch (value) {
     case 'NORMAL_CONFIRMED': return '正常确认区';
@@ -534,8 +542,11 @@ function summarizePipelineStep(step: any) {
       break;
     }
     case 'active_candidate_collect': {
+      const byAssetType = assetTypeBreakdown(items);
       base.metrics = {
-        active: items.length
+        active: items.length,
+        stock: byAssetType.stock,
+        etf: byAssetType.etf
       };
       base.details = items.slice(0, 8).map((item: any) => ({
         symbol: item.symbol,
@@ -547,9 +558,15 @@ function summarizePipelineStep(step: any) {
       break;
     }
     case 'trend_phase_recalc': {
+      const byAssetType = assetTypeBreakdown(results);
+      const passedByAssetType = assetTypeBreakdown(results, (item: any) => item.passed);
       base.metrics = {
         checked: Number(data.checked_count || results.length),
+        stock: byAssetType.stock,
+        etf: byAssetType.etf,
         passed: Number(data.passed_count || results.filter((item: any) => item.passed).length),
+        stock_passed: passedByAssetType.stock,
+        etf_passed: passedByAssetType.etf,
         blocked: Number(data.blocked_count || results.filter((item: any) => item.success === false || item.passed === false).length),
         success: results.filter((item: any) => item.success).length,
         failed: results.filter((item: any) => item.success === false).length
@@ -565,9 +582,15 @@ function summarizePipelineStep(step: any) {
     }
     case 'candidate_recheck': {
       const selected = results.filter((item: any) => item.selected);
+      const byAssetType = assetTypeBreakdown(results);
+      const selectedByAssetType = assetTypeBreakdown(results, (item: any) => item.selected);
       base.metrics = {
         checked: Number(data.checked_count || results.length),
+        stock: byAssetType.stock,
+        etf: byAssetType.etf,
         selected: Number(data.selected_count ?? selected.length),
+        stock_selected: selectedByAssetType.stock,
+        etf_selected: selectedByAssetType.etf,
         rejected: Math.max(0, Number(data.checked_count || results.length) - Number(data.selected_count ?? selected.length))
       };
       base.details = results.slice(0, 8).map((item: any) => ({
@@ -581,9 +604,15 @@ function summarizePipelineStep(step: any) {
       break;
     }
     case 'entry_observation_seed': {
+      const byAssetType = assetTypeBreakdown(results);
+      const readyByAssetType = assetTypeBreakdown(results, (item: any) => item.passed);
       base.metrics = {
         checked: results.length,
+        stock: byAssetType.stock,
+        etf: byAssetType.etf,
         ready: Number(data.ready_count || results.filter((item: any) => item.passed).length),
+        stock_ready: readyByAssetType.stock,
+        etf_ready: readyByAssetType.etf,
         blocked: Number(data.blocked_count || results.filter((item: any) => item.passed === false).length),
         plan_candidate: results.filter((item: any) => item.observation_status === 'plan_candidate').length,
         failed: results.filter((item: any) => item.success === false).length,
@@ -600,9 +629,15 @@ function summarizePipelineStep(step: any) {
     }
     case 'entry_trigger_scan': {
       const summary = data.summary || {};
+      const byAssetType = assetTypeBreakdown(results);
+      const upgradedByAssetType = assetTypeBreakdown(results, (item: any) => item.conclusion === '可升级计划准备');
       base.metrics = {
         checked: Number(summary.checked || results.length),
+        stock: byAssetType.stock,
+        etf: byAssetType.etf,
         upgraded: Number(summary.upgraded || 0),
+        stock_upgraded: upgradedByAssetType.stock,
+        etf_upgraded: upgradedByAssetType.etf,
         waiting: Number(summary.waiting || 0),
         invalidated: Number(summary.invalidated || 0),
         action_counts: countBy(results, (item: any) => item.action_label || item.action)
