@@ -952,7 +952,7 @@ const migrations: Migration[] = [
           '16:30',
           'trade_days',
           8,
-          '{"source":"tushare","active_plan_limit":50,"candidate_limit":20,"universe_limit":50,"interval_ms":1200,"secondary_scan_limit":80,"market_symbols":["000300","000905","399006","000688"]}',
+          '{"source":"tushare","active_plan_limit":50,"candidate_limit":20,"universe_limit":"all","interval_ms":1200,"secondary_scan_limit":80,"market_symbols":["000300","000905","399006","000688"]}',
           'pending',
           '一键串联市场总闸、日线更新、备选池、入场触发和持仓建议；只更新建议，不自动买卖'
         );
@@ -1087,6 +1087,21 @@ const migrations: Migration[] = [
 
       CREATE INDEX IF NOT EXISTS idx_rejected_opportunities_status
       ON rejected_opportunities(track, decision_quality, later_status);
+    `
+  },
+  {
+    id: '20260507_005',
+    name: 'Make finance daily pipeline cover full universe',
+    sql: `
+      UPDATE task_center_tasks
+      SET config_json = '{"source":"tushare","active_plan_limit":50,"candidate_limit":20,"universe_limit":"all","interval_ms":1200,"secondary_scan_limit":80,"market_symbols":["000300","000905","399006","000688"]}',
+          last_message = CASE
+            WHEN task_key = 'finance_daily_pipeline'
+            THEN '金融日终流水线已改为：先更新持仓/计划和备选池，最后全量补齐A股/ETF资产库日线'
+            ELSE last_message
+          END,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE task_key = 'finance_daily_pipeline';
     `
   }
 ];

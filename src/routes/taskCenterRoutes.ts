@@ -180,7 +180,7 @@ async function executeTask(task: TaskRow, triggerType: 'manual' | 'schedule') {
         source: config.source || 'tushare',
         active_plan_limit: Number(config.active_plan_limit || 50),
         candidate_limit: Number(config.candidate_limit || 20),
-        universe_limit: Number(config.universe_limit || 50),
+        universe_limit: config.universe_limit ?? 'all',
         interval_ms: Number(config.interval_ms || 1200)
       });
       const scan = await callApi('/api/finance/candidate-pool/scan-universe', {

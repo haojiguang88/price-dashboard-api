@@ -17,7 +17,7 @@ export interface FinancePipelineConfig {
   source?: string;
   active_plan_limit?: number;
   candidate_limit?: number;
-  universe_limit?: number;
+  universe_limit?: number | 'all';
   interval_ms?: number;
   secondary_scan_limit?: number;
   market_symbols?: string[];
@@ -33,7 +33,7 @@ export const DEFAULT_FINANCE_PIPELINE_CONFIG: FinancePipelineConfig = {
   source: 'tushare',
   active_plan_limit: 50,
   candidate_limit: 20,
-  universe_limit: 50,
+  universe_limit: 'all',
   interval_ms: 1200,
   secondary_scan_limit: 80,
   market_symbols: ['000300', '000905', '399006', '000688']

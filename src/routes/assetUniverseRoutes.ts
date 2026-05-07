@@ -52,7 +52,7 @@ interface ProcessAssetOptions {
 interface ProcessDueAssetsOptions extends ProcessAssetOptions {
   universeType: string;
   source: string;
-  limit: number;
+  limit: number | null;
   excludeKeys?: Set<string>;
   preferMissingStock?: boolean;
   skipKnownInsufficient?: boolean;
@@ -82,6 +82,17 @@ function parseScriptJson(stdout: string) {
     }
     return null;
   }
+}
+
+function parseUniverseLimit(value: any, defaultLimit: number | null = null): number | null {
+  if (value === undefined || value === null || value === '' || value === 'all') {
+    return defaultLimit;
+  }
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) {
+    return null;
+  }
+  return Math.floor(numeric);
 }
 
 function buildScriptErrorMessage(defaultMessage: string, stdout: string, stderr: string, error?: Error | null) {
@@ -130,6 +141,50 @@ async function refreshUniverseStatus(db: any, id?: number) {
       ]
     );
   }
+}
+
+async function refreshUniverseStatusForItem(db: any, item: UniverseItem) {
+  const status = await db.get(
+    `SELECT
+       COUNT(*) as total_count,
+       MIN(trade_date) as first_trade_date,
+       MAX(trade_date) as last_trade_date,
+       MAX(updated_at) as last_updated
+     FROM financial_daily_prices
+     WHERE symbol = ? AND asset_type = ? AND source = ?`,
+    [item.symbol, item.asset_type, item.source]
+  );
+
+  await db.run(
+    `UPDATE financial_asset_universe
+     SET total_count = ?,
+         first_trade_date = ?,
+         last_trade_date = ?,
+         last_updated = ?,
+         local_data_ready = ?,
+         updated_at = ?
+     WHERE symbol = ? AND asset_type = ? AND source = ?`,
+    [
+      status?.total_count || 0,
+      status?.first_trade_date || null,
+      status?.last_trade_date || null,
+      status?.last_updated || null,
+      (status?.total_count || 0) >= 120 ? 1 : 0,
+      new Date().toISOString(),
+      item.symbol,
+      item.asset_type,
+      item.source
+    ]
+  );
+}
+
+async function updateUniverseRows(db: any, item: UniverseItem, setSql: string, params: any[]) {
+  await db.run(
+    `UPDATE financial_asset_universe
+     SET ${setSql}
+     WHERE symbol = ? AND asset_type = ? AND source = ?`,
+    [...params, item.symbol, item.asset_type, item.source]
+  );
 }
 
 async function fetchAssetDaily(symbol: string, assetType: string, source: string) {
@@ -242,11 +297,11 @@ async function processAssetList(db: any, items: UniverseItem[], options: Process
       }
     }
 
-    await db.run(
-      `UPDATE financial_asset_universe
-       SET update_status = 'updating', last_fetch_at = ?, updated_at = ?
-       WHERE id = ?`,
-      [now.toISOString(), now.toISOString(), item.id]
+    await updateUniverseRows(
+      db,
+      item,
+      `update_status = 'updating', last_fetch_at = ?, updated_at = ?`,
+      [now.toISOString(), now.toISOString()]
     );
 
     const data = await fetchAssetDaily(item.symbol, item.asset_type, item.source);
@@ -254,11 +309,11 @@ async function processAssetList(db: any, items: UniverseItem[], options: Process
     if (!data.success) {
       const emptyDataMessage = data.message || '请求数据源失败';
       if (/为空|无数据|no data|empty/i.test(emptyDataMessage)) {
-        await db.run(
-          `UPDATE financial_asset_universe
-           SET update_status = 'success', last_fetch_message = ?, updated_at = ?
-           WHERE id = ?`,
-          ['无新增行情：可能停牌或数据源暂未更新', new Date().toISOString(), item.id]
+        await updateUniverseRows(
+          db,
+          item,
+          `update_status = 'success', last_fetch_message = ?, updated_at = ?`,
+          ['无新增行情：可能停牌或数据源暂未更新', new Date().toISOString()]
         );
         results.push({
           symbol: item.symbol,
@@ -272,32 +327,31 @@ async function processAssetList(db: any, items: UniverseItem[], options: Process
         continue;
       }
 
-      await db.run(
-        `UPDATE financial_asset_universe
-         SET update_status = 'error', last_fetch_message = ?, updated_at = ?
-         WHERE id = ?`,
-        [data.message || '请求数据源失败', new Date().toISOString(), item.id]
+      await updateUniverseRows(
+        db,
+        item,
+        `update_status = 'error', last_fetch_message = ?, updated_at = ?`,
+        [data.message || '请求数据源失败', new Date().toISOString()]
       );
       results.push({ symbol: item.symbol, success: false, message: data.message || '请求数据源失败' });
     } else {
       const saved = await persistDailyPrices(db, item, data);
-      await db.run(
-        `UPDATE financial_asset_universe
-         SET name = COALESCE(NULLIF(?, ''), name),
-             update_status = 'success',
-             last_fetch_message = ?,
-             updated_at = ?
-         WHERE id = ?`,
+      await updateUniverseRows(
+        db,
+        item,
+        `name = COALESCE(NULLIF(?, ''), name),
+         update_status = 'success',
+         last_fetch_message = ?,
+         updated_at = ?`,
         [
           data.name || '',
           saved.insertedCount > 0
             ? `已存本地：新增 ${saved.insertedCount} 条，更新 ${saved.updatedCount} 条，跳过异常 ${saved.skippedCount || 0} 条`
             : `无新增行情：可能停牌或当日数据已存在，更新 ${saved.updatedCount} 条，跳过异常 ${saved.skippedCount || 0} 条`,
-          new Date().toISOString(),
-          item.id
+          new Date().toISOString()
         ]
       );
-      await refreshUniverseStatus(db, item.id);
+      await refreshUniverseStatusForItem(db, item);
       results.push({
         symbol: item.symbol,
         success: true,
@@ -355,9 +409,6 @@ async function processDueAssets(options: ProcessDueAssetsOptions) {
     params.push(...excluded);
   }
 
-  const fetchLimit = Math.max(options.limit, 1);
-  params.push(fetchLimit);
-
   const orderBy = options.preferMissingStock
     ? `ORDER BY
        CASE WHEN local_data_ready = 1 THEN 1 ELSE 0 END,
@@ -374,12 +425,38 @@ async function processDueAssets(options: ProcessDueAssetsOptions) {
        COALESCE(last_fetch_at, ''),
        symbol`;
 
+  const fetchLimit = Number.isFinite(Number(options.limit)) && Number(options.limit) > 0
+    ? Math.floor(Number(options.limit))
+    : null;
+  const limitSql = fetchLimit ? 'LIMIT ?' : '';
+  if (fetchLimit) params.push(fetchLimit);
+
   const items: UniverseItem[] = await db.all(
-    `SELECT *
-     FROM financial_asset_universe
-     ${where}
+    `WITH grouped AS (
+       SELECT
+         MIN(id) as id,
+         symbol,
+         MAX(name) as name,
+         asset_type,
+         GROUP_CONCAT(DISTINCT universe_type) as universe_type,
+         source,
+         MAX(last_fetch_at) as last_fetch_at,
+         CASE
+           WHEN SUM(CASE WHEN update_status = 'updating' THEN 1 ELSE 0 END) > 0 THEN 'updating'
+           WHEN SUM(CASE WHEN update_status = 'error' THEN 1 ELSE 0 END) > 0 THEN 'error'
+           WHEN SUM(CASE WHEN update_status = 'success' THEN 1 ELSE 0 END) > 0 THEN 'success'
+           ELSE 'pending'
+         END as update_status,
+         MAX(total_count) as total_count,
+         MAX(local_data_ready) as local_data_ready
+       FROM financial_asset_universe
+       ${where}
+       GROUP BY symbol, asset_type, source
+     )
+     SELECT *
+     FROM grouped
      ${orderBy}
-     LIMIT ?`,
+     ${limitSql}`,
     params
   );
 
@@ -716,7 +793,7 @@ router.post('/asset-universe/daily-close-update', async (req: Request, res: Resp
     const source = req.body.source || 'tushare';
     const activePlanLimit = Math.max(Math.min(Number(req.body.active_plan_limit || 50), 200), 1);
     const candidateLimit = Math.max(Math.min(Number(req.body.candidate_limit || 20), 100), 1);
-    const universeLimit = Math.max(Math.min(Number(req.body.universe_limit === undefined ? 50 : req.body.universe_limit), 300), 0);
+    const universeLimit = parseUniverseLimit(req.body.universe_limit, null);
     const intervalMs = Math.max(Number(req.body.interval_ms || 1500), 800);
 
     const activePlanItems: UniverseItem[] = await db.all(
@@ -778,16 +855,14 @@ router.post('/asset-universe/daily-close-update', async (req: Request, res: Resp
 
     const candidateKeys = new Set([...activePlanKeys, ...candidateItems.map(item => `${item.symbol}|${item.asset_type}|${item.source}`)]);
     const candidateResults = await processAssetList(db, candidateItems, { forceUpdate: true, intervalMs });
-    const universeResult = universeLimit > 0
-      ? await processDueAssets({
-          universeType: 'all',
-          source,
-          limit: universeLimit,
-          forceUpdate: true,
-          intervalMs,
-          excludeKeys: candidateKeys
-        })
-      : { processed_count: 0, results: [] };
+    const universeResult = await processDueAssets({
+      universeType: 'all',
+      source,
+      limit: universeLimit,
+      forceUpdate: true,
+      intervalMs,
+      excludeKeys: candidateKeys
+    });
 
     const allResults = [...activePlanResults, ...candidateResults, ...universeResult.results];
     const successCount = allResults.filter((item: any) => item.success).length;
@@ -795,11 +870,12 @@ router.post('/asset-universe/daily-close-update', async (req: Request, res: Resp
 
     res.json({
       success: true,
-      message: `每日收盘行情更新完成：优先更新持仓计划 ${activePlanResults.length} 个，备选池 ${candidateResults.length} 个，全市场补充 ${universeResult.processed_count} 个，成功 ${successCount} 个，失败 ${failedCount} 个`,
+      message: `每日收盘行情更新完成：优先更新持仓计划 ${activePlanResults.length} 个，备选池 ${candidateResults.length} 个，全市场补充${universeLimit === null ? '（全量）' : ''} ${universeResult.processed_count} 个，成功 ${successCount} 个，失败 ${failedCount} 个`,
       data: {
         active_plan_count: activePlanResults.length,
         candidate_count: candidateResults.length,
         universe_count: universeResult.processed_count,
+        universe_limit: universeLimit === null ? 'all' : universeLimit,
         success_count: successCount,
         failed_count: failedCount,
         results: allResults
