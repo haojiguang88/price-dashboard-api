@@ -1103,6 +1103,17 @@ const migrations: Migration[] = [
           updated_at = CURRENT_TIMESTAMP
       WHERE task_key = 'finance_daily_pipeline';
     `
+  },
+  {
+    id: '20260507_006',
+    name: 'Link risk control records',
+    sql: `
+      ALTER TABLE risk_check_records
+      ADD COLUMN parent_record_id INTEGER;
+
+      CREATE INDEX IF NOT EXISTS idx_risk_check_records_parent_record_id
+      ON risk_check_records(parent_record_id);
+    `
   }
 ];
 

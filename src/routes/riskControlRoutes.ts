@@ -5,12 +5,38 @@ const router = express.Router();
 
 const ALLOWED_SYSTEM_RESULTS = ['reject', 'watch', 'need_category_risk', 'pass'];
 
+const normalizeText = (value: unknown): string => {
+  if (value === null || value === undefined) return '';
+  return String(value).trim();
+};
+
+const normalizeOptionalId = (value: unknown): number | null => {
+  if (value === null || value === undefined || value === '') return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+};
+
+const parseRecordExtra = (record: any) => {
+  if (!record) return record;
+  if (!record.extra_result_json) {
+    return { ...record, extra_result: null };
+  }
+  try {
+    return { ...record, extra_result: JSON.parse(record.extra_result_json) };
+  } catch {
+    return { ...record, extra_result: null };
+  }
+};
+
 // ========== 风控检查记录接口 ==========
 // 1. 保存风控总过滤
 router.post('/check-records/general-filter', async (req, res) => {
   const db = await getDb();
   try {
     const {
+      category_name = '',
+      object_name = '',
+      variant_name = '',
       system_result,
       result_reason = '',
       summary = '',
@@ -33,15 +59,16 @@ router.post('/check-records/general-filter', async (req, res) => {
     const recordResult = await db.run(`
       INSERT INTO risk_check_records (
         review_type, category_name, object_name, variant_name,
-        category_risk_type, system_result, result_reason, summary,
+        category_risk_type, parent_record_id, system_result, result_reason, summary,
         extra_result_json, rule_version
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, [
       'general_filter',
-      '', // category_name
-      '', // object_name
-      '', // variant_name
+      normalizeText(category_name),
+      normalizeText(object_name),
+      normalizeText(variant_name),
       '', // category_risk_type
+      null,
       system_result,
       result_reason,
       summary,
@@ -97,8 +124,10 @@ router.post('/check-records/category-risk', async (req, res) => {
       summary = '',
       items = [],
       extra_result = null,
+      parent_record_id = null,
       rule_version = 'v1'
     } = req.body;
+    const parentRecordId = normalizeOptionalId(parent_record_id);
 
     // 必填校验
     if (!category_name) {
@@ -109,6 +138,15 @@ router.post('/check-records/category-risk', async (req, res) => {
     }
     if (!Array.isArray(items)) {
       return res.json({ success: false, message: 'items 必须是数组' });
+    }
+    if (parentRecordId) {
+      const parentRecord = await db.get(
+        "SELECT id FROM risk_check_records WHERE id = ? AND review_type = 'general_filter'",
+        [parentRecordId]
+      );
+      if (!parentRecord) {
+        return res.json({ success: false, message: '关联的风控总过滤记录不存在' });
+      }
     }
 
     // 处理 extra_result_json
@@ -121,15 +159,16 @@ router.post('/check-records/category-risk', async (req, res) => {
     const recordResult = await db.run(`
       INSERT INTO risk_check_records (
         review_type, category_name, object_name, variant_name,
-        category_risk_type, system_result, result_reason, summary,
+        category_risk_type, parent_record_id, system_result, result_reason, summary,
         extra_result_json, rule_version
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, [
       'category_risk',
-      category_name,
-      object_name,
-      variant_name,
+      normalizeText(category_name),
+      normalizeText(object_name),
+      normalizeText(variant_name),
       category_risk_type,
+      parentRecordId,
       system_result,
       result_reason,
       summary,
@@ -157,6 +196,23 @@ router.post('/check-records/category-risk', async (req, res) => {
       ]);
     }
 
+    if (parentRecordId) {
+      await db.run(`
+        UPDATE risk_check_records
+        SET
+          category_name = CASE WHEN category_name IS NULL OR category_name = '' THEN ? ELSE category_name END,
+          object_name = CASE WHEN object_name IS NULL OR object_name = '' THEN ? ELSE object_name END,
+          variant_name = CASE WHEN variant_name IS NULL OR variant_name = '' THEN ? ELSE variant_name END,
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `, [
+        normalizeText(category_name),
+        normalizeText(object_name),
+        normalizeText(variant_name),
+        parentRecordId
+      ]);
+    }
+
     await db.run('COMMIT');
 
     res.json({
@@ -178,54 +234,55 @@ router.get('/check-records', async (req, res) => {
     const { review_type, category_name, category_risk_type, system_result, date_from, date_to } = req.query;
 
     let query = `
-      SELECT id, review_type, category_name, object_name, variant_name,
-             category_risk_type, system_result, result_reason, summary,
-             extra_result_json, rule_version, created_at
-      FROM risk_check_records
+      SELECT r.id, r.review_type, r.category_name, r.object_name, r.variant_name,
+             r.category_risk_type, r.parent_record_id, r.system_result, r.result_reason,
+             r.summary, r.extra_result_json, r.rule_version, r.created_at, r.updated_at,
+             (
+               SELECT COUNT(1)
+               FROM risk_check_records child
+               WHERE child.parent_record_id = r.id
+             ) AS child_record_count,
+             (
+               SELECT MAX(child.id)
+               FROM risk_check_records child
+               WHERE child.parent_record_id = r.id
+             ) AS latest_child_record_id
+      FROM risk_check_records r
       WHERE 1=1
     `;
     const params: any[] = [];
 
     if (review_type) {
-      query += ' AND review_type = ?';
+      query += ' AND r.review_type = ?';
       params.push(review_type);
     }
     if (category_name) {
-      query += ' AND category_name = ?';
+      query += ' AND r.category_name = ?';
       params.push(category_name);
     }
     if (category_risk_type) {
-      query += ' AND category_risk_type = ?';
+      query += ' AND r.category_risk_type = ?';
       params.push(category_risk_type);
     }
     if (system_result) {
-      query += ' AND system_result = ?';
+      query += ' AND r.system_result = ?';
       params.push(system_result);
     }
     if (date_from) {
-      query += ' AND created_at >= ?';
+      query += ' AND r.created_at >= ?';
       params.push(date_from);
     }
     if (date_to) {
-      query += ' AND created_at <= ?';
+      query += ' AND r.created_at <= ?';
       params.push(date_to);
     }
 
-    query += ' ORDER BY created_at DESC';
+    query += ' ORDER BY r.created_at DESC';
 
     const records = await db.all(query, params);
 
     // 解析 extra_result_json
-    const result = records.map(r => {
-      if (r.extra_result_json) {
-        try {
-          return { ...r, extra_result: JSON.parse(r.extra_result_json) };
-        } catch {
-          return { ...r, extra_result: null };
-        }
-      }
-      return { ...r, extra_result: null };
-    });
+    const result = records.map(parseRecordExtra);
 
     res.json({ success: true, data: result });
   } catch (error) {
@@ -253,19 +310,34 @@ router.get('/check-records/:id', async (req, res) => {
       ORDER BY id ASC
     `, [id]);
 
-    // 解析 extra_result_json
-    const recordWithExtra = { ...record };
-    if (record.extra_result_json) {
-      try {
-        recordWithExtra.extra_result = JSON.parse(record.extra_result_json);
-      } catch {
-        recordWithExtra.extra_result = null;
-      }
-    } else {
-      recordWithExtra.extra_result = null;
-    }
+    const parentRecord = record.parent_record_id
+      ? await db.get(`
+        SELECT id, review_type, category_name, object_name, variant_name,
+               category_risk_type, parent_record_id, system_result, result_reason,
+               summary, extra_result_json, rule_version, created_at, updated_at
+        FROM risk_check_records
+        WHERE id = ?
+      `, [record.parent_record_id])
+      : null;
 
-    res.json({ success: true, data: { record: recordWithExtra, items } });
+    const childRecords = await db.all(`
+      SELECT id, review_type, category_name, object_name, variant_name,
+             category_risk_type, parent_record_id, system_result, result_reason,
+             summary, extra_result_json, rule_version, created_at, updated_at
+      FROM risk_check_records
+      WHERE parent_record_id = ?
+      ORDER BY created_at DESC
+    `, [id]);
+
+    res.json({
+      success: true,
+      data: {
+        record: parseRecordExtra(record),
+        items,
+        parent_record: parseRecordExtra(parentRecord),
+        child_records: childRecords.map(parseRecordExtra)
+      }
+    });
   } catch (error) {
     console.error('查询风控检查记录详情失败:', error);
     res.json({ success: false, message: error instanceof Error ? error.message : '查询风控检查记录详情失败' });
@@ -289,6 +361,9 @@ router.delete('/check-records/:id', async (req, res) => {
 
     // 先删除关联项
     await db.run('DELETE FROM risk_check_record_items WHERE record_id = ?', [id]);
+
+    // 保留子记录本身，断开已经删除的父记录引用
+    await db.run('UPDATE risk_check_records SET parent_record_id = NULL WHERE parent_record_id = ?', [id]);
 
     // 再删除主记录
     await db.run('DELETE FROM risk_check_records WHERE id = ?', [id]);
