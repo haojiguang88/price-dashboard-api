@@ -1,6 +1,6 @@
 import express, { Request, Response } from 'express';
 import getDb from '../config/database';
-import { exec } from 'child_process';
+import { exec, execFile } from 'child_process';
 import path from 'path';
 
 const router = express.Router();
@@ -47,6 +47,8 @@ interface ProcessAssetOptions {
   forceUpdate?: boolean;
   intervalMs?: number;
   staleUpdatingMinutes?: number;
+  incremental?: boolean;
+  lookbackDays?: number;
 }
 
 interface ProcessDueAssetsOptions extends ProcessAssetOptions {
@@ -102,6 +104,29 @@ function buildScriptErrorMessage(defaultMessage: string, stdout: string, stderr:
 
   if (!parts.length) return defaultMessage;
   return `${defaultMessage}：${parts.join(' | ').slice(0, 500)}`;
+}
+
+function shiftIsoDate(value: string | null | undefined, offsetDays: number) {
+  if (!value) return null;
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return null;
+  const date = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])));
+  if (Number.isNaN(date.getTime())) return null;
+  date.setUTCDate(date.getUTCDate() + offsetDays);
+  return date.toISOString().slice(0, 10);
+}
+
+async function resolveIncrementalStartDate(db: any, item: UniverseItem, lookbackDays: number) {
+  const latest = await db.get(
+    `SELECT MAX(trade_date) as last_trade_date
+     FROM financial_daily_prices
+     WHERE symbol = ?
+       AND asset_type = ?
+       AND source = ?`,
+    [item.symbol, item.asset_type, item.source]
+  );
+  const lastTradeDate = latest?.last_trade_date || null;
+  return shiftIsoDate(lastTradeDate, -Math.max(lookbackDays, 0));
 }
 
 async function refreshUniverseStatus(db: any, id?: number) {
@@ -187,11 +212,15 @@ async function updateUniverseRows(db: any, item: UniverseItem, setSql: string, p
   );
 }
 
-async function fetchAssetDaily(symbol: string, assetType: string, source: string) {
+async function fetchAssetDaily(symbol: string, assetType: string, source: string, startDate?: string | null, endDate?: string | null) {
   const scriptPath = path.join(__dirname, '../../scripts/finance/fetch_asset_daily.py');
 
   return new Promise<any>((resolve) => {
-    exec(`/usr/bin/python3 "${scriptPath}" ${symbol} ${assetType} --source ${source}`, { timeout: 120000 }, (error, stdout, stderr) => {
+    const args = [scriptPath, symbol, assetType, '--source', source];
+    if (startDate) args.push('--start-date', startDate);
+    if (endDate) args.push('--end-date', endDate);
+
+    execFile('/usr/bin/python3', args, { timeout: 120000 }, (error, stdout, stderr) => {
       const parsed = parseScriptJson(stdout);
       if (parsed) {
         resolve(parsed);
@@ -304,7 +333,11 @@ async function processAssetList(db: any, items: UniverseItem[], options: Process
       [now.toISOString(), now.toISOString()]
     );
 
-    const data = await fetchAssetDaily(item.symbol, item.asset_type, item.source);
+    const fetchStartDate = options.incremental
+      ? await resolveIncrementalStartDate(db, item, options.lookbackDays ?? 10)
+      : null;
+    const fetchModeLabel = fetchStartDate ? `增量拉取 ${fetchStartDate} 起` : '全量拉取';
+    const data = await fetchAssetDaily(item.symbol, item.asset_type, item.source, fetchStartDate);
 
     if (!data.success) {
       const emptyDataMessage = data.message || '请求数据源失败';
@@ -313,7 +346,7 @@ async function processAssetList(db: any, items: UniverseItem[], options: Process
           db,
           item,
           `update_status = 'success', last_fetch_message = ?, updated_at = ?`,
-          ['无新增行情：可能停牌或数据源暂未更新', new Date().toISOString()]
+          [`${fetchModeLabel}：无新增行情，可能停牌或数据源暂未更新`, new Date().toISOString()]
         );
         results.push({
           symbol: item.symbol,
@@ -322,7 +355,9 @@ async function processAssetList(db: any, items: UniverseItem[], options: Process
           insertedCount: 0,
           updatedCount: 0,
           skippedCount: 0,
-          message: '无新增行情：可能停牌或数据源暂未更新'
+          fetchMode: fetchStartDate ? 'incremental' : 'full',
+          fetchStartDate,
+          message: `${fetchModeLabel}：无新增行情，可能停牌或数据源暂未更新`
         });
         continue;
       }
@@ -331,9 +366,15 @@ async function processAssetList(db: any, items: UniverseItem[], options: Process
         db,
         item,
         `update_status = 'error', last_fetch_message = ?, updated_at = ?`,
-        [data.message || '请求数据源失败', new Date().toISOString()]
+        [`${fetchModeLabel}：${data.message || '请求数据源失败'}`, new Date().toISOString()]
       );
-      results.push({ symbol: item.symbol, success: false, message: data.message || '请求数据源失败' });
+      results.push({
+        symbol: item.symbol,
+        success: false,
+        fetchMode: fetchStartDate ? 'incremental' : 'full',
+        fetchStartDate,
+        message: `${fetchModeLabel}：${data.message || '请求数据源失败'}`
+      });
     } else {
       const saved = await persistDailyPrices(db, item, data);
       await updateUniverseRows(
@@ -346,8 +387,8 @@ async function processAssetList(db: any, items: UniverseItem[], options: Process
         [
           data.name || '',
           saved.insertedCount > 0
-            ? `已存本地：新增 ${saved.insertedCount} 条，更新 ${saved.updatedCount} 条，跳过异常 ${saved.skippedCount || 0} 条`
-            : `无新增行情：可能停牌或当日数据已存在，更新 ${saved.updatedCount} 条，跳过异常 ${saved.skippedCount || 0} 条`,
+            ? `${fetchModeLabel}：已存本地，新增 ${saved.insertedCount} 条，更新 ${saved.updatedCount} 条，跳过异常 ${saved.skippedCount || 0} 条`
+            : `${fetchModeLabel}：无新增行情，可能停牌或当日数据已存在，更新 ${saved.updatedCount} 条，跳过异常 ${saved.skippedCount || 0} 条`,
           new Date().toISOString()
         ]
       );
@@ -356,7 +397,9 @@ async function processAssetList(db: any, items: UniverseItem[], options: Process
         symbol: item.symbol,
         success: true,
         noNewData: saved.insertedCount === 0,
-        message: saved.insertedCount === 0 ? '无新增行情，可能停牌或当日数据已存在' : undefined,
+        fetchMode: fetchStartDate ? 'incremental' : 'full',
+        fetchStartDate,
+        message: saved.insertedCount === 0 ? `${fetchModeLabel}：无新增行情，可能停牌或当日数据已存在` : `${fetchModeLabel}：已存本地`,
         ...saved
       });
     }
@@ -851,7 +894,7 @@ router.post('/asset-universe/update-one', async (req: Request, res: Response) =>
       return res.status(500).json({ success: false, message: `${symbol} 未能加入资产库，无法补齐日线` });
     }
 
-    const results = await processAssetList(db, [item], { forceUpdate: true });
+    const results = await processAssetList(db, [item], { forceUpdate: true, incremental: true, lookbackDays: 10 });
     const result = results[0] as any;
     const latest = await db.get(
       `SELECT COUNT(*) as total_count, MAX(trade_date) as last_trade_date
@@ -874,7 +917,7 @@ router.post('/asset-universe/update-one', async (req: Request, res: Response) =>
     const updatedCount = result.updatedCount || 0;
     res.json({
       success: true,
-      message: `${symbol} 日线补齐完成：新增 ${insertedCount} 条，更新 ${updatedCount} 条，本地最新 ${latest?.last_trade_date || '--'}`,
+      message: `${symbol} 日线补齐完成：${result.fetchStartDate ? `增量拉取 ${result.fetchStartDate} 起，` : '全量拉取，'}新增 ${insertedCount} 条，更新 ${updatedCount} 条，本地最新 ${latest?.last_trade_date || '--'}`,
       data: {
         result,
         total_count: latest?.total_count || 0,
@@ -919,7 +962,12 @@ router.post('/asset-universe/daily-close-update', async (req: Request, res: Resp
     );
 
     const activePlanKeys = new Set(activePlanItems.map(item => `${item.symbol}|${item.asset_type}|${item.source}`));
-    const activePlanResults = await processAssetList(db, activePlanItems, { forceUpdate: true, intervalMs });
+    const activePlanResults = await processAssetList(db, activePlanItems, {
+      forceUpdate: true,
+      intervalMs,
+      incremental: true,
+      lookbackDays: 10
+    });
 
     const candidateItems: UniverseItem[] = await db.all(
       `SELECT
@@ -953,13 +1001,20 @@ router.post('/asset-universe/daily-close-update', async (req: Request, res: Resp
     );
 
     const candidateKeys = new Set([...activePlanKeys, ...candidateItems.map(item => `${item.symbol}|${item.asset_type}|${item.source}`)]);
-    const candidateResults = await processAssetList(db, candidateItems, { forceUpdate: true, intervalMs });
+    const candidateResults = await processAssetList(db, candidateItems, {
+      forceUpdate: true,
+      intervalMs,
+      incremental: true,
+      lookbackDays: 10
+    });
     const universeResult = await processDueAssets({
       universeType: 'all',
       source,
       limit: universeLimit,
       forceUpdate: true,
       intervalMs,
+      incremental: true,
+      lookbackDays: 10,
       excludeKeys: candidateKeys
     });
 
@@ -969,7 +1024,7 @@ router.post('/asset-universe/daily-close-update', async (req: Request, res: Resp
 
     res.json({
       success: true,
-      message: `每日收盘行情更新完成：优先更新持仓计划 ${activePlanResults.length} 个，备选池 ${candidateResults.length} 个，全市场补充${universeLimit === null ? '（全量）' : ''} ${universeResult.processed_count} 个，成功 ${successCount} 个，失败 ${failedCount} 个`,
+      message: `每日收盘行情更新完成：优先增量更新持仓计划 ${activePlanResults.length} 个，备选池 ${candidateResults.length} 个，全市场增量补充${universeLimit === null ? '（全部标的）' : ''} ${universeResult.processed_count} 个，成功 ${successCount} 个，失败 ${failedCount} 个`,
       data: {
         active_plan_count: activePlanResults.length,
         candidate_count: candidateResults.length,
