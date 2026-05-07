@@ -6,6 +6,8 @@ import path from 'path';
 const router = express.Router();
 
 const DEFAULT_MIN_FETCH_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const DEFAULT_DAILY_CLOSE_CONCURRENCY = 4;
+const MAX_DAILY_CLOSE_CONCURRENCY = 8;
 
 const autoUpdateState: {
   running: boolean;
@@ -100,6 +102,7 @@ interface ProcessAssetOptions {
   lookbackDays?: number;
   targetTradeDate?: string | null;
   skipUpToDate?: boolean;
+  concurrency?: number;
   progressStage?: string;
   progressStageLabel?: string;
   onProgress?: (event: DailyCloseProgressEvent) => void;
@@ -150,6 +153,14 @@ function parseUniverseLimit(value: any, defaultLimit: number | null = null): num
     return null;
   }
   return Math.floor(numeric);
+}
+
+function parseConcurrency(value: any, defaultValue = DEFAULT_DAILY_CLOSE_CONCURRENCY) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) {
+    return defaultValue;
+  }
+  return Math.max(1, Math.min(Math.floor(numeric), MAX_DAILY_CLOSE_CONCURRENCY));
 }
 
 function getDailyCloseProgressPercent() {
@@ -470,11 +481,26 @@ async function persistDailyPrices(db: any, item: UniverseItem, data: any) {
 }
 
 async function processAssetList(db: any, items: UniverseItem[], options: ProcessAssetOptions = {}) {
-  const results: any[] = [];
+  const results: any[] = new Array(items.length);
   const progressStage = options.progressStage || 'asset_update';
   const progressStageLabel = options.progressStageLabel || '资产更新';
+  const concurrency = Math.max(1, Math.min(Math.floor(Number(options.concurrency || 1)), MAX_DAILY_CLOSE_CONCURRENCY));
+  let nextIndex = 0;
 
-  for (let index = 0; index < items.length; index++) {
+  const finishItem = (index: number, item: UniverseItem, result: any) => {
+    results[index] = result;
+    options.onProgress?.({
+      type: 'finish',
+      stage: progressStage,
+      stageLabel: progressStageLabel,
+      index,
+      total: items.length,
+      item,
+      result
+    });
+  };
+
+  const processOne = async (index: number) => {
     const item = items[index];
     const now = new Date();
     options.onProgress?.({
@@ -504,17 +530,8 @@ async function processAssetList(db: any, items: UniverseItem[], options: Process
           `update_status = 'success', last_fetch_message = ?, updated_at = ?`,
           [skippedResult.message, new Date().toISOString()]
         );
-        results.push(skippedResult);
-        options.onProgress?.({
-          type: 'finish',
-          stage: progressStage,
-          stageLabel: progressStageLabel,
-          index,
-          total: items.length,
-          item,
-          result: skippedResult
-        });
-        continue;
+        finishItem(index, item, skippedResult);
+        return;
       }
     }
 
@@ -526,17 +543,8 @@ async function processAssetList(db: any, items: UniverseItem[], options: Process
           skipped: true,
           message: '距离上次请求不足6小时，跳过以保护数据源频率'
         };
-        results.push(skippedResult);
-        options.onProgress?.({
-          type: 'finish',
-          stage: progressStage,
-          stageLabel: progressStageLabel,
-          index,
-          total: items.length,
-          item,
-          result: skippedResult
-        });
-        continue;
+        finishItem(index, item, skippedResult);
+        return;
       }
     }
 
@@ -573,17 +581,8 @@ async function processAssetList(db: any, items: UniverseItem[], options: Process
           fetchStartDate,
           message: `${fetchModeLabel}：无新增行情，可能停牌或数据源暂未更新`
         };
-        results.push(emptyResult);
-        options.onProgress?.({
-          type: 'finish',
-          stage: progressStage,
-          stageLabel: progressStageLabel,
-          index,
-          total: items.length,
-          item,
-          result: emptyResult
-        });
-        continue;
+        finishItem(index, item, emptyResult);
+        return;
       }
 
       await updateUniverseRows(
@@ -599,16 +598,7 @@ async function processAssetList(db: any, items: UniverseItem[], options: Process
         fetchStartDate,
         message: `${fetchModeLabel}：${data.message || '请求数据源失败'}`
       };
-      results.push(failedResult);
-      options.onProgress?.({
-        type: 'finish',
-        stage: progressStage,
-        stageLabel: progressStageLabel,
-        index,
-        total: items.length,
-        item,
-        result: failedResult
-      });
+      finishItem(index, item, failedResult);
     } else {
       const saved = await persistDailyPrices(db, item, data);
       await updateUniverseRows(
@@ -636,24 +626,46 @@ async function processAssetList(db: any, items: UniverseItem[], options: Process
         message: saved.insertedCount === 0 ? `${fetchModeLabel}：无新增行情，可能停牌或当日数据已存在` : `${fetchModeLabel}：已存本地`,
         ...saved
       };
-      results.push(successResult);
-      options.onProgress?.({
-        type: 'finish',
-        stage: progressStage,
-        stageLabel: progressStageLabel,
-        index,
-        total: items.length,
-        item,
-        result: successResult
-      });
+      finishItem(index, item, successResult);
     }
 
     if (options.intervalMs && index < items.length - 1) {
       await sleep(options.intervalMs);
     }
-  }
+  };
 
-  return results;
+  const worker = async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      try {
+        await processOne(index);
+      } catch (error) {
+        const item = items[index];
+        const failedResult = {
+          symbol: item.symbol,
+          success: false,
+          message: `处理失败：${(error as Error).message}`
+        };
+        try {
+          await updateUniverseRows(
+            db,
+            item,
+            `update_status = 'error', last_fetch_message = ?, updated_at = ?`,
+            [failedResult.message, new Date().toISOString()]
+          );
+        } catch {
+          // 单个标的的状态回写失败不应拖垮整批更新。
+        }
+        finishItem(index, item, failedResult);
+      }
+    }
+  };
+
+  const workerCount = Math.min(concurrency, items.length || 1);
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+
+  return results.filter(Boolean);
 }
 
 async function processDueAssets(options: ProcessDueAssetsOptions) {
@@ -776,6 +788,7 @@ async function runFullUniverseDailyCloseUpdate(params: {
   intervalMs: number;
   excludeKeys: Set<string>;
   targetTradeDate: string | null;
+  concurrency: number;
 }) {
   try {
     dailyCloseUpdateState.phase = 'full_universe';
@@ -793,6 +806,7 @@ async function runFullUniverseDailyCloseUpdate(params: {
       lookbackDays: 10,
       targetTradeDate: params.targetTradeDate,
       skipUpToDate: true,
+      concurrency: params.concurrency,
       excludeKeys: params.excludeKeys,
       progressStage: 'full_universe',
       progressStageLabel: '全市场补齐',
@@ -1268,6 +1282,7 @@ router.post('/asset-universe/daily-close-update', async (req: Request, res: Resp
     const candidateLimit = Math.max(Math.min(Number(req.body.candidate_limit || 20), 100), 1);
     const universeLimit = parseUniverseLimit(req.body.universe_limit, null);
     const intervalMs = Math.max(Number(req.body.interval_ms || 1500), 800);
+    const concurrency = parseConcurrency(req.body.concurrency);
     const targetTradeDate = await resolveDailyCloseTargetTradeDate(db, source);
 
     const rawActivePlanItems: UniverseItem[] = await db.all(
@@ -1341,6 +1356,7 @@ router.post('/asset-universe/daily-close-update', async (req: Request, res: Resp
       lookbackDays: 10,
       targetTradeDate,
       skipUpToDate: true,
+      concurrency,
       progressStage: 'active_plans',
       progressStageLabel: '持仓/计划优先',
       onProgress: applyDailyCloseProgress
@@ -1353,6 +1369,7 @@ router.post('/asset-universe/daily-close-update', async (req: Request, res: Resp
       lookbackDays: 10,
       targetTradeDate,
       skipUpToDate: true,
+      concurrency,
       progressStage: 'candidate_pool',
       progressStageLabel: '备选池优先',
       onProgress: applyDailyCloseProgress
@@ -1373,7 +1390,8 @@ router.post('/asset-universe/daily-close-update', async (req: Request, res: Resp
         universeLimit,
         intervalMs,
         excludeKeys: candidateKeys,
-        targetTradeDate
+        targetTradeDate,
+        concurrency
       });
 
       return res.json({
@@ -1385,6 +1403,7 @@ router.post('/asset-universe/daily-close-update', async (req: Request, res: Resp
           universe_count: null,
           universe_limit: 'all',
           target_trade_date: targetTradeDate,
+          concurrency,
           success_count: prioritySuccessCount,
           skipped_count: prioritySkippedCount,
           failed_count: priorityFailedCount,
@@ -1405,6 +1424,7 @@ router.post('/asset-universe/daily-close-update', async (req: Request, res: Resp
       lookbackDays: 10,
       targetTradeDate,
       skipUpToDate: true,
+      concurrency,
       excludeKeys: candidateKeys,
       progressStage: 'full_universe',
       progressStageLabel: '全市场补齐',
@@ -1438,6 +1458,7 @@ router.post('/asset-universe/daily-close-update', async (req: Request, res: Resp
         universe_count: universeResult.processed_count,
         universe_limit: universeLimit === null ? 'all' : universeLimit,
         target_trade_date: targetTradeDate,
+        concurrency,
         success_count: successCount,
         skipped_count: skippedCount,
         failed_count: failedCount,
