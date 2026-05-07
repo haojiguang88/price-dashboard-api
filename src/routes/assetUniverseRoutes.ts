@@ -676,6 +676,57 @@ async function processDueAssets(options: ProcessDueAssetsOptions) {
   return { processed_count: items.length, results };
 }
 
+async function runFullUniverseDailyCloseUpdate(params: {
+  source: string;
+  universeLimit: number | null;
+  intervalMs: number;
+  excludeKeys: Set<string>;
+}) {
+  try {
+    dailyCloseUpdateState.phase = 'full_universe';
+    dailyCloseUpdateState.phase_label = '全市场补齐';
+    dailyCloseUpdateState.last_updated_at = new Date().toISOString();
+    dailyCloseUpdateState.last_message = '优先标的已更新，正在后台补齐全市场日线...';
+
+    await processDueAssets({
+      universeType: 'all',
+      source: params.source,
+      limit: params.universeLimit,
+      forceUpdate: true,
+      intervalMs: params.intervalMs,
+      incremental: true,
+      lookbackDays: 10,
+      excludeKeys: params.excludeKeys,
+      progressStage: 'full_universe',
+      progressStageLabel: '全市场补齐',
+      onProgress: applyDailyCloseProgress,
+      onItemsSelected: (items) => {
+        dailyCloseUpdateState.total_count += items.length;
+        dailyCloseUpdateState.phase = 'full_universe';
+        dailyCloseUpdateState.phase_label = '全市场补齐';
+        dailyCloseUpdateState.last_updated_at = new Date().toISOString();
+        dailyCloseUpdateState.last_message = `全市场补齐队列 ${items.length} 个，总计 ${dailyCloseUpdateState.total_count} 个标的。`;
+      }
+    });
+
+    dailyCloseUpdateState.running = false;
+    dailyCloseUpdateState.phase = 'completed';
+    dailyCloseUpdateState.phase_label = '行情更新完成';
+    dailyCloseUpdateState.finished_at = new Date().toISOString();
+    dailyCloseUpdateState.last_updated_at = dailyCloseUpdateState.finished_at;
+    dailyCloseUpdateState.current_symbol = null;
+    dailyCloseUpdateState.current_name = null;
+    dailyCloseUpdateState.last_message = `每日收盘行情更新完成：成功 ${dailyCloseUpdateState.success_count} 个，失败 ${dailyCloseUpdateState.failed_count} 个，准备刷新备选池。`;
+  } catch (error) {
+    dailyCloseUpdateState.running = false;
+    dailyCloseUpdateState.phase = 'error';
+    dailyCloseUpdateState.phase_label = '更新失败';
+    dailyCloseUpdateState.finished_at = new Date().toISOString();
+    dailyCloseUpdateState.last_updated_at = dailyCloseUpdateState.finished_at;
+    dailyCloseUpdateState.last_message = `全市场日线补齐失败: ${(error as Error).message}`;
+  }
+}
+
 router.get('/asset-universe', async (req: Request, res: Response) => {
   try {
     const db = await getDb();
@@ -1200,6 +1251,40 @@ router.post('/asset-universe/daily-close-update', async (req: Request, res: Resp
       progressStageLabel: '备选池优先',
       onProgress: applyDailyCloseProgress
     });
+
+    if (universeLimit === null) {
+      const priorityResults = [...activePlanResults, ...candidateResults];
+      const prioritySuccessCount = priorityResults.filter((item: any) => item.success).length;
+      const priorityFailedCount = priorityResults.filter((item: any) => !item.success && !item.skipped).length;
+      dailyCloseUpdateState.phase = 'full_universe_queued';
+      dailyCloseUpdateState.phase_label = '全市场补齐排队';
+      dailyCloseUpdateState.last_updated_at = new Date().toISOString();
+      dailyCloseUpdateState.last_message = '持仓/计划和备选池已优先更新，全市场补齐已转后台继续。';
+
+      void runFullUniverseDailyCloseUpdate({
+        source,
+        universeLimit,
+        intervalMs,
+        excludeKeys: candidateKeys
+      });
+
+      return res.json({
+        success: true,
+        message: `每日收盘优先更新完成：持仓计划 ${activePlanResults.length} 个，备选池 ${candidateResults.length} 个，成功 ${prioritySuccessCount} 个，失败 ${priorityFailedCount} 个；全市场补齐已在后台继续`,
+        data: {
+          active_plan_count: activePlanResults.length,
+          candidate_count: candidateResults.length,
+          universe_count: null,
+          universe_limit: 'all',
+          success_count: prioritySuccessCount,
+          failed_count: priorityFailedCount,
+          background_full_universe: true,
+          progress: publicDailyCloseUpdateState(),
+          results: priorityResults
+        }
+      });
+    }
+
     const universeResult = await processDueAssets({
       universeType: 'all',
       source,
