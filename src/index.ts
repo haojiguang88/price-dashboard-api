@@ -46,6 +46,7 @@ import analysisAnnotationRoutes from "./routes/analysisAnnotationRoutes";
 import auditLogRoutes from "./routes/auditLogRoutes";
 import userPreferenceRoutes from "./routes/userPreferenceRoutes";
 import rejectedOpportunitiesRoutes from "./routes/rejectedOpportunitiesRoutes";
+import financeDecisionSupportRoutes from "./routes/financeDecisionSupportRoutes";
 
 const app = express();
 const port = process.env.PORT || 3001;
@@ -87,6 +88,7 @@ app.use("/api/finance/trend-phase", trendPhaseRoutes);
 app.use("/api/finance", candidatePoolRoutes);
 app.use("/api/finance", assetUniverseRoutes);
 app.use("/api/finance", financialTradePlanRoutes);
+app.use("/api/finance", financeDecisionSupportRoutes);
 app.use("/api", taskCenterRoutes);
 app.use("/api/football-lottery", footballLotteryRoutes);
 app.use("/api/model-training", modelTrainingRoutes);

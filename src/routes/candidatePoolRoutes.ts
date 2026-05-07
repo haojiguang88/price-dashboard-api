@@ -1874,7 +1874,43 @@ router.get('/candidate-pool', async (req: Request, res: Response) => {
                 WHERE u.symbol = financial_candidate_pool.symbol
                   AND u.asset_type = financial_candidate_pool.asset_type
                   AND u.source = financial_candidate_pool.source
-              ) AS universe_type
+              ) AS universe_type,
+              (
+                SELECT MAX(p.trade_date)
+                FROM financial_daily_prices p
+                WHERE p.symbol = financial_candidate_pool.symbol
+                  AND p.asset_type = financial_candidate_pool.asset_type
+                  AND p.source = financial_candidate_pool.source
+              ) AS local_last_trade_date,
+              (
+                SELECT MAX(p.updated_at)
+                FROM financial_daily_prices p
+                WHERE p.symbol = financial_candidate_pool.symbol
+                  AND p.asset_type = financial_candidate_pool.asset_type
+                  AND p.source = financial_candidate_pool.source
+              ) AS local_price_updated_at,
+              (
+                SELECT MAX(u.last_fetch_at)
+                FROM financial_asset_universe u
+                WHERE u.symbol = financial_candidate_pool.symbol
+                  AND u.asset_type = financial_candidate_pool.asset_type
+                  AND u.source = financial_candidate_pool.source
+              ) AS local_last_fetch_at,
+              (
+                SELECT GROUP_CONCAT(DISTINCT u.last_fetch_message)
+                FROM financial_asset_universe u
+                WHERE u.symbol = financial_candidate_pool.symbol
+                  AND u.asset_type = financial_candidate_pool.asset_type
+                  AND u.source = financial_candidate_pool.source
+                  AND u.last_fetch_message IS NOT NULL
+              ) AS local_last_fetch_message,
+              (
+                SELECT MAX(m.trade_date)
+                FROM financial_daily_prices m
+                WHERE m.symbol = '000300'
+                  AND m.asset_type = 'index'
+                  AND m.source = financial_candidate_pool.source
+              ) AS market_latest_trade_date
        FROM financial_candidate_pool
        ${where}
        ORDER BY priority_score DESC, last_checked_at DESC, trade_date DESC
