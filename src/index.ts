@@ -43,6 +43,7 @@ import financialTradePlanRoutes from "./routes/financialTradePlanRoutes";
 import footballLotteryRoutes from "./routes/footballLotteryRoutes";
 import modelTrainingRoutes from "./routes/modelTrainingRoutes";
 import analysisAnnotationRoutes from "./routes/analysisAnnotationRoutes";
+import auditLogRoutes from "./routes/auditLogRoutes";
 
 const app = express();
 const port = process.env.PORT || 3001;
@@ -88,6 +89,7 @@ app.use("/api", taskCenterRoutes);
 app.use("/api/football-lottery", footballLotteryRoutes);
 app.use("/api/model-training", modelTrainingRoutes);
 app.use("/api", analysisAnnotationRoutes);
+app.use("/api", auditLogRoutes);
 
 app.get("/db-test", async (req, res) => {
   try {

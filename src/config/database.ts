@@ -52,6 +52,9 @@ const initDatabase = async (db: Database) => {
 
   await db.exec("CREATE TABLE IF NOT EXISTS analysis_annotations (id INTEGER PRIMARY KEY AUTOINCREMENT, module TEXT NOT NULL, entity_type TEXT NOT NULL, entity_key TEXT NOT NULL, annotation_key TEXT NOT NULL, annotation_value TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(module, entity_type, entity_key, annotation_key))");
   await db.exec("CREATE INDEX IF NOT EXISTS idx_analysis_annotations_scope ON analysis_annotations(module, entity_type, annotation_key)");
+  await db.exec("CREATE TABLE IF NOT EXISTS audit_logs (id TEXT PRIMARY KEY, timestamp TEXT NOT NULL, module TEXT NOT NULL, action TEXT NOT NULL, target TEXT NOT NULL, status TEXT NOT NULL, detail TEXT, entity_id TEXT, path TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)");
+  await db.exec("CREATE INDEX IF NOT EXISTS idx_audit_logs_timestamp ON audit_logs(timestamp DESC)");
+  await db.exec("CREATE INDEX IF NOT EXISTS idx_audit_logs_module ON audit_logs(module, action, status)");
 
   console.log("SQLite database connected and base tables created if not exists");
   console.log("Record tables will be created via migrations");

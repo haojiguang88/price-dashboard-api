@@ -1010,6 +1010,31 @@ const migrations: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_analysis_annotations_scope
       ON analysis_annotations(module, entity_type, annotation_key);
     `
+  },
+  {
+    id: '20260507_002',
+    name: 'Create audit logs',
+    sql: `
+      CREATE TABLE IF NOT EXISTS audit_logs (
+        id TEXT PRIMARY KEY,
+        timestamp TEXT NOT NULL,
+        module TEXT NOT NULL,
+        action TEXT NOT NULL,
+        target TEXT NOT NULL,
+        status TEXT NOT NULL,
+        detail TEXT,
+        entity_id TEXT,
+        path TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_audit_logs_timestamp
+      ON audit_logs(timestamp DESC);
+
+      CREATE INDEX IF NOT EXISTS idx_audit_logs_module
+      ON audit_logs(module, action, status);
+    `
   }
 ];
 
