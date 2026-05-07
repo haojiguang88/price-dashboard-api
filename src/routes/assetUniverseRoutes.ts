@@ -787,6 +787,105 @@ router.post('/asset-universe/batch-update', async (req: Request, res: Response) 
   }
 });
 
+router.post('/asset-universe/update-one', async (req: Request, res: Response) => {
+  try {
+    const db = await getDb();
+    const symbol = String(req.body.symbol || '').trim();
+    const assetType = String(req.body.asset_type || req.body.assetType || '').trim();
+    const source = String(req.body.source || 'tushare').trim();
+
+    if (!/^\d{6}$/.test(symbol)) {
+      return res.status(400).json({ success: false, message: '请输入6位标的代码' });
+    }
+    if (!['stock', 'etf', 'index'].includes(assetType)) {
+      return res.status(400).json({ success: false, message: '资产类型必须是 stock、etf 或 index' });
+    }
+    if (!['tushare', 'akshare'].includes(source)) {
+      return res.status(400).json({ success: false, message: '数据源必须是 tushare 或 akshare' });
+    }
+
+    let item: UniverseItem | undefined = await db.get(
+      `SELECT
+         MIN(id) as id,
+         symbol,
+         COALESCE(MAX(name), '') as name,
+         asset_type,
+         GROUP_CONCAT(DISTINCT universe_type) as universe_type,
+         source,
+         MAX(last_fetch_at) as last_fetch_at,
+         CASE
+           WHEN SUM(CASE WHEN update_status = 'updating' THEN 1 ELSE 0 END) > 0 THEN 'updating'
+           WHEN SUM(CASE WHEN update_status = 'error' THEN 1 ELSE 0 END) > 0 THEN 'error'
+           WHEN SUM(CASE WHEN update_status = 'success' THEN 1 ELSE 0 END) > 0 THEN 'success'
+           ELSE 'pending'
+         END as update_status
+       FROM financial_asset_universe
+       WHERE symbol = ?
+         AND asset_type = ?
+         AND source = ?
+         AND enabled = 1
+       GROUP BY symbol, asset_type, source`,
+      [symbol, assetType, source]
+    );
+
+    if (!item) {
+      await db.run(
+        `INSERT OR IGNORE INTO financial_asset_universe
+         (symbol, name, asset_type, universe_type, source, update_status)
+         VALUES (?, '', ?, 'manual_watch', ?, 'pending')`,
+        [symbol, assetType, source]
+      );
+      item = await db.get(
+        `SELECT id, symbol, COALESCE(name, '') as name, asset_type, universe_type, source, last_fetch_at, update_status
+         FROM financial_asset_universe
+         WHERE symbol = ?
+           AND asset_type = ?
+           AND source = ?
+         ORDER BY id DESC
+         LIMIT 1`,
+        [symbol, assetType, source]
+      );
+    }
+
+    if (!item) {
+      return res.status(500).json({ success: false, message: `${symbol} 未能加入资产库，无法补齐日线` });
+    }
+
+    const results = await processAssetList(db, [item], { forceUpdate: true });
+    const result = results[0] as any;
+    const latest = await db.get(
+      `SELECT COUNT(*) as total_count, MAX(trade_date) as last_trade_date
+       FROM financial_daily_prices
+       WHERE symbol = ?
+         AND asset_type = ?
+         AND source = ?`,
+      [symbol, assetType, source]
+    );
+
+    if (!result?.success) {
+      return res.status(500).json({
+        success: false,
+        message: `${symbol} 日线补齐失败：${result?.message || '数据源请求失败'}`,
+        data: { result, latest }
+      });
+    }
+
+    const insertedCount = result.insertedCount || 0;
+    const updatedCount = result.updatedCount || 0;
+    res.json({
+      success: true,
+      message: `${symbol} 日线补齐完成：新增 ${insertedCount} 条，更新 ${updatedCount} 条，本地最新 ${latest?.last_trade_date || '--'}`,
+      data: {
+        result,
+        total_count: latest?.total_count || 0,
+        last_trade_date: latest?.last_trade_date || null
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: `单标的日线补齐失败: ${(error as Error).message}` });
+  }
+});
+
 router.post('/asset-universe/daily-close-update', async (req: Request, res: Response) => {
   try {
     const db = await getDb();
