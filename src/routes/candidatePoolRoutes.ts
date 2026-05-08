@@ -145,6 +145,19 @@ const CANDIDATE_GATE_DEFINITIONS = [
   { key: 'model_reference', label: '模型参考' },
 ];
 
+const MODEL_RECHECK_HARD_BLOCKING_GATES = new Set([
+  'asset_applicability',
+  'special_treatment',
+]);
+
+function isHardBlockedFromModelRecheck(item: any) {
+  const firstBlockingGateKey = String(item?.first_blocking_gate_key || '').trim();
+  const firstBlockingGateLabel = String(item?.first_blocking_gate_label || '').trim();
+  return MODEL_RECHECK_HARD_BLOCKING_GATES.has(firstBlockingGateKey)
+    || firstBlockingGateLabel === 'ST/退市过滤'
+    || isSpecialTreatmentName(item?.name);
+}
+
 function parseJson(value: unknown, fallback: any = null) {
   if (typeof value !== 'string' || !value) return fallback;
   try {
@@ -1984,6 +1997,7 @@ router.get('/candidate-pool', async (req: Request, res: Response) => {
     const status = (req.query.status as string) || 'active';
     const assetType = req.query.asset_type as string | undefined;
     const reviewStatus = req.query.review_status as string | undefined;
+    const reviewQueue = req.query.review_queue as string | undefined;
     const excludeEntryObservation = req.query.exclude_entry_observation === '1' || req.query.exclude_entry_observation === 'true';
     const limit = Math.min(parseInt(req.query.limit as string) || 100, 500);
     const includeModel = req.query.include_model === '1' || req.query.include_model === 'true';
@@ -2006,6 +2020,16 @@ router.get('/candidate-pool', async (req: Request, res: Response) => {
     if (reviewStatus) {
       where += ' AND COALESCE(review_status, ?) = ?';
       params.push('unreviewed', reviewStatus);
+    }
+
+    if (reviewQueue === 'model_recheck') {
+      where += ` AND NOT (
+        COALESCE(first_blocking_gate_key, '') IN ('asset_applicability', 'special_treatment')
+        OR COALESCE(first_blocking_gate_label, '') = 'ST/退市过滤'
+        OR COALESCE(name, '') LIKE 'ST%'
+        OR COALESCE(name, '') LIKE '*ST%'
+        OR COALESCE(name, '') LIKE '%退%'
+      )`;
     }
 
     if (excludeEntryObservation) {
@@ -2139,6 +2163,7 @@ router.post('/candidate-pool/evaluate-one', async (req: Request, res: Response) 
       ? await buildIndustryEtfStrengthContext(db, { scope: 'focus', benchmarkSymbol: '000300' })
       : undefined;
     const evaluation = await evaluateCandidate(db, symbol, assetType, source, industryStrengthContext);
+    const hardBlockedFromModelRecheck = isHardBlockedFromModelRecheck(evaluation);
 
     if (evaluation.selected) {
       await upsertCandidate(db, evaluation);
@@ -2175,8 +2200,8 @@ router.post('/candidate-pool/evaluate-one', async (req: Request, res: Response) 
               review_status: 'unreviewed'
             }
           : {
-              key: 'excluded_review',
-              label: '被剔除标的模型复核 / 已淘汰样本',
+              key: hardBlockedFromModelRecheck ? 'hard_blocked' : 'excluded_review',
+              label: hardBlockedFromModelRecheck ? '硬闸门拦截 / 不进入模型复核' : '被剔除标的模型复核 / 已淘汰样本',
               status: 'expired',
               review_status: 'rejected'
             }
