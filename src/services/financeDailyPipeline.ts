@@ -2,6 +2,8 @@ import getDb from '../config/database';
 
 const TREND_PHASE_VERSION = 'trend_phase_v1.1';
 const FUNNEL_READY_TREND_PHASES = new Set(['BREAKOUT', 'SLOW_GRIND_UP', 'RECOVERY']);
+const FUNNEL_HOLD_TREND_PHASES = new Set(['TREND_UP', 'HIGH_BASE', 'SIDEWAYS', 'CONSOLIDATION', 'TREND_TRANSITION', 'UNKNOWN']);
+const FUNNEL_REJECT_TREND_PHASES = new Set(['CRASH_DROP', 'SLOW_BLEED', 'SURGE', 'REBOUND']);
 
 export interface FinancePipelineStep {
   key: string;
@@ -87,6 +89,36 @@ function getShortTrendReason(trendCode: string, trendReason?: string | null) {
   return reason.length > 80 ? `${reason.slice(0, 80)}...` : reason;
 }
 
+function getTrendPhaseDecision(trendCode?: string | null) {
+  const code = trendCode || 'UNKNOWN';
+  if (FUNNEL_READY_TREND_PHASES.has(code)) {
+    return {
+      action: 'advance',
+      label: '进入下一步',
+      reason: '走势阶段已进入可推进区'
+    };
+  }
+  if (FUNNEL_REJECT_TREND_PHASES.has(code)) {
+    return {
+      action: 'reject',
+      label: '踢出本轮',
+      reason: '走势阶段触发硬拦截，不进入单标的判断'
+    };
+  }
+  if (FUNNEL_HOLD_TREND_PHASES.has(code)) {
+    return {
+      action: 'hold',
+      label: '留在走势队列',
+      reason: '走势阶段尚未进入可推进区，等待后续确认'
+    };
+  }
+  return {
+    action: 'hold',
+    label: '留在走势队列',
+    reason: '走势阶段未识别，等待后续确认'
+  };
+}
+
 function buildPipelineResult(steps: FinancePipelineStep[], config: any) {
   const failedStep = steps.find(step => step.status === 'error');
   return {
@@ -128,6 +160,7 @@ export async function runFinanceDailyPipeline(config?: FinancePipelineConfig | n
     { key: 'market_environment', label: '市场总闸更新', status: 'pending' },
     { key: 'daily_prices', label: '本地日线更新', status: 'pending' },
     { key: 'candidate_scan', label: '个股/ETF备选池扫描', status: 'pending' },
+    { key: 'candidate_funnel', label: '入池漏斗刷新', status: 'pending' },
     { key: 'entry_trigger_scan', label: '入场触发扫描', status: 'pending' },
     { key: 'active_plan_suggestions', label: '持仓/计划建议同步', status: 'pending' },
     { key: 'workflow_summary', label: '指挥台快照', status: 'pending' }
@@ -152,6 +185,22 @@ export async function runFinanceDailyPipeline(config?: FinancePipelineConfig | n
     universe_type: 'all',
     source: merged.source
   }))) return buildResult();
+
+  if (!await runStep('candidate_funnel', async () => {
+    const result = await runFinanceCandidateFunnelPipeline({
+      source: merged.source,
+      candidate_limit: Math.max(Number(merged.candidate_limit || 120), 120),
+      secondary_scan_limit: merged.secondary_scan_limit
+    });
+    const failedStep = result.steps.find((step: any) => step.status === 'error');
+    if (failedStep) {
+      throw new Error(`入池漏斗停在「${failedStep.label}」：${failedStep.message || '原因未知'}`);
+    }
+    return {
+      message: `入池漏斗刷新完成：${result.summary.success}/${result.summary.total} 步完成`,
+      data: result
+    };
+  })) return buildResult();
 
   if (!await runStep('entry_trigger_scan', () => callLocalApi('/api/finance/assets/entry-trigger-observations/secondary-scan', {
     limit: merged.secondary_scan_limit
@@ -222,8 +271,8 @@ export async function runFinanceCandidateFunnelPipeline(config?: FinanceCandidat
         );
         const trendCode = latestTrend?.trend_phase_code || 'UNKNOWN';
         const trendReason = latestTrend?.trend_phase_reason || `走势阶段为 ${trendCode}，未达到准备入场阶段。`;
-        const passed = FUNNEL_READY_TREND_PHASES.has(trendCode);
-        if (passed) {
+        const decision = getTrendPhaseDecision(trendCode);
+        if (decision.action === 'advance') {
           trendReadyCandidates.push(item);
           const now = nowIso();
           await db.run(
@@ -236,6 +285,49 @@ export async function runFinanceCandidateFunnelPipeline(config?: FinanceCandidat
                AND pool_status = 'active'
                AND COALESCE(review_status, 'unreviewed') NOT IN ('rejected')`,
             [trendCode, trendReason, now, item.id]
+          );
+        } else if (decision.action === 'reject') {
+          const now = nowIso();
+          const reason = `${decision.label}：${getShortTrendReason(trendCode, trendReason)}`;
+          await db.run(
+            `UPDATE financial_candidate_pool
+             SET pool_status = 'expired',
+                 review_status = 'rejected',
+                 final_status = 'REJECTED',
+                 trend_phase_code = ?,
+                 trend_phase_reason = ?,
+                 candidate_reason = ?,
+                 forbidden_reason = ?,
+                 last_review_at = ?,
+                 review_action = 'trend_phase_rejected',
+                 updated_at = ?
+             WHERE id = ?
+               AND pool_status = 'active'
+               AND COALESCE(review_status, 'unreviewed') NOT IN ('plan_ready')`,
+            [trendCode, trendReason, reason, reason, now, now, item.id]
+          );
+          await db.run(
+            `UPDATE financial_entry_trigger_observations
+             SET observation_status = 'invalidated',
+                 entry_action = 'BLOCKED',
+                 action_label = '走势淘汰',
+                 trigger_reason = ?,
+                 trend_phase_code = ?,
+                 note = ?,
+                 updated_at = ?
+             WHERE symbol = ?
+               AND asset_type = ?
+               AND source = ?
+               AND observation_status IN ('watching', 'plan_candidate', 'confirmed')`,
+            [
+              reason,
+              trendCode,
+              '入池漏斗走势阶段硬拦截：本轮踢出 active 备选，后续重新符合条件再由备选池扫描带回。',
+              now,
+              item.symbol,
+              item.asset_type,
+              item.source || merged.source
+            ]
           );
         } else {
           const now = nowIso();
@@ -280,10 +372,12 @@ export async function runFinanceCandidateFunnelPipeline(config?: FinanceCandidat
           name: item.name,
           asset_type: item.asset_type,
           success: true,
-          passed,
+          passed: decision.action === 'advance',
+          decision: decision.action,
+          decision_label: decision.label,
           trend_phase_code: trendCode,
           message: result.message,
-          reason: passed ? `走势阶段可推进：${trendCode}` : `走势阶段卡住：${trendCode}`,
+          reason: `走势阶段${decision.label}：${trendCode}`,
           data: result.data
         });
       } catch (error) {
@@ -300,14 +394,17 @@ export async function runFinanceCandidateFunnelPipeline(config?: FinanceCandidat
     if (candidates.length > 0 && failedCount === candidates.length) {
       throw new Error(`走势阶段重算全部失败：${failedCount}/${candidates.length} 个标的接口失败`);
     }
-    const blockedCount = results.filter((item: any) => item.success !== false && !item.passed).length;
+    const holdCount = results.filter((item: any) => item.success !== false && item.decision === 'hold').length;
+    const rejectedCount = results.filter((item: any) => item.success !== false && item.decision === 'reject').length;
     return {
-      message: `走势阶段重算完成：通过 ${trendReadyCandidates.length} 个，挡下 ${blockedCount} 个，失败 ${failedCount} 个`,
+      message: `走势阶段重算完成：推进 ${trendReadyCandidates.length} 个，留队 ${holdCount} 个，踢出 ${rejectedCount} 个，失败 ${failedCount} 个`,
       data: {
         results,
         checked_count: candidates.length,
         passed_count: trendReadyCandidates.length,
-        blocked_count: blockedCount,
+        hold_count: holdCount,
+        rejected_count: rejectedCount,
+        blocked_count: holdCount + rejectedCount,
         failed_count: failedCount
       }
     };

@@ -541,6 +541,20 @@ function summarizePipelineStep(step: any) {
       }));
       break;
     }
+    case 'candidate_funnel': {
+      const nestedSteps = toArray(data.steps);
+      base.metrics = {
+        total: Number(data.summary?.total || nestedSteps.length),
+        success: Number(data.summary?.success || nestedSteps.filter((item: any) => item.status === 'success').length),
+        failed: Number(data.summary?.failed || nestedSteps.filter((item: any) => item.status === 'error').length)
+      };
+      base.details = nestedSteps.map((item: any) => ({
+        key: item.key,
+        status: item.status,
+        result: item.message || item.label || '--'
+      }));
+      break;
+    }
     case 'active_candidate_collect': {
       const byAssetType = assetTypeBreakdown(items);
       base.metrics = {

@@ -5,7 +5,9 @@ const router = express.Router();
 
 const TREND_PHASE_VERSION = 'trend_phase_v1.1';
 const READY_TREND_PHASE_CODES = new Set(['BREAKOUT', 'SLOW_GRIND_UP', 'RECOVERY']);
+const REJECT_TREND_PHASE_CODES = new Set(['CRASH_DROP', 'SLOW_BLEED', 'SURGE', 'REBOUND']);
 const READY_TREND_PHASE_SQL = `'BREAKOUT', 'SLOW_GRIND_UP', 'RECOVERY'`;
+const REJECT_TREND_PHASE_SQL = `'CRASH_DROP', 'SLOW_BLEED', 'SURGE', 'REBOUND'`;
 
 function getTrendQueueStatus(code?: string | null, reviewStatus?: string | null) {
   const trendCode = code || 'UNKNOWN';
@@ -19,7 +21,10 @@ function getTrendQueueStatus(code?: string | null, reviewStatus?: string | null)
   if (trendCode === 'UNKNOWN') {
     return { key: 'waiting_data', label: '等待走势确认', tone: 'neutral' };
   }
-  return { key: 'trend_blocked', label: '卡在走势阶段', tone: 'warning' };
+  if (REJECT_TREND_PHASE_CODES.has(trendCode)) {
+    return { key: 'should_reject', label: '应踢出本轮', tone: 'danger' };
+  }
+  return { key: 'trend_blocked', label: '留在走势队列', tone: 'warning' };
 }
 
 interface TrendThresholds {
@@ -855,7 +860,14 @@ router.get('/queue', async (req: Request, res: Response) => {
          COUNT(*) as total,
          SUM(CASE WHEN t.trend_phase_code IN (${READY_TREND_PHASE_SQL}) THEN 1 ELSE 0 END) as ready_count,
          SUM(CASE WHEN t.trend_phase_code IS NULL OR t.trend_phase_code = 'UNKNOWN' THEN 1 ELSE 0 END) as unknown_count,
-         SUM(CASE WHEN t.trend_phase_code IS NOT NULL AND t.trend_phase_code NOT IN (${READY_TREND_PHASE_SQL}) THEN 1 ELSE 0 END) as blocked_count
+         SUM(CASE WHEN t.trend_phase_code IN (${REJECT_TREND_PHASE_SQL}) THEN 1 ELSE 0 END) as reject_count,
+         SUM(CASE
+           WHEN t.trend_phase_code IS NOT NULL
+            AND t.trend_phase_code != 'UNKNOWN'
+            AND t.trend_phase_code NOT IN (${READY_TREND_PHASE_SQL})
+            AND t.trend_phase_code NOT IN (${REJECT_TREND_PHASE_SQL})
+           THEN 1 ELSE 0
+         END) as blocked_count
        FROM financial_candidate_pool c
        ${latestTrendJoin}
        WHERE ${whereSql}`,
@@ -887,6 +899,7 @@ router.get('/queue', async (req: Request, res: Response) => {
          CASE
            WHEN COALESCE(c.review_status, 'unreviewed') = 'trend_blocked'
                 AND t.trend_phase_code IN (${READY_TREND_PHASE_SQL}) THEN 0
+           WHEN t.trend_phase_code IN (${REJECT_TREND_PHASE_SQL}) THEN 1
            WHEN COALESCE(c.review_status, 'unreviewed') = 'trend_blocked' THEN 1
            WHEN t.trend_phase_code IS NULL OR t.trend_phase_code = 'UNKNOWN' THEN 2
            ELSE 3
@@ -918,7 +931,8 @@ router.get('/queue', async (req: Request, res: Response) => {
           total: Number(countRow?.total || 0),
           ready_count: Number(countRow?.ready_count || 0),
           blocked_count: Number(countRow?.blocked_count || 0),
-          unknown_count: Number(countRow?.unknown_count || 0)
+          unknown_count: Number(countRow?.unknown_count || 0),
+          reject_count: Number(countRow?.reject_count || 0)
         }
       }
     });
