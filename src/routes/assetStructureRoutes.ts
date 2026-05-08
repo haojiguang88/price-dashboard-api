@@ -1925,23 +1925,43 @@ router.post('/entry-trigger-observations/secondary-scan', async (req: Request, r
     await ensureEntryTriggerObservationSchema(db);
     const limit = Math.min(Number(req.body.limit || 50), 200);
     const now = new Date().toISOString();
+    const symbolFilter = String(req.body.symbol || '').trim();
+    const assetTypeFilter = String(req.body.asset_type || '').trim();
+    const sourceFilter = String(req.body.source || '').trim();
+    const targetFilters: string[] = [];
+    const targetParams: any[] = [];
+    if (symbolFilter) {
+      targetFilters.push('symbol = ?');
+      targetParams.push(symbolFilter);
+    }
+    if (assetTypeFilter) {
+      targetFilters.push('asset_type = ?');
+      targetParams.push(assetTypeFilter);
+    }
+    if (sourceFilter) {
+      targetFilters.push('source = ?');
+      targetParams.push(sourceFilter);
+    }
+    const targetFilterSql = targetFilters.length > 0 ? ` AND ${targetFilters.join(' AND ')}` : '';
 
     const observationRows = await db.all(
       `SELECT id, symbol, name, asset_type, source, observation_status
        FROM financial_entry_trigger_observations
        WHERE observation_status IN ('watching', 'plan_candidate', 'confirmed')
+         ${targetFilterSql}
        ORDER BY updated_at DESC, id DESC
        LIMIT ?`,
-      [limit]
+      [...targetParams, limit]
     );
 
     const candidateRows = await db.all(
       `SELECT id, symbol, name, asset_type, source, review_status
        FROM financial_candidate_pool
        WHERE pool_status = 'active' AND review_status IN ('wait_confirmation', 'plan_ready')
+         ${targetFilterSql}
        ORDER BY last_review_at DESC, id DESC
        LIMIT ?`,
-      [limit]
+      [...targetParams, limit]
     );
 
     const targets = new Map<string, any>();
@@ -1980,7 +2000,8 @@ router.post('/entry-trigger-observations/secondary-scan', async (req: Request, r
         (snapshot.close && snapshot.invalidation_line && snapshot.close < snapshot.invalidation_line);
       const canUpgrade = snapshot.action === 'READY_TO_PLAN' && !trendUnknown && !invalidated;
       const candidateDecision = resolveCandidateStatusAfterEntryScan(snapshot, invalidated, canUpgrade);
-      const status = invalidated ? 'invalidated' : canUpgrade ? 'confirmed' : 'watching';
+      const returnedToUpstream = candidateDecision.reviewStatus === 'trend_blocked' || candidateDecision.reviewStatus === 'structure_watch';
+      const status = invalidated ? 'invalidated' : canUpgrade ? 'confirmed' : returnedToUpstream ? 'returned' : 'watching';
       const candidateReviewStatus = candidateDecision.reviewStatus;
       const scanConclusion = candidateDecision.conclusion;
       const observationIds = [...target.observation_ids];
@@ -2025,7 +2046,7 @@ router.post('/entry-trigger-observations/secondary-scan', async (req: Request, r
             ...observationIds
           ]
         );
-      } else if (canUpgrade) {
+      } else {
         const inserted = await db.run(
           `INSERT INTO financial_entry_trigger_observations (
             symbol, name, asset_type, source, trade_date, observation_status,
@@ -2115,12 +2136,13 @@ router.post('/entry-trigger-observations/secondary-scan', async (req: Request, r
       checked: results.length,
       upgraded: results.filter(item => item.conclusion === '可升级计划准备').length,
       waiting: results.filter(item => item.conclusion === '继续等待').length,
+      returned: results.filter(item => String(item.conclusion || '').startsWith('退回')).length,
       invalidated: results.filter(item => item.conclusion === '失效淘汰').length
     };
 
     res.json({
       success: true,
-      message: `二次确认扫描完成：检查 ${summary.checked} 个，升级 ${summary.upgraded} 个，继续等待 ${summary.waiting} 个，失效 ${summary.invalidated} 个。`,
+      message: `二次确认扫描完成：检查 ${summary.checked} 个，升级 ${summary.upgraded} 个，继续等待 ${summary.waiting} 个，退回 ${summary.returned} 个，失效 ${summary.invalidated} 个。`,
       data: { summary, results }
     });
   } catch (error) {
@@ -2158,7 +2180,8 @@ router.post('/entry-trigger-observations/:id/secondary-scan', async (req: Reques
       (snapshot.close && snapshot.invalidation_line && snapshot.close < snapshot.invalidation_line);
     const canUpgrade = snapshot.action === 'READY_TO_PLAN' && !trendUnknown && !invalidated;
     const candidateDecision = resolveCandidateStatusAfterEntryScan(snapshot, invalidated, canUpgrade);
-    const status = invalidated ? 'invalidated' : canUpgrade ? 'confirmed' : 'watching';
+    const returnedToUpstream = candidateDecision.reviewStatus === 'trend_blocked' || candidateDecision.reviewStatus === 'structure_watch';
+    const status = invalidated ? 'invalidated' : canUpgrade ? 'confirmed' : returnedToUpstream ? 'returned' : 'watching';
     const candidateReviewStatus = candidateDecision.reviewStatus;
     const conclusion = candidateDecision.conclusion;
 
