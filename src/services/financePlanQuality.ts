@@ -3,6 +3,11 @@ function toNumber(value: any, fallback = 0): number {
   return Number.isFinite(num) ? num : fallback;
 }
 
+function toNullableNumber(value: any): number | null {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : null;
+}
+
 export function buildFinancePlanQuality(plan: any) {
   const structureScore = toNumber(plan.structure_score);
   const triggerScore = toNumber(plan.trigger_score);
@@ -14,43 +19,71 @@ export function buildFinancePlanQuality(plan: any) {
       ? Math.max(0, (close - invalidationLine) / close)
       : null;
   const trendPhase = String(plan.trend_phase_code || 'UNKNOWN');
-  const rewardPercent = ['BREAKOUT', 'SLOW_GRIND_UP', 'TREND_UP'].includes(trendPhase)
+  const targetSpacePercent = toNullableNumber(plan.target_space_percent ?? plan.target_space);
+  const pressureDistancePercent = toNullableNumber(plan.pressure_distance_percent ?? plan.distance_to_pressure);
+  const industryStrengthScore = toNullableNumber(plan.industry_strength_score ?? plan.industry_score);
+  const accountRiskStatus = String(plan.account_risk_status || plan.account_status || 'NORMAL');
+  const rewardPercent = targetSpacePercent ?? (['BREAKOUT', 'SLOW_GRIND_UP', 'TREND_UP'].includes(trendPhase)
     ? 0.16
     : ['RECOVERY', 'TREND_TRANSITION'].includes(trendPhase)
       ? 0.1
-      : 0.07;
+      : 0.07);
   const riskReward = riskPercent && riskPercent > 0 ? rewardPercent / riskPercent : null;
 
   const factors = [
     {
       key: 'structure',
       label: '结构质量',
-      score: Math.min(25, Math.max(0, structureScore / 4)),
+      score: Math.min(18, Math.max(0, structureScore / 5.6)),
       message: structureScore >= 80 ? '结构分高，具备优先观察价值。' : structureScore >= 65 ? '结构合格，但不是顶级样本。' : '结构分偏低，先降低计划级别。'
     },
     {
       key: 'trigger',
       label: '触发质量',
-      score: Math.min(20, Math.max(0, triggerScore / 5)),
+      score: Math.min(14, Math.max(0, triggerScore / 7.2)),
       message: triggerScore >= 80 ? '触发条件较清晰。' : triggerScore >= 60 ? '触发条件一般，需要二次确认。' : '触发偏弱，不适合直接放大金额。'
     },
     {
       key: 'risk',
       label: '失效线距离',
-      score: riskPercent === null ? 6 : riskPercent <= 0.04 ? 20 : riskPercent <= 0.07 ? 14 : riskPercent <= 0.1 ? 8 : 3,
+      score: riskPercent === null ? 5 : riskPercent <= 0.04 ? 18 : riskPercent <= 0.07 ? 13 : riskPercent <= 0.1 ? 7 : 2,
       message: riskPercent === null ? '风险距离缺失，计划质量降级。' : riskPercent <= 0.04 ? '失效线近，风险可控。' : riskPercent <= 0.07 ? '风险距离可接受。' : '失效线偏远，计划不够划算。'
     },
     {
       key: 'risk_reward',
       label: '盈亏比',
-      score: riskReward === null ? 5 : riskReward >= 3 ? 20 : riskReward >= 2 ? 15 : riskReward >= 1.4 ? 9 : 3,
+      score: riskReward === null ? 4 : riskReward >= 3 ? 14 : riskReward >= 2 ? 11 : riskReward >= 1.4 ? 7 : 2,
       message: riskReward === null ? '缺少盈亏比基础数据。' : riskReward >= 2 ? '盈亏比具备交易意义。' : '盈亏比一般，符合条件也未必值得做。'
     },
     {
       key: 'clarity',
       label: '计划清晰度',
-      score: plan.invalidation_line && plan.suggested_entry_zone && plan.trigger_type ? 15 : 8,
+      score: plan.invalidation_line && plan.suggested_entry_zone && plan.trigger_type ? 10 : 5,
       message: plan.invalidation_line && plan.suggested_entry_zone && plan.trigger_type ? '入场区、触发和失效线清楚。' : '计划要素不完整，执行时容易变形。'
+    },
+    {
+      key: 'target_space',
+      label: '目标空间',
+      score: rewardPercent >= 0.18 ? 9 : rewardPercent >= 0.12 ? 7 : rewardPercent >= 0.08 ? 4 : 2,
+      message: targetSpacePercent === null ? '暂未接入明确目标位，用走势阶段估算目标空间。' : rewardPercent >= 0.12 ? '目标空间相对充足。' : '目标空间偏窄，计划吸引力下降。'
+    },
+    {
+      key: 'pressure',
+      label: '压力位距离',
+      score: pressureDistancePercent === null ? 4 : pressureDistancePercent >= 0.12 ? 7 : pressureDistancePercent >= 0.06 ? 5 : 2,
+      message: pressureDistancePercent === null ? '暂未接入压力位，后续需从结构/前高补充。' : pressureDistancePercent >= 0.06 ? '上方压力距离尚可。' : '离压力位过近，容易涨了也不好做。'
+    },
+    {
+      key: 'industry_strength',
+      label: '行业强度',
+      score: industryStrengthScore === null ? 3 : industryStrengthScore >= 80 ? 5 : industryStrengthScore >= 60 ? 4 : 2,
+      message: industryStrengthScore === null ? '非行业ETF或暂未接入行业强度，按中性处理。' : industryStrengthScore >= 60 ? '行业强度有支撑。' : '行业强度偏弱，降低计划级别。'
+    },
+    {
+      key: 'account_risk',
+      label: '账户风险状态',
+      score: accountRiskStatus === 'COOLDOWN' ? 0 : accountRiskStatus === 'LIMITED' ? 2 : 5,
+      message: accountRiskStatus === 'COOLDOWN' ? '账户冷却中，计划不能升级为实仓。' : accountRiskStatus === 'LIMITED' ? '账户受限，计划金额需要降级。' : '账户状态未触发限制。'
     }
   ];
   const score = Math.round(factors.reduce((sum, item) => sum + item.score, 0));
@@ -64,11 +97,16 @@ export function buildFinancePlanQuality(plan: any) {
         : '不建议新增实仓，优先等更近失效线或更好结构。';
 
   return {
+    version: 'v2',
     score,
     label,
     action,
     risk_percent: riskPercent,
     reward_percent: rewardPercent,
+    target_space_percent: targetSpacePercent,
+    pressure_distance_percent: pressureDistancePercent,
+    industry_strength_score: industryStrengthScore,
+    account_risk_status: accountRiskStatus,
     risk_reward: riskReward !== null ? Math.round(riskReward * 100) / 100 : null,
     factors: factors.map(item => ({ ...item, score: Math.round(item.score) }))
   };

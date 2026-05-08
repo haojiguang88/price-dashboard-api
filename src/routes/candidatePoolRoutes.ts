@@ -117,7 +117,7 @@ interface CandidateGate {
   blocking: boolean;
 }
 
-type OpportunityTypeCode = 'DEFENSIVE' | 'REPAIR' | 'TREND';
+type OpportunityTypeCode = 'DEFENSIVE' | 'REPAIR' | 'TREND' | 'EMOTIONAL' | 'NOT_APPLICABLE';
 
 interface OpportunityTypeTag {
   code: OpportunityTypeCode;
@@ -1074,6 +1074,27 @@ function classifyOpportunityType(input: any): OpportunityTypeTag {
   const distanceComfortable = distanceToMa60 !== null && distanceToMa60 >= -0.01 && distanceToMa60 <= 0.08;
   const distanceClose = distanceToMa60 !== null && distanceToMa60 >= -0.01 && distanceToMa60 <= 0.04;
   const lowVolatility = amplitudeOrRange !== null && amplitudeOrRange <= (assetType === 'stock' ? 0.14 : 0.08);
+
+  if (!['stock', 'etf'].includes(assetType)) {
+    return {
+      code: 'NOT_APPLICABLE',
+      label: '不适用型',
+      tone: 'neutral',
+      reason: '资产类型不匹配当前权益池，先进入资产路由，不作为硬闸门外的交易许可。'
+    };
+  }
+
+  if (
+    trendPhaseCode === 'SURGE' ||
+    (amplitudeOrRange !== null && amplitudeOrRange >= (assetType === 'stock' ? 0.22 : 0.12) && !distanceClose)
+  ) {
+    return {
+      code: 'EMOTIONAL',
+      label: '情绪型/急涨型',
+      tone: 'warn',
+      reason: '短期急涨或波动过大，只作为解释层提示，不追涨，不直接放大计划。'
+    };
+  }
 
   if (
     safeZone &&
