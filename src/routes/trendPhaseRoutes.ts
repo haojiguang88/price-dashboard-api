@@ -4,6 +4,23 @@ import getDb from '../config/database';
 const router = express.Router();
 
 const TREND_PHASE_VERSION = 'trend_phase_v1.1';
+const READY_TREND_PHASE_CODES = new Set(['BREAKOUT', 'SLOW_GRIND_UP', 'RECOVERY']);
+const READY_TREND_PHASE_SQL = `'BREAKOUT', 'SLOW_GRIND_UP', 'RECOVERY'`;
+
+function getTrendQueueStatus(code?: string | null, reviewStatus?: string | null) {
+  const trendCode = code || 'UNKNOWN';
+  if (READY_TREND_PHASE_CODES.has(trendCode)) {
+    return {
+      key: 'ready_to_advance',
+      label: reviewStatus === 'trend_blocked' ? '已转好，待流水线推进' : '可推进',
+      tone: 'success'
+    };
+  }
+  if (trendCode === 'UNKNOWN') {
+    return { key: 'waiting_data', label: '等待走势确认', tone: 'neutral' };
+  }
+  return { key: 'trend_blocked', label: '卡在走势阶段', tone: 'warning' };
+}
 
 interface TrendThresholds {
   label: string;
@@ -790,6 +807,126 @@ router.post('/recalc', async (req: Request, res: Response) => {
     res.status(500).json({
       success: false,
       message: `计算失败: ${(error as Error).message}`
+    });
+  }
+});
+
+router.get('/queue', async (req: Request, res: Response) => {
+  try {
+    const db = await getDb();
+    const source = String(req.query.source || 'tushare');
+    const limit = Math.max(Math.min(parseInt(req.query.limit as string) || 80, 300), 1);
+    const assetType = String(req.query.asset_type || '').trim();
+
+    const whereParts = [
+      `c.pool_status = 'active'`,
+      `c.asset_type IN ('stock', 'etf')`,
+      `c.source = ?`,
+      `COALESCE(c.review_status, 'unreviewed') NOT IN ('plan_ready', 'rejected')`,
+      `(
+        COALESCE(c.review_status, 'unreviewed') = 'trend_blocked'
+        OR t.trend_phase_code IS NULL
+        OR t.trend_phase_code NOT IN (${READY_TREND_PHASE_SQL})
+      )`
+    ];
+    const whereParams: any[] = [source];
+
+    if (assetType === 'stock' || assetType === 'etf') {
+      whereParts.push(`c.asset_type = ?`);
+      whereParams.push(assetType);
+    }
+
+    const latestTrendJoin = `
+      LEFT JOIN financial_trend_phase_results t ON t.id = (
+        SELECT t2.id
+        FROM financial_trend_phase_results t2
+        WHERE t2.symbol = c.symbol
+          AND t2.asset_type = c.asset_type
+          AND t2.source = c.source
+          AND t2.rule_version = ?
+        ORDER BY t2.trade_date DESC, t2.id DESC
+        LIMIT 1
+      )
+    `;
+    const whereSql = whereParts.join('\n      AND ');
+
+    const countRow = await db.get(
+      `SELECT
+         COUNT(*) as total,
+         SUM(CASE WHEN t.trend_phase_code IN (${READY_TREND_PHASE_SQL}) THEN 1 ELSE 0 END) as ready_count,
+         SUM(CASE WHEN t.trend_phase_code IS NULL OR t.trend_phase_code = 'UNKNOWN' THEN 1 ELSE 0 END) as unknown_count,
+         SUM(CASE WHEN t.trend_phase_code IS NOT NULL AND t.trend_phase_code NOT IN (${READY_TREND_PHASE_SQL}) THEN 1 ELSE 0 END) as blocked_count
+       FROM financial_candidate_pool c
+       ${latestTrendJoin}
+       WHERE ${whereSql}`,
+      [TREND_PHASE_VERSION, ...whereParams]
+    );
+
+    const rows = await db.all(
+      `SELECT
+         c.id,
+         c.symbol,
+         c.name,
+         c.asset_type,
+         c.source,
+         c.priority_score,
+         c.review_status,
+         c.candidate_reason,
+         c.last_checked_at,
+         c.updated_at,
+         t.trade_date,
+         t.close,
+         t.bias60,
+         t.ret20,
+         t.trend_phase_code,
+         t.trend_phase_reason
+       FROM financial_candidate_pool c
+       ${latestTrendJoin}
+       WHERE ${whereSql}
+       ORDER BY
+         CASE
+           WHEN COALESCE(c.review_status, 'unreviewed') = 'trend_blocked'
+                AND t.trend_phase_code IN (${READY_TREND_PHASE_SQL}) THEN 0
+           WHEN COALESCE(c.review_status, 'unreviewed') = 'trend_blocked' THEN 1
+           WHEN t.trend_phase_code IS NULL OR t.trend_phase_code = 'UNKNOWN' THEN 2
+           ELSE 3
+         END,
+         c.priority_score DESC,
+         COALESCE(c.updated_at, c.last_checked_at) DESC,
+         c.id DESC
+       LIMIT ?`,
+      [TREND_PHASE_VERSION, ...whereParams, limit]
+    );
+
+    const items = rows.map((row: any) => {
+      const stageStatus = getTrendQueueStatus(row.trend_phase_code, row.review_status);
+      return {
+        ...row,
+        trend_phase_code: row.trend_phase_code || 'UNKNOWN',
+        trend_phase_reason: row.trend_phase_reason || row.candidate_reason || '暂无走势阶段结果，等待流水线重算。',
+        stage_status: stageStatus.key,
+        stage_status_label: stageStatus.label,
+        stage_status_tone: stageStatus.tone
+      };
+    });
+
+    res.json({
+      success: true,
+      data: {
+        items,
+        summary: {
+          total: Number(countRow?.total || 0),
+          ready_count: Number(countRow?.ready_count || 0),
+          blocked_count: Number(countRow?.blocked_count || 0),
+          unknown_count: Number(countRow?.unknown_count || 0)
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Error getting trend phase queue:', error);
+    res.status(500).json({
+      success: false,
+      message: `获取走势阶段队列失败: ${(error as Error).message}`
     });
   }
 });

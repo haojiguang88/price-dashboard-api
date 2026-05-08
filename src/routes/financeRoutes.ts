@@ -841,6 +841,7 @@ router.get('/workflow-summary', async (_req: Request, res: Response) => {
       candidate_active: await scalar(`SELECT COUNT(*) as count FROM financial_candidate_pool WHERE pool_status = 'active' AND asset_type IN ('stock', 'etf')`),
       review_unreviewed: await scalar(`SELECT COUNT(*) as count FROM financial_candidate_pool WHERE pool_status = 'active' AND asset_type IN ('stock', 'etf') AND COALESCE(review_status, 'unreviewed') = 'unreviewed'`),
       review_drafted: await scalar(`SELECT COUNT(*) as count FROM financial_candidate_pool WHERE pool_status = 'active' AND asset_type IN ('stock', 'etf') AND review_status = 'drafted'`),
+      trend_blocked: await scalar(`SELECT COUNT(*) as count FROM financial_candidate_pool WHERE pool_status = 'active' AND asset_type IN ('stock', 'etf') AND review_status = 'trend_blocked'`),
       wait_confirmation: await scalar(`
         SELECT COUNT(*) as count
         FROM financial_candidate_pool c

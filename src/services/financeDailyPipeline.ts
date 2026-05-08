@@ -81,6 +81,12 @@ function mergeFunnelConfig(config?: FinanceCandidateFunnelConfig | null): Requir
   } as Required<FinanceCandidateFunnelConfig>;
 }
 
+function getShortTrendReason(trendCode: string, trendReason?: string | null) {
+  const reason = String(trendReason || '').trim();
+  if (!reason) return trendCode || 'UNKNOWN';
+  return reason.length > 80 ? `${reason.slice(0, 80)}...` : reason;
+}
+
 function buildPipelineResult(steps: FinancePipelineStep[], config: any) {
   const failedStep = steps.find(step => step.status === 'error');
   return {
@@ -186,6 +192,7 @@ export async function runFinanceCandidateFunnelPipeline(config?: FinanceCandidat
        WHERE pool_status = 'active'
          AND source = ?
          AND asset_type IN ('stock', 'etf')
+         AND COALESCE(review_status, 'unreviewed') <> 'rejected'
        ORDER BY priority_score DESC, last_checked_at DESC, id DESC
        LIMIT ?`,
       [merged.source, Math.max(Math.min(Number(merged.candidate_limit || 120), 300), 1)]
@@ -214,19 +221,35 @@ export async function runFinanceCandidateFunnelPipeline(config?: FinanceCandidat
           [item.symbol, item.asset_type, item.source || merged.source, TREND_PHASE_VERSION]
         );
         const trendCode = latestTrend?.trend_phase_code || 'UNKNOWN';
+        const trendReason = latestTrend?.trend_phase_reason || `走势阶段为 ${trendCode}，未达到准备入场阶段。`;
         const passed = FUNNEL_READY_TREND_PHASES.has(trendCode);
         if (passed) {
           trendReadyCandidates.push(item);
+          const now = nowIso();
+          await db.run(
+            `UPDATE financial_candidate_pool
+             SET review_status = CASE WHEN review_status = 'trend_blocked' THEN 'wait_confirmation' ELSE review_status END,
+                 trend_phase_code = ?,
+                 trend_phase_reason = ?,
+                 updated_at = ?
+             WHERE id = ?
+               AND pool_status = 'active'
+               AND COALESCE(review_status, 'unreviewed') NOT IN ('rejected')`,
+            [trendCode, trendReason, now, item.id]
+          );
         } else {
           const now = nowIso();
           await db.run(
             `UPDATE financial_candidate_pool
-             SET review_status = 'wait_confirmation',
+             SET review_status = 'trend_blocked',
+                 trend_phase_code = ?,
+                 trend_phase_reason = ?,
+                 candidate_reason = ?,
                  updated_at = ?
              WHERE id = ?
                AND pool_status = 'active'
-               AND review_status IN ('plan_ready', 'wait_confirmation', 'unreviewed')`,
-            [now, item.id]
+               AND COALESCE(review_status, 'unreviewed') NOT IN ('rejected')`,
+            [trendCode, trendReason, `走势阶段卡住：${getShortTrendReason(trendCode, trendReason)}`, now, item.id]
           );
           await db.run(
             `UPDATE financial_entry_trigger_observations
@@ -260,7 +283,7 @@ export async function runFinanceCandidateFunnelPipeline(config?: FinanceCandidat
           passed,
           trend_phase_code: trendCode,
           message: result.message,
-          reason: passed ? `走势阶段可推进：${trendCode}` : `走势阶段只观察：${trendCode}`,
+          reason: passed ? `走势阶段可推进：${trendCode}` : `走势阶段卡住：${trendCode}`,
           data: result.data
         });
       } catch (error) {
@@ -304,6 +327,7 @@ export async function runFinanceCandidateFunnelPipeline(config?: FinanceCandidat
           await db.run(
             `UPDATE financial_candidate_pool
              SET pool_status = 'expired',
+                 review_status = 'rejected',
                  last_checked_at = ?,
                  updated_at = ?,
                  candidate_reason = ?,

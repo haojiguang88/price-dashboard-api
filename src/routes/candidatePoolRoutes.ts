@@ -1441,6 +1441,7 @@ function getSuggestedReviewAction(item: any): { key: string; label: string; tone
 function getReviewStatusLabel(status?: string | null): string {
   switch (status) {
     case 'drafted': return '已生成草稿';
+    case 'trend_blocked': return '卡在走势阶段';
     case 'wait_confirmation': return '等待二次确认';
     case 'plan_ready': return '进入计划准备';
     case 'rejected': return '复盘淘汰';
@@ -2565,7 +2566,7 @@ router.patch('/candidate-pool/:id/review-status', async (req: Request, res: Resp
     await ensureCandidateReviewSchema(db);
     const id = req.params.id;
     const status = req.body.status;
-    const validStatuses = ['unreviewed', 'drafted', 'wait_confirmation', 'plan_ready', 'rejected'];
+    const validStatuses = ['unreviewed', 'drafted', 'trend_blocked', 'wait_confirmation', 'plan_ready', 'rejected'];
 
     if (!validStatuses.includes(status)) {
       return res.status(400).json({ success: false, message: '无效的复盘状态' });
