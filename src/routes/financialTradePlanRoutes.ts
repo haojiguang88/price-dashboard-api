@@ -59,6 +59,114 @@ function toNumber(value: any, fallback = 0): number {
   return Number.isFinite(num) ? num : fallback;
 }
 
+function formatMoney(value: any): string {
+  if (value === null || value === undefined || value === '') return '--';
+  const num = Number(value);
+  return Number.isFinite(num) ? num.toFixed(3).replace(/\.?0+$/, '') : '--';
+}
+
+function formatPercent(value: any): string {
+  if (value === null || value === undefined || value === '') return '--';
+  const num = Number(value);
+  if (!Number.isFinite(num)) return '--';
+  return `${num > 0 ? '+' : ''}${(num * 100).toFixed(2)}%`;
+}
+
+function formatPlanProjectName(plan: any): string {
+  return [plan.symbol, plan.name].filter(Boolean).join(' ');
+}
+
+async function ensureInvalidationTradeReviewDraft(db: any, plan: any, reason: string) {
+  const autoKey = `AUTO_FINANCIAL_PLAN_INVALIDATION:${plan.id}`;
+  const existing = await db.get(
+    `SELECT id, title
+     FROM trade_reviews
+     WHERE is_deleted = 0
+       AND note LIKE ?
+     ORDER BY id DESC
+     LIMIT 1`,
+    [`%${autoKey}%`]
+  );
+  if (existing) {
+    return { id: existing.id, title: existing.title, created: false };
+  }
+
+  const latest = await db.get(
+    `SELECT trade_date, close
+     FROM financial_daily_prices
+     WHERE symbol = ?
+       AND asset_type = ?
+       AND source = ?
+     ORDER BY trade_date DESC
+     LIMIT 1`,
+    [plan.symbol, plan.asset_type || 'stock', plan.source || 'tushare']
+  );
+  const planQuality = buildPlanQuality(plan);
+  const latestClose = toNumber(latest?.close, toNumber(plan.close_price));
+  const invalidationLine = toNumber(plan.invalidation_line);
+  const breakDistance = latestClose > 0 && invalidationLine > 0 ? latestClose / invalidationLine - 1 : null;
+  const now = new Date().toISOString();
+  const reviewDate = now.slice(0, 10);
+  const projectName = formatPlanProjectName(plan);
+  const title = `${projectName} 失效/止损复盘草稿`;
+  const background = [
+    `来源：金融买入计划 #${plan.id}`,
+    `计划日期：${plan.trade_date || '--'}`,
+    `资产类型：${plan.asset_type || '--'} / 数据源：${plan.source || '--'}`,
+    `计划价：${formatMoney(plan.close_price)}，失效线：${formatMoney(plan.invalidation_line)}，最大允许亏损：${formatPercent(plan.max_loss_percent)}`,
+    `最新收盘：${formatMoney(latestClose)}${latest?.trade_date ? `（${latest.trade_date}）` : ''}，相对失效线：${formatPercent(breakDistance)}`,
+    `走势：${plan.trend_phase_code || '--'}，结构分：${plan.structure_score ?? '--'}，触发分：${plan.trigger_score ?? '--'}，计划质量：${planQuality.label} ${planQuality.score}`
+  ].join('\n');
+  const judgment = [
+    plan.trigger_reason ? `触发原因：${plan.trigger_reason}` : '',
+    plan.entry_reason ? `入场理由：${plan.entry_reason}` : '',
+    plan.suggested_entry_zone ? `建议入场区：${plan.suggested_entry_zone}` : '',
+    `原计划纪律：跌破失效线后先处理止损/退出，不用后验行情倒推当时决策。`
+  ].filter(Boolean).join('\n');
+  const laterOutcome = [
+    reason,
+    `系统已将计划标记为失效/止损，并生成这条交易复盘草稿。`,
+    `需要人工补充：当时信息是否充分、计划分数是否可靠、触发分/结构分是否需要调权、执行是否一致。`
+  ].join('\n');
+  const note = [
+    autoKey,
+    `source=financial_trade_plan`,
+    `plan_id=${plan.id}`,
+    `generated_at=${now}`
+  ].join('\n');
+
+  const result = await db.run(
+    `INSERT INTO trade_reviews (
+      title, track, project_name, review_date, result_type, summary_conclusion,
+      background, judgment_at_that_time, action_at_that_time, later_outcome,
+      root_cause_type, exposed_problem, extracted_lesson, short_lesson,
+      note, is_deleted, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      title,
+      '金融专项',
+      projectName,
+      reviewDate,
+      '失效/止损',
+      '自动草稿：计划触发失效/止损，等待人工复盘补充结论。',
+      background,
+      judgment,
+      '按计划纪律确认失效/止损，优先处理风险，不在失效线下方新增。',
+      laterOutcome,
+      '待复盘',
+      '待补充：区分计划本身质量、市场环境变化、触发偏弱、结构误判或执行偏差。',
+      '待补充：复盘后决定是否调整触发分、结构分、失效线或计划质量评分。',
+      '待补充',
+      note,
+      0,
+      now,
+      now
+    ]
+  );
+
+  return { id: result.lastID, title, created: true };
+}
+
 async function buildInvalidationControl(
   db: any,
   symbol: string,
@@ -839,6 +947,8 @@ router.patch('/trade-plans/:id/feedback', async (req: Request, res: Response) =>
     const db = await getDb();
     const id = Number(req.params.id);
     const now = new Date().toISOString();
+    const beforePlan = await db.get('SELECT * FROM financial_trade_plans WHERE id = ? AND is_deleted = 0', [id]);
+    if (!beforePlan) return res.status(404).json({ success: false, message: '计划不存在' });
     const allowed = [
       'status', 'is_bought', 'buy_date', 'buy_price', 'buy_amount',
       'perf_5d', 'perf_10d', 'perf_20d', 'perf_60d',
@@ -860,8 +970,22 @@ router.patch('/trade-plans/:id/feedback', async (req: Request, res: Response) =>
     params.push(now, id);
     await db.run(`UPDATE financial_trade_plans SET ${updates.join(', ')} WHERE id = ? AND is_deleted = 0`, params);
     const plan = await db.get('SELECT * FROM financial_trade_plans WHERE id = ?', [id]);
+    let reviewDraft = null;
     if (plan) plan.plan_quality = buildPlanQuality(plan);
-    res.json({ success: true, data: plan });
+    const shouldCreateReviewDraft =
+      plan &&
+      (
+        String(plan.status || '') === 'invalidated' ||
+        Number(plan.stopped_out || 0) === 1
+      );
+    if (shouldCreateReviewDraft) {
+      const reason = [
+        String(plan.status || '') === 'invalidated' ? '计划状态已确认失效。' : '',
+        Number(plan.stopped_out || 0) === 1 ? '已勾选触发止损。' : ''
+      ].filter(Boolean).join(' ');
+      reviewDraft = await ensureInvalidationTradeReviewDraft(db, plan, reason || '计划已触发失效处理。');
+    }
+    res.json({ success: true, data: plan, review_draft: reviewDraft });
   } catch (error) {
     res.status(500).json({ success: false, message: `更新反馈失败：${(error as Error).message}` });
   }
