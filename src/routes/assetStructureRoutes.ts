@@ -1717,7 +1717,7 @@ router.get('/entry-trigger-observations', async (req: Request, res: Response) =>
       `SELECT *
        FROM financial_entry_trigger_observations
        ${where}
-       ORDER BY created_at DESC, id DESC
+       ORDER BY updated_at DESC, created_at DESC, id DESC
       LIMIT ?`,
       params
     );
@@ -1999,6 +1999,7 @@ router.post('/entry-trigger-observations/:id/secondary-scan', async (req: Reques
       (snapshot.close && snapshot.invalidation_line && snapshot.close < snapshot.invalidation_line);
     const canUpgrade = snapshot.action === 'READY_TO_PLAN' && !trendUnknown && !invalidated;
     const status = invalidated ? 'invalidated' : canUpgrade ? 'confirmed' : 'watching';
+    const candidateReviewStatus = invalidated ? 'rejected' : canUpgrade ? 'plan_ready' : 'wait_confirmation';
     const conclusion = invalidated ? '失效淘汰' : canUpgrade ? '可升级计划准备' : '继续等待';
 
     await db.run(
@@ -2039,6 +2040,18 @@ router.post('/entry-trigger-observations/:id/secondary-scan', async (req: Reques
         now,
         id
       ]
+    );
+
+    await db.run(
+      `UPDATE financial_candidate_pool
+       SET review_status = ?,
+           updated_at = ?
+       WHERE symbol = ?
+         AND asset_type = ?
+         AND source = ?
+         AND pool_status = 'active'
+         AND review_status IN ('wait_confirmation', 'plan_ready', 'unreviewed')`,
+      [candidateReviewStatus, now, observation.symbol, observation.asset_type, observation.source]
     );
 
     const saved = await db.get(

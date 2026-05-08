@@ -686,6 +686,17 @@ router.post('/trade-plans/from-entry-trigger', async (req: Request, res: Respons
     );
 
     const plan = await db.get('SELECT * FROM financial_trade_plans WHERE id = ?', [result.lastID]);
+    await db.run(
+      `UPDATE financial_entry_trigger_observations
+       SET observation_status = 'planned',
+           note = ?,
+           updated_at = ?
+       WHERE symbol = ?
+         AND asset_type = ?
+         AND source = ?
+         AND observation_status IN ('confirmed', 'plan_candidate')`,
+      [`已生成金融买入计划 #${result.lastID}，入场观察闭环。`, now, symbol, assetType, source]
+    );
     if (plan) plan.plan_quality = buildPlanQuality(plan);
     res.json({ success: true, data: plan, message: '金融买入计划已生成' });
   } catch (error) {
