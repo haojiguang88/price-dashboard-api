@@ -147,15 +147,34 @@ const CANDIDATE_GATE_DEFINITIONS = [
 
 const MODEL_RECHECK_HARD_BLOCKING_GATES = new Set([
   'asset_applicability',
+  'data_ready',
   'special_treatment',
+  'liquidity_gate',
+  'market_cap_gate',
+  'extreme_trade_gate',
+  'structure_gate',
+  'risk_forbidden_gate',
 ]);
+const MODEL_RECHECK_MIN_PROBABILITY = 0.45;
 
 function isHardBlockedFromModelRecheck(item: any) {
   const firstBlockingGateKey = String(item?.first_blocking_gate_key || '').trim();
   const firstBlockingGateLabel = String(item?.first_blocking_gate_label || '').trim();
+  const structureStatus = String(item?.structure_status || '').trim();
+  const forbiddenReason = String(item?.forbidden_reason || item?.candidate_reason || item?.risk_note || '').trim();
   return MODEL_RECHECK_HARD_BLOCKING_GATES.has(firstBlockingGateKey)
     || firstBlockingGateLabel === 'ST/退市过滤'
+    || structureStatus === 'STRUCTURE_BROKEN'
+    || /结构(失败|破坏)|跌破失效线|极端交易状态/.test(forbiddenReason)
     || isSpecialTreatmentName(item?.name);
+}
+
+function isVisibleModelRecheckItem(item: any) {
+  const probability = Number(item?.ml_probability);
+  return !isHardBlockedFromModelRecheck(item)
+    && item?.ml_available
+    && Number.isFinite(probability)
+    && probability >= MODEL_RECHECK_MIN_PROBABILITY;
 }
 
 function parseJson(value: unknown, fallback: any = null) {
@@ -2000,7 +2019,10 @@ router.get('/candidate-pool', async (req: Request, res: Response) => {
     const reviewQueue = req.query.review_queue as string | undefined;
     const excludeEntryObservation = req.query.exclude_entry_observation === '1' || req.query.exclude_entry_observation === 'true';
     const limit = Math.min(parseInt(req.query.limit as string) || 100, 500);
-    const includeModel = req.query.include_model === '1' || req.query.include_model === 'true';
+    const queryLimit = reviewQueue === 'model_recheck'
+      ? Math.min(Math.max(limit * 10, 200), 500)
+      : limit;
+    const includeModel = req.query.include_model === '1' || req.query.include_model === 'true' || reviewQueue === 'model_recheck';
 
     const params: any[] = [CANDIDATE_RULE_VERSION];
     let where = 'WHERE rule_version = ?';
@@ -2043,7 +2065,7 @@ router.get('/candidate-pool', async (req: Request, res: Response) => {
       )`;
     }
 
-    params.push(limit);
+    params.push(queryLimit);
 
     let items = await db.all(
       `SELECT financial_candidate_pool.*,
@@ -2099,7 +2121,7 @@ router.get('/candidate-pool', async (req: Request, res: Response) => {
 
     if (includeModel && ['active', 'expired', 'all'].includes(status)) {
       try {
-        const scoreMap = await runCandidateScoreWorker(limit, status === 'all' ? 'all' : status as 'active' | 'expired');
+        const scoreMap = await runCandidateScoreWorker(queryLimit, status === 'all' ? 'all' : status as 'active' | 'expired');
         items = items.map((item: any) => {
           const score = scoreMap[`${item.symbol}|${item.asset_type}|${item.source}`];
           return {
@@ -2120,6 +2142,10 @@ router.get('/candidate-pool', async (req: Request, res: Response) => {
           ml_score_reason: error instanceof Error ? error.message : String(error),
         }));
       }
+    }
+
+    if (reviewQueue === 'model_recheck') {
+      items = items.filter(isVisibleModelRecheckItem).slice(0, limit);
     }
 
     items = items.map(hydrateCandidateItem);
