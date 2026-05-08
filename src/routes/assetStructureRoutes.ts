@@ -2,6 +2,11 @@ import express, { Request, Response } from 'express';
 import getDb from '../config/database';
 import { exec, execFile } from 'child_process';
 import path from 'path';
+import {
+  calculateProfileInvalidationLine,
+  getFinancePlanProfileConfig,
+  resolveFinancePlanProfile
+} from '../services/financePlanProfile';
 
 const router = express.Router();
 const TREND_PHASE_VERSION = 'trend_phase_v1.1';
@@ -476,6 +481,9 @@ interface EntryTriggerPlan {
     suggested_entry_zone: string;
     invalidation_line: number;
     max_loss_percent: number | null;
+    plan_profile: string;
+    plan_profile_label: string;
+    plan_profile_note: string;
     position_suggestion: string;
     follow_up: string;
   };
@@ -767,17 +775,19 @@ function calculateEntryTriggerPlan(
   marketRegime: string,
   entryPermission: string,
   trendPhaseCode?: string | null,
-  trendAction?: string
+  trendAction?: string,
+  planProfileKey?: string | null
 ): EntryTriggerPlan {
+  const planProfile = getFinancePlanProfileConfig(planProfileKey);
   const latest = prices[prices.length - 1];
   const previous = prices.length >= 2 ? prices[prices.length - 2] : null;
   const latestChange = previous && previous.close > 0 ? roundRatio((latest.close - previous.close) / previous.close) : null;
   const distanceToMa20 = structure.ma20 > 0 ? roundRatio((structure.close - structure.ma20) / structure.ma20) : null;
   const volumeRatio5 = getVolumeRatio5(prices);
   const recentBreakout = getRecentBreakout(prices);
-  const notChasing = structure.distance_to_ma60 <= 0.08 && (latestChange === null || latestChange <= 0.04);
+  const notChasing = structure.distance_to_ma60 <= planProfile.chaseDistanceMax && (latestChange === null || latestChange <= planProfile.dailyChangeChaseMax);
   const nearInvalidation = structure.invalidation_line > 0
-    ? (structure.close - structure.invalidation_line) / structure.close <= 0.04 && structure.close > structure.invalidation_line
+    ? (structure.close - structure.invalidation_line) / structure.close <= planProfile.nearInvalidationMax && structure.close > structure.invalidation_line
     : false;
   const maxLossPercent = structure.invalidation_line > 0 && structure.close > structure.invalidation_line
     ? roundRatio((structure.close - structure.invalidation_line) / structure.close)
@@ -786,6 +796,9 @@ function calculateEntryTriggerPlan(
   const blockedReasons: string[] = [];
   const structureReadinessReasons: string[] = [];
   const trendReadinessReasons: string[] = [];
+  if (!planProfile.allowsTradePlan) {
+    blockedReasons.push(`${planProfile.label}：${planProfile.note}`);
+  }
   if (entryPermission !== 'ALLOW_STRUCTURE_CHECK') {
     blockedReasons.push('市场权限未放行，当前只允许观察或等待修复。');
   }
@@ -859,7 +872,7 @@ function calculateEntryTriggerPlan(
       score: nearInvalidation ? 10 : 0,
       reason: maxLossPercent === null
         ? '当前价格未站在失效线之上。'
-        : `到失效线的理论风险约 ${(maxLossPercent * 100).toFixed(2)}%。`
+        : `到${planProfile.label}失效线的理论风险约 ${(maxLossPercent * 100).toFixed(2)}%。`
     },
     {
       code: 'NOT_CHASING_TODAY',
@@ -867,8 +880,8 @@ function calculateEntryTriggerPlan(
       status: notChasing ? 'triggered' : 'blocked',
       score: notChasing ? 10 : 0,
       reason: latestChange === null
-        ? `偏离 MA60 ${(structure.distance_to_ma60 * 100).toFixed(2)}%。`
-        : `当日涨跌幅 ${(latestChange * 100).toFixed(2)}%，偏离 MA60 ${(structure.distance_to_ma60 * 100).toFixed(2)}%。`
+        ? `偏离 MA60 ${(structure.distance_to_ma60 * 100).toFixed(2)}%，当前Profile允许追高上限 ${(planProfile.chaseDistanceMax * 100).toFixed(1)}%。`
+        : `当日涨跌幅 ${(latestChange * 100).toFixed(2)}%，偏离 MA60 ${(structure.distance_to_ma60 * 100).toFixed(2)}%，当前Profile日涨幅追高上限 ${(planProfile.dailyChangeChaseMax * 100).toFixed(1)}%。`
     }
   ];
 
@@ -894,7 +907,7 @@ function calculateEntryTriggerPlan(
     action = 'INVALIDATED';
     actionLabel = '结构失效';
     triggerReason = '已跌破失效线或结构破坏，不生成买入计划。';
-  } else if (blockedReasons.length > 0 && (entryPermission !== 'ALLOW_STRUCTURE_CHECK' || trendPhaseHardBlocked || structureScore.score < 50)) {
+  } else if (blockedReasons.length > 0 && (!planProfile.allowsTradePlan || entryPermission !== 'ALLOW_STRUCTURE_CHECK' || trendPhaseHardBlocked || structureScore.score < 50)) {
     action = 'BLOCKED';
     actionLabel = '禁止入场';
     triggerReason = blockedReasons[0];
@@ -921,10 +934,10 @@ function calculateEntryTriggerPlan(
     action = 'WAIT_PULLBACK';
     actionLabel = '等待回踩';
     triggerReason = '当前更适合等回踩确认，不追高。';
-  } else if (structureScore.score >= 65 && primaryTrigger && triggerScore >= 45) {
+  } else if (structureScore.score >= planProfile.minStructureScore && primaryTrigger && triggerScore >= planProfile.minTriggerScore) {
     action = 'READY_TO_PLAN';
     actionLabel = '可生成买入计划草案';
-    triggerReason = `${primaryTrigger.name} 已触发，且结构评分达到 ${structureScore.score}。`;
+    triggerReason = `${primaryTrigger.name} 已触发，且结构评分达到 ${structureScore.score}；当前按${planProfile.label}参数生成计划。`;
   } else if (structureScore.score >= 50) {
     action = 'OBSERVE';
     actionLabel = '观察触发';
@@ -969,6 +982,9 @@ function calculateEntryTriggerPlan(
       suggested_entry_zone: `${formatPrice(entryZoneLow)} - ${formatPrice(entryZoneHigh)}`,
       invalidation_line: structure.invalidation_line,
       max_loss_percent: maxLossPercent,
+      plan_profile: planProfile.key,
+      plan_profile_label: planProfile.label,
+      plan_profile_note: planProfile.note,
       position_suggestion: positionSuggestion,
       follow_up: '买入后跟踪 5/10/20/60 日表现，并记录是否跌破失效线、是否进入主升或是假突破。'
     },
@@ -1407,9 +1423,9 @@ async function buildEntryTriggerSnapshot(db: any, symbol: string, assetType: str
   const prices = await db.all(
       `SELECT trade_date, open, high, low, close, volume, amount
        FROM financial_daily_prices
-       WHERE symbol = ? AND source = ?
+       WHERE symbol = ? AND asset_type = ? AND source = ?
        ORDER BY trade_date ASC`,
-    [symbol, source]
+    [symbol, assetType, source]
   );
 
   if (prices.length < 60) {
@@ -1438,7 +1454,32 @@ async function buildEntryTriggerSnapshot(db: any, symbol: string, assetType: str
   );
   const marketRegime = marketRegimeResult?.market_regime || 'UNKNOWN';
   const entryPermission = marketRegimeResult?.entry_permission || 'OBSERVE_ONLY';
-  const structure = calculateStructure(prices);
+  const nameResult = await db.get(
+      `SELECT name FROM financial_daily_prices
+       WHERE symbol = ? AND asset_type = ? AND source = ? AND name IS NOT NULL AND TRIM(name) <> ''
+       ORDER BY trade_date DESC LIMIT 1`,
+    [symbol, assetType, source]
+  );
+  const universeResult = await db.get(
+      `SELECT COALESCE(MAX(NULLIF(name, '')), '') as name,
+              GROUP_CONCAT(DISTINCT universe_type) as universe_type
+       FROM financial_asset_universe
+       WHERE symbol = ? AND asset_type = ? AND source = ?`,
+    [symbol, assetType, source]
+  );
+  const displayName = nameResult?.name || universeResult?.name || symbol;
+  const planProfile = resolveFinancePlanProfile({
+    assetType,
+    symbol,
+    name: displayName,
+    universeType: universeResult?.universe_type || ''
+  });
+  const rawStructure = calculateStructure(prices);
+  const profileInvalidationLine = calculateProfileInvalidationLine(planProfile.key, { ma60: rawStructure.ma60 }) || rawStructure.invalidation_line;
+  const structure = {
+    ...rawStructure,
+    invalidation_line: profileInvalidationLine
+  };
   const structureScore = calculateStructureScore(structure, prices);
   const trendPhase = await db.get(
       `SELECT trend_phase_code, trend_phase_reason
@@ -1466,27 +1507,19 @@ async function buildEntryTriggerSnapshot(db: any, symbol: string, assetType: str
     marketRegime,
     entryPermission,
     trendPhase?.trend_phase_code || 'UNKNOWN',
-    trendAction.action
-  );
-
-  const nameResult = await db.get(
-      `SELECT name FROM financial_daily_prices
-       WHERE symbol = ? AND source = ? AND name IS NOT NULL AND TRIM(name) <> ''
-       ORDER BY trade_date DESC LIMIT 1`,
-    [symbol, source]
-  );
-  const universeNameResult = await db.get(
-      `SELECT name FROM financial_asset_universe
-       WHERE symbol = ? AND source = ? AND name IS NOT NULL AND TRIM(name) <> ''
-       LIMIT 1`,
-    [symbol, source]
+    trendAction.action,
+    planProfile.key
   );
   const mlPrediction = await getModelPrediction(db, symbol, assetType, 'entry_trigger');
 
   return {
     symbol,
-    name: nameResult?.name || universeNameResult?.name || symbol,
+    name: displayName,
     asset_type: assetType,
+    universe_type: universeResult?.universe_type || '',
+    plan_profile: planProfile.key,
+    plan_profile_label: planProfile.label,
+    plan_profile_note: planProfile.note,
     trade_date: structure.trade_date,
     close: structure.close,
     ma20: structure.ma20,

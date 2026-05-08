@@ -1,8 +1,54 @@
 import { Router, Request, Response } from 'express';
 import getDb from '../config/database';
 import { buildFinancePlanQuality } from '../services/financePlanQuality';
+import { getFinancePlanProfileConfig, resolveFinancePlanProfile } from '../services/financePlanProfile';
 
 const router = Router();
+let tradePlanProfileSchemaReady = false;
+
+async function ensureTradePlanProfileSchema(db: any) {
+  if (tradePlanProfileSchemaReady) return;
+  const columns = await db.all(`PRAGMA table_info(financial_trade_plans)`);
+  const names = new Set(columns.map((column: any) => column.name));
+  if (!names.has('plan_profile')) {
+    await db.exec(`ALTER TABLE financial_trade_plans ADD COLUMN plan_profile TEXT`);
+  }
+  if (!names.has('plan_profile_label')) {
+    await db.exec(`ALTER TABLE financial_trade_plans ADD COLUMN plan_profile_label TEXT`);
+  }
+  if (!names.has('plan_profile_note')) {
+    await db.exec(`ALTER TABLE financial_trade_plans ADD COLUMN plan_profile_note TEXT`);
+  }
+  const missingRows = await db.all(
+    `SELECT p.id, p.symbol, p.name, p.asset_type, p.source,
+            GROUP_CONCAT(DISTINCT u.universe_type) as universe_type
+     FROM financial_trade_plans p
+     LEFT JOIN financial_asset_universe u
+       ON u.symbol = p.symbol
+      AND u.asset_type = p.asset_type
+      AND u.source = p.source
+     WHERE p.plan_profile IS NULL OR TRIM(p.plan_profile) = ''
+     GROUP BY p.id
+     LIMIT 500`
+  );
+  for (const row of missingRows) {
+    const profile = resolveFinancePlanProfile({
+      assetType: row.asset_type,
+      symbol: row.symbol,
+      name: row.name,
+      universeType: row.universe_type || ''
+    });
+    await db.run(
+      `UPDATE financial_trade_plans
+       SET plan_profile = ?,
+           plan_profile_label = ?,
+           plan_profile_note = ?
+       WHERE id = ?`,
+      [profile.key, profile.label, profile.note, row.id]
+    );
+  }
+  tradePlanProfileSchemaReady = true;
+}
 
 function bucketStructureScore(score: number | null | undefined): string {
   if (score === null || score === undefined) return 'unknown';
@@ -16,27 +62,33 @@ function roundMoney(value: number): number {
   return Math.round(value * 100) / 100;
 }
 
-function buildPositionPlan(totalCapital: number, triggerAction: string, structureScore: number, maxLossPercent: number | null) {
-  let baseRatio = 0.4;
-  let tacticalRatio = 0.4;
-  let observationRatio = 0.2;
+function buildPositionPlan(
+  totalCapital: number,
+  triggerAction: string,
+  structureScore: number,
+  maxLossPercent: number | null,
+  planProfileKey?: string | null
+) {
+  const profile = getFinancePlanProfileConfig(planProfileKey);
+  let { base: baseRatio, tactical: tacticalRatio, observation: observationRatio } = profile.defaultRatios;
 
   if (triggerAction !== 'READY_TO_PLAN') {
     baseRatio = 0.2;
     tacticalRatio = 0.2;
     observationRatio = 0.6;
-  } else if (structureScore >= 80 && maxLossPercent !== null && maxLossPercent <= 0.04) {
-    baseRatio = 0.5;
-    tacticalRatio = 0.3;
-    observationRatio = 0.2;
-  } else if (structureScore < 65 || (maxLossPercent !== null && maxLossPercent > 0.08)) {
-    baseRatio = 0.25;
-    tacticalRatio = 0.35;
-    observationRatio = 0.4;
+  } else if (structureScore >= 80 && maxLossPercent !== null && maxLossPercent <= profile.tightRiskPercent) {
+    baseRatio = profile.strongRatios.base;
+    tacticalRatio = profile.strongRatios.tactical;
+    observationRatio = profile.strongRatios.observation;
+  } else if (structureScore < profile.minStructureScore || (maxLossPercent !== null && maxLossPercent > profile.maxRiskPercent)) {
+    baseRatio = profile.weakRatios.base;
+    tacticalRatio = profile.weakRatios.tactical;
+    observationRatio = profile.weakRatios.observation;
   }
 
   return {
     principle_snapshot: [
+      `计划Profile：${profile.label}。${profile.note}`,
       '底仓负责站对位置，机动仓负责执行纪律，观察仓负责不乱想。',
       '所有止损、止盈、追踪止盈只对机动仓有效。底仓只按结构退出。',
       '不参与任何短期兑现。'
@@ -172,15 +224,19 @@ async function buildInvalidationControl(
   symbol: string,
   source: string,
   invalidationLine: number,
-  fallbackClose: number
+  fallbackClose: number,
+  assetType = 'stock',
+  planProfileKey?: string | null
 ) {
+  const fallbackProfile = assetType === 'stock' ? 'stock_equity' : assetType === 'etf' ? 'etf_broad_equity' : 'stock_equity';
+  const profile = getFinancePlanProfileConfig(planProfileKey || fallbackProfile);
   const rows = await db.all(
     `SELECT trade_date, close, amount, volume
      FROM financial_daily_prices
-     WHERE symbol = ? AND source = ?
+     WHERE symbol = ? AND asset_type = ? AND source = ?
      ORDER BY trade_date DESC
      LIMIT 25`,
-    [symbol, source || 'tushare']
+    [symbol, assetType || 'stock', source || 'tushare']
   );
   const latest = rows[0] || null;
   const close = toNumber(latest?.close, fallbackClose);
@@ -197,9 +253,9 @@ async function buildInvalidationControl(
     : 0;
   const amountRatio = amountAvg > 0 && latestAmount > 0 ? latestAmount / amountAvg : null;
   const volumeRatio = volumeAvg > 0 && latestVolume > 0 ? latestVolume / volumeAvg : null;
-  const heavyBreak = close > 0 && line > 0 && close < line && ((amountRatio !== null && amountRatio >= 1.5) || (volumeRatio !== null && volumeRatio >= 1.5));
+  const heavyBreak = close > 0 && line > 0 && close < line && ((amountRatio !== null && amountRatio >= profile.heavyBreakVolumeRatio) || (volumeRatio !== null && volumeRatio >= profile.heavyBreakVolumeRatio));
   const consecutiveBreak = rows.length >= 2 && rows.slice(0, 2).every((row: any) => toNumber(row.close) > 0 && line > 0 && toNumber(row.close) < line);
-  const deepBreak = close > 0 && line > 0 && close < line * 0.99;
+  const deepBreak = close > 0 && line > 0 && close < line * (1 - profile.deepBreakPercent);
   const latestBelow = close > 0 && line > 0 && close < line;
   const recoveringCooldown = close > 0 && line > 0 && close >= line && rows.slice(1, 3).some((row: any) => toNumber(row.close) > 0 && toNumber(row.close) < line);
 
@@ -227,10 +283,10 @@ async function buildInvalidationControl(
     status = 'RECOVERING_COOLDOWN';
     label = '收回冷静期';
     reason = '刚从失效线下方收回，至少观察1-2天重新站稳，不立刻买回或加仓。';
-  } else if (distance !== null && distance >= 0 && distance <= 0.01) {
+  } else if (distance !== null && distance >= 0 && distance <= profile.battleZonePercent) {
     status = 'BATTLE_ZONE';
     label = '失效线争夺区';
-    reason = '收盘价距离失效线不足1%，不加仓，等待方向确认。';
+    reason = `收盘价距离${profile.label}失效线不足${(profile.battleZonePercent * 100).toFixed(1)}%，不加仓，等待方向确认。`;
   }
 
   return {
@@ -285,7 +341,9 @@ async function getSuggestionFromSnapshot(db: any, snapshot: any, positions: { ba
     snapshot.symbol,
     snapshot.data_source_used || snapshot.source || 'tushare',
     invalidationLine,
-    close
+    close,
+    snapshot.asset_type || 'stock',
+    snapshot.plan_profile
   );
   const hasBase = positions.base > 0;
   const hasTactical = positions.tactical > 0;
@@ -422,7 +480,15 @@ async function buildSleeveDiscipline(db: any, plan: any, positions: { base: numb
   const trendPhase = suggestion.trend_phase_code;
   const close = suggestion.close_price;
   const invalidationLine = suggestion.invalidation_line;
-  const invalidationControl = await buildInvalidationControl(db, plan.symbol, plan.source || 'tushare', invalidationLine, close);
+  const invalidationControl = await buildInvalidationControl(
+    db,
+    plan.symbol,
+    plan.source || 'tushare',
+    invalidationLine,
+    close,
+    plan.asset_type || 'stock',
+    plan.plan_profile
+  );
   const isInvalidated = actionCode === 'EXIT_BASE'
     || invalidationControl.status === 'CONFIRMED_BREAK';
   const isNoAdd = ['NO_ADD', 'BASE_EXIT_WATCH', 'REDUCE_TACTICAL_WATCH', 'STOP_LOSS_TACTICAL'].includes(actionCode)
@@ -581,6 +647,7 @@ async function getEntryTriggerSnapshot(req: Request | { body: any; protocol?: st
 router.post('/trade-plans/from-entry-trigger', async (req: Request, res: Response) => {
   try {
     const db = await getDb();
+    await ensureTradePlanProfileSchema(db);
     const symbol = String(req.body.symbol || '').trim();
     const assetType = String(req.body.asset_type || '').trim();
     const source = String(req.body.source || 'tushare').trim();
@@ -620,9 +687,16 @@ router.post('/trade-plans/from-entry-trigger', async (req: Request, res: Respons
         message: `入场触发未通过：${snapshot.trigger_reason || snapshot.action_label || '当前不能生成买入计划'}`
       });
     }
+    const planProfile = getFinancePlanProfileConfig(snapshot.plan_profile || snapshot.plan_draft?.plan_profile || (assetType === 'stock' ? 'stock_equity' : 'etf_unknown'));
+    if (!planProfile.allowsTradePlan) {
+      return res.status(409).json({
+        success: false,
+        message: `${planProfile.label}暂不生成这套金融买入计划：${planProfile.note}`
+      });
+    }
     const structureScore = Number(snapshot.structure_score?.score || 0);
     const maxLossPercent = snapshot.plan_draft?.max_loss_percent ?? null;
-    const positionPlan = buildPositionPlan(totalCapital, snapshot.action, structureScore, maxLossPercent);
+    const positionPlan = buildPositionPlan(totalCapital, snapshot.action, structureScore, maxLossPercent, planProfile.key);
     const now = new Date().toISOString();
     const planName = req.body.plan_name || `${snapshot.name || symbol} 入场计划 ${snapshot.trade_date || now.slice(0, 10)}`;
     const triggerTypes = (snapshot.triggered_items || [])
@@ -640,8 +714,9 @@ router.post('/trade-plans/from-entry-trigger', async (req: Request, res: Respons
         trend_phase_code, trend_action, market_regime, entry_permission,
         close_price, ma20, ma60, invalidation_line, max_loss_percent,
         suggested_entry_zone, entry_reason, trigger_snapshot_json, note,
+        plan_profile, plan_profile_label, plan_profile_note,
         created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         planName,
         symbol,
@@ -680,6 +755,9 @@ router.post('/trade-plans/from-entry-trigger', async (req: Request, res: Respons
         snapshot.plan_draft?.entry_reason || snapshot.trigger_reason || '',
         JSON.stringify(snapshot),
         req.body.note || '',
+        planProfile.key,
+        planProfile.label,
+        planProfile.note,
         now,
         now
       ]
@@ -708,6 +786,7 @@ router.post('/trade-plans/from-entry-trigger', async (req: Request, res: Respons
 router.get('/trade-plans', async (req: Request, res: Response) => {
   try {
     const db = await getDb();
+    await ensureTradePlanProfileSchema(db);
     const status = req.query.status as string | undefined;
     const params: any[] = [];
     let sql = 'SELECT * FROM financial_trade_plans WHERE is_deleted = 0';
@@ -738,6 +817,7 @@ router.get('/trade-plans', async (req: Request, res: Response) => {
 router.get('/trade-plans/:id/execution-discipline', async (req: Request, res: Response) => {
   try {
     const db = await getDb();
+    await ensureTradePlanProfileSchema(db);
     const id = Number(req.params.id);
     const plan = await db.get('SELECT * FROM financial_trade_plans WHERE id = ? AND is_deleted = 0', [id]);
     if (!plan) return res.status(404).json({ success: false, message: '计划不存在' });
@@ -861,6 +941,7 @@ router.get('/trade-plans/:id/suggestions', async (req: Request, res: Response) =
 router.post('/trade-plans/:id/sync-suggestion', async (req: Request, res: Response) => {
   try {
     const db = await getDb();
+    await ensureTradePlanProfileSchema(db);
     const id = Number(req.params.id);
     const plan = await db.get('SELECT * FROM financial_trade_plans WHERE id = ? AND is_deleted = 0', [id]);
     if (!plan) return res.status(404).json({ success: false, message: '计划不存在' });
@@ -912,6 +993,7 @@ router.post('/trade-plans/:id/sync-suggestion', async (req: Request, res: Respon
 router.post('/trade-plans/sync-active-suggestions', async (req: Request, res: Response) => {
   try {
     const db = await getDb();
+    await ensureTradePlanProfileSchema(db);
     const plans = await db.all(
       `SELECT * FROM financial_trade_plans
        WHERE is_deleted = 0 AND status IN ('draft', 'watching', 'paper_tracking', 'active')
@@ -956,6 +1038,7 @@ router.post('/trade-plans/sync-active-suggestions', async (req: Request, res: Re
 router.patch('/trade-plans/:id/feedback', async (req: Request, res: Response) => {
   try {
     const db = await getDb();
+    await ensureTradePlanProfileSchema(db);
     const id = Number(req.params.id);
     const now = new Date().toISOString();
     const beforePlan = await db.get('SELECT * FROM financial_trade_plans WHERE id = ? AND is_deleted = 0', [id]);
