@@ -1880,8 +1880,9 @@ router.post('/entry-trigger-observations/secondary-scan', async (req: Request, r
         : canUpgrade
           ? '可升级计划准备'
           : '继续等待';
+      const observationIds = [...target.observation_ids];
 
-      if (target.observation_ids.length > 0) {
+      if (observationIds.length > 0) {
         await db.run(
           `UPDATE financial_entry_trigger_observations
            SET observation_status = ?,
@@ -1918,17 +1919,79 @@ router.post('/entry-trigger-observations/secondary-scan', async (req: Request, r
             JSON.stringify(snapshot),
             `二次确认扫描：${scanConclusion}`,
             now,
-            ...target.observation_ids
+            ...observationIds
           ]
         );
+      } else if (canUpgrade) {
+        const inserted = await db.run(
+          `INSERT INTO financial_entry_trigger_observations (
+            symbol, name, asset_type, source, trade_date, observation_status,
+            entry_action, action_label, trigger_score, trigger_reason,
+            structure_score, trend_phase_code, market_regime, entry_permission,
+            close_price, ma20, ma60, invalidation_line, snapshot_json, note,
+            created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            target.symbol,
+            snapshot.name || target.name || target.symbol,
+            target.asset_type,
+            snapshot.data_source_used || target.source,
+            snapshot.trade_date || null,
+            'confirmed',
+            snapshot.action || '',
+            snapshot.action_label || '',
+            snapshot.trigger_score || 0,
+            snapshot.trigger_reason || '',
+            snapshot.structure_score?.score || null,
+            snapshot.trend_phase_code || '',
+            snapshot.market_regime || '',
+            snapshot.entry_permission || '',
+            snapshot.close || null,
+            snapshot.ma20 || null,
+            snapshot.ma60 || null,
+            snapshot.invalidation_line || null,
+            JSON.stringify(snapshot),
+            `二次确认扫描：${scanConclusion}`,
+            now,
+            now
+          ]
+        );
+        if (inserted.lastID) observationIds.push(Number(inserted.lastID));
       }
 
       if (target.candidate_ids.length > 0) {
+        const candidatePoolStatus = invalidated ? 'expired' : 'active';
+        const candidateFinalStatus = invalidated ? 'REJECTED' : 'READY_FOR_PLAN';
+        const candidateReviewAction = invalidated
+          ? 'entry_trigger_invalidated'
+          : canUpgrade
+            ? 'entry_trigger_plan_ready'
+            : 'entry_trigger_waiting';
         await db.run(
           `UPDATE financial_candidate_pool
-           SET review_status = ?, updated_at = ?
+           SET review_status = ?,
+               pool_status = ?,
+               final_status = ?,
+               last_checked_at = ?,
+               last_review_at = ?,
+               review_action = ?,
+               candidate_reason = ?,
+               forbidden_reason = CASE WHEN ? = 1 THEN ? ELSE forbidden_reason END,
+               updated_at = ?
            WHERE id IN (${target.candidate_ids.map(() => '?').join(',')})`,
-          [candidateReviewStatus, now, ...target.candidate_ids]
+          [
+            candidateReviewStatus,
+            candidatePoolStatus,
+            candidateFinalStatus,
+            now,
+            now,
+            candidateReviewAction,
+            snapshot.trigger_reason || scanConclusion,
+            invalidated ? 1 : 0,
+            invalidated ? snapshot.trigger_reason || '入场触发失效淘汰' : null,
+            now,
+            ...target.candidate_ids
+          ]
         );
       }
 
@@ -1937,7 +2000,7 @@ router.post('/entry-trigger-observations/secondary-scan', async (req: Request, r
         name: snapshot.name || target.name,
         asset_type: target.asset_type,
         source: target.source,
-        observation_ids: target.observation_ids,
+        observation_ids: observationIds,
         candidate_ids: target.candidate_ids,
         conclusion: scanConclusion,
         observation_status: status,
@@ -2000,6 +2063,13 @@ router.post('/entry-trigger-observations/:id/secondary-scan', async (req: Reques
     const canUpgrade = snapshot.action === 'READY_TO_PLAN' && !trendUnknown && !invalidated;
     const status = invalidated ? 'invalidated' : canUpgrade ? 'confirmed' : 'watching';
     const candidateReviewStatus = invalidated ? 'rejected' : canUpgrade ? 'plan_ready' : 'wait_confirmation';
+    const candidatePoolStatus = invalidated ? 'expired' : 'active';
+    const candidateFinalStatus = invalidated ? 'REJECTED' : 'READY_FOR_PLAN';
+    const candidateReviewAction = invalidated
+      ? 'entry_trigger_invalidated'
+      : canUpgrade
+        ? 'entry_trigger_plan_ready'
+        : 'entry_trigger_waiting';
     const conclusion = invalidated ? '失效淘汰' : canUpgrade ? '可升级计划准备' : '继续等待';
 
     await db.run(
@@ -2045,13 +2115,34 @@ router.post('/entry-trigger-observations/:id/secondary-scan', async (req: Reques
     await db.run(
       `UPDATE financial_candidate_pool
        SET review_status = ?,
+           pool_status = ?,
+           final_status = ?,
+           last_checked_at = ?,
+           last_review_at = ?,
+           review_action = ?,
+           candidate_reason = ?,
+           forbidden_reason = CASE WHEN ? = 1 THEN ? ELSE forbidden_reason END,
            updated_at = ?
        WHERE symbol = ?
          AND asset_type = ?
          AND source = ?
          AND pool_status = 'active'
          AND review_status IN ('wait_confirmation', 'plan_ready', 'unreviewed')`,
-      [candidateReviewStatus, now, observation.symbol, observation.asset_type, observation.source]
+      [
+        candidateReviewStatus,
+        candidatePoolStatus,
+        candidateFinalStatus,
+        now,
+        now,
+        candidateReviewAction,
+        snapshot.trigger_reason || conclusion,
+        invalidated ? 1 : 0,
+        invalidated ? snapshot.trigger_reason || '入场触发失效淘汰' : null,
+        now,
+        observation.symbol,
+        observation.asset_type,
+        observation.source
+      ]
     );
 
     const saved = await db.get(
