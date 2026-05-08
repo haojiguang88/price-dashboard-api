@@ -4,7 +4,14 @@ dist
 .env.local
 .env.development
 .env.production
+.DS_Store
+**/.DS_Store
+__pycache__/
+*.py[cod]
 db/*.db
 db/*.sqlite
 db/*.sqlite3
+db/*.db-journal
+db/*.db-wal
+db/*.db-shm
 *.log
