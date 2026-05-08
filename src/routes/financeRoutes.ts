@@ -685,7 +685,6 @@ function summarizePipelineStep(step: any) {
         candidate_active: Number(data.counts?.candidate_active || 0),
         structure_pending: Number(data.counts?.structure_pending || 0),
         structure_watch: Number(data.counts?.structure_watch || 0),
-        structure_ready: Number(data.counts?.structure_ready || 0),
         wait_confirmation: Number(data.counts?.wait_confirmation || 0),
         entry_observations: Number(data.counts?.entry_observations || 0),
         plan_ready: Number(data.counts?.plan_ready || 0),
@@ -861,7 +860,6 @@ router.get('/workflow-summary', async (_req: Request, res: Response) => {
       trend_blocked: await scalar(`SELECT COUNT(*) as count FROM financial_candidate_pool WHERE pool_status = 'active' AND asset_type IN ('stock', 'etf') AND review_status = 'trend_blocked'`),
       structure_pending: await scalar(`SELECT COUNT(*) as count FROM financial_candidate_pool WHERE pool_status = 'active' AND asset_type IN ('stock', 'etf') AND review_status = 'structure_pending'`),
       structure_watch: await scalar(`SELECT COUNT(*) as count FROM financial_candidate_pool WHERE pool_status = 'active' AND asset_type IN ('stock', 'etf') AND review_status = 'structure_watch'`),
-      structure_ready: await scalar(`SELECT COUNT(*) as count FROM financial_candidate_pool WHERE pool_status = 'active' AND asset_type IN ('stock', 'etf') AND review_status = 'structure_ready'`),
       wait_confirmation: await scalar(`
         SELECT COUNT(*) as count
         FROM financial_candidate_pool c

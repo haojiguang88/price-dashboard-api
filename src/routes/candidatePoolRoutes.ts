@@ -20,7 +20,7 @@ const STOCK_AVG20_AMOUNT_MIN_YUAN = 100_000_000;
 const STOCK_MIN5_AMOUNT_MIN_YUAN = 30_000_000;
 const STOCK_CIRC_MARKET_CAP_MIN_YUAN = 5_000_000_000;
 const ETF_HARD_BLOCK_TREND_PHASES = new Set(['SURGE', 'REBOUND', 'SLOW_BLEED', 'CRASH_DROP']);
-const STRUCTURE_QUEUE_STATUSES = new Set(['structure_pending', 'structure_watch', 'structure_ready', 'model_conflict']);
+const STRUCTURE_QUEUE_STATUSES = new Set(['structure_pending', 'structure_watch', 'model_conflict']);
 const STRUCTURE_READY_TREND_PHASES = new Set(['BREAKOUT', 'SLOW_GRIND_UP', 'RECOVERY']);
 const STRUCTURE_HARD_REJECT_GATES = new Set([
   'asset_applicability',
@@ -1471,14 +1471,14 @@ function getStructureQueueStatusMeta(item: any): { key: string; label: string; t
   const trendCode = String(item?.trend_phase_code || '');
   const reason = item?.candidate_reason || item?.forbidden_reason || item?.downgrade_reason || item?.trend_phase_reason || '等待单标的判断。';
 
-  if (status === 'structure_ready') {
-    return { key: 'ready', label: '可进入入场触发', tone: 'success', reason: reason || '结构、安全区和硬闸门已通过。' };
-  }
   if (status === 'structure_watch') {
     return { key: 'watch', label: '单标的观察', tone: 'warning', reason };
   }
   if (status === 'model_conflict') {
     return { key: 'model_conflict', label: '模型冲突待复核', tone: 'cyan', reason };
+  }
+  if (status === 'wait_confirmation') {
+    return { key: 'entry_trigger', label: '已推进入场触发', tone: 'success', reason: reason || '单标的判断通过，等待入场触发扫描。' };
   }
   if (status === 'trend_blocked' || (trendCode && !STRUCTURE_READY_TREND_PHASES.has(trendCode))) {
     return { key: 'trend_blocked', label: '退回走势阶段', tone: 'warning', reason };
@@ -1496,11 +1496,11 @@ function resolveStructureQueueDecision(evaluation: any): {
   const reason = evaluation?.candidate_reason || evaluation?.forbidden_reason || evaluation?.reason || '单标的判断结果待确认';
   if (evaluation?.selected) {
     return {
-      review_status: 'structure_ready',
+      review_status: 'wait_confirmation',
       pool_status: 'active',
       final_status: 'READY_FOR_PLAN',
-      review_action: 'single_target_passed',
-      reason: reason || '单标的判断通过，等待入场触发。'
+      review_action: 'single_target_passed_to_entry',
+      reason: reason || '单标的判断通过，已推进入场触发。'
     };
   }
 
@@ -2456,9 +2456,9 @@ router.get('/candidate-pool/structure-queue', async (req: Request, res: Response
       `c.pool_status = 'active'`,
       `c.asset_type IN ('stock', 'etf')`,
       `c.source = ?`,
-      `COALESCE(c.review_status, 'unreviewed') NOT IN ('trend_blocked', 'wait_confirmation', 'plan_ready', 'rejected')`,
+      `COALESCE(c.review_status, 'unreviewed') NOT IN ('trend_blocked', 'structure_ready', 'wait_confirmation', 'plan_ready', 'rejected')`,
       `(
-        COALESCE(c.review_status, 'unreviewed') IN ('structure_pending', 'structure_watch', 'structure_ready', 'model_conflict')
+        COALESCE(c.review_status, 'unreviewed') IN ('structure_pending', 'structure_watch', 'model_conflict')
         OR t.trend_phase_code IN (${readySql})
       )`
     ];
@@ -2513,8 +2513,7 @@ router.get('/candidate-pool/structure-queue', async (req: Request, res: Response
            WHEN 'structure_pending' THEN 0
            WHEN 'model_conflict' THEN 1
            WHEN 'structure_watch' THEN 2
-           WHEN 'structure_ready' THEN 3
-           ELSE 4
+           ELSE 3
          END,
          c.priority_score DESC,
          COALESCE(c.updated_at, c.last_checked_at) DESC,
@@ -2556,7 +2555,7 @@ router.get('/candidate-pool/structure-queue', async (req: Request, res: Response
           total: Object.values(countMap).reduce((sum, count) => sum + Number(count || 0), 0),
           pending: countMap.structure_pending || 0,
           watch: countMap.structure_watch || 0,
-          ready: countMap.structure_ready || 0,
+          ready: 0,
           model_conflict: countMap.model_conflict || 0
         }
       }
@@ -2600,9 +2599,13 @@ router.post('/candidate-pool/structure-queue/:id/recheck', async (req: Request, 
     const decision = await applyStructureQueueDecision(db, id, evaluation, candidate.name || '');
     const item = await fetchStructureQueueItem(db, id);
 
+    const messageLabel = decision.review_status === 'wait_confirmation'
+      ? '已推进入场触发'
+      : getReviewStatusLabel(decision.review_status);
+
     res.json({
       success: true,
-      message: `单标的判断完成：${getReviewStatusLabel(decision.review_status)}`,
+      message: `单标的判断完成：${messageLabel}`,
       data: {
         selected: Boolean(evaluation.selected),
         decision,

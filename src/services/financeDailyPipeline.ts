@@ -420,7 +420,7 @@ export async function runFinanceCandidateFunnelPipeline(config?: FinanceCandidat
         const result = await callLocalApi(`/api/finance/candidate-pool/structure-queue/${item.id}/recheck`, undefined, 'POST');
         const evaluation = result.data?.evaluation || {};
         const queueItem = result.data?.item || {};
-        const passedStructure = queueItem.review_status === 'structure_ready' || result.data?.decision?.review_status === 'structure_ready';
+        const passedStructure = queueItem.review_status === 'wait_confirmation' || result.data?.decision?.review_status === 'wait_confirmation';
         if (passedStructure) {
           qualifiedCandidates.push(item);
         }
