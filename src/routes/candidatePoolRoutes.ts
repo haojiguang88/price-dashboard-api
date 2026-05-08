@@ -1905,6 +1905,7 @@ async function recordRejectedCandidateEvaluation(db: any, evaluation: any) {
          forbidden_reason = ?,
          downgrade_reason = ?,
          risk_note = ?,
+         review_status = 'rejected',
          gate_trace_json = ?,
          first_blocking_gate_key = ?,
          first_blocking_gate_label = ?,
@@ -2102,6 +2103,17 @@ router.post('/candidate-pool/evaluate-one', async (req: Request, res: Response) 
       });
     }
 
+    const previousCandidate = await db.get(
+      `SELECT id, pool_status, review_status
+       FROM financial_candidate_pool
+       WHERE symbol = ?
+         AND asset_type = ?
+         AND source = ?
+         AND rule_version = ?
+       LIMIT 1`,
+      [symbol, assetType, source, CANDIDATE_RULE_VERSION]
+    );
+
     const industryStrengthContext = assetType === 'etf'
       ? await buildIndustryEtfStrengthContext(db, { scope: 'focus', benchmarkSymbol: '000300' })
       : undefined;
@@ -2109,13 +2121,45 @@ router.post('/candidate-pool/evaluate-one', async (req: Request, res: Response) 
 
     if (evaluation.selected) {
       await upsertCandidate(db, evaluation);
+      if (previousCandidate?.pool_status === 'expired') {
+        const now = new Date().toISOString();
+        await db.run(
+          `UPDATE financial_candidate_pool
+           SET review_status = 'unreviewed',
+               last_review_id = NULL,
+               last_review_at = ?,
+               review_action = 'reentered_from_excluded_recheck',
+               updated_at = ?
+           WHERE symbol = ?
+             AND asset_type = ?
+             AND source = ?
+             AND rule_version = ?`,
+          [now, now, symbol, assetType, source, CANDIDATE_RULE_VERSION]
+        );
+      }
     } else {
       await recordRejectedCandidateEvaluation(db, evaluation);
     }
 
     res.json({
       success: true,
-      data: evaluation
+      data: {
+        ...evaluation,
+        previous_pool_status: previousCandidate?.pool_status || null,
+        next_location: evaluation.selected
+          ? {
+              key: 'candidate_pool',
+              label: `${assetType === 'etf' ? 'ETF备选池' : '个股备选池'} / 待生成复盘`,
+              status: 'active',
+              review_status: 'unreviewed'
+            }
+          : {
+              key: 'excluded_review',
+              label: '被剔除标的模型复核 / 已淘汰样本',
+              status: 'expired',
+              review_status: 'rejected'
+            }
+      }
     });
   } catch (error) {
     res.status(500).json({
