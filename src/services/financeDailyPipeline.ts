@@ -221,7 +221,7 @@ export async function runFinanceCandidateFunnelPipeline(config?: FinanceCandidat
   const steps: FinancePipelineStep[] = [
     { key: 'active_candidate_collect', label: '读取当前备选池', status: 'pending' },
     { key: 'trend_phase_recalc', label: '走势阶段重算', status: 'pending' },
-    { key: 'candidate_recheck', label: '备选资格复核', status: 'pending' },
+    { key: 'candidate_recheck', label: '单标的判断', status: 'pending' },
     { key: 'entry_observation_seed', label: '推进入场观察', status: 'pending' },
     { key: 'entry_trigger_scan', label: '入场触发确认', status: 'pending' }
   ];
@@ -277,13 +277,16 @@ export async function runFinanceCandidateFunnelPipeline(config?: FinanceCandidat
           const now = nowIso();
           await db.run(
             `UPDATE financial_candidate_pool
-             SET review_status = CASE WHEN review_status = 'trend_blocked' THEN 'wait_confirmation' ELSE review_status END,
+             SET review_status = CASE
+                   WHEN COALESCE(review_status, 'unreviewed') IN ('trend_blocked', 'unreviewed', 'drafted') THEN 'structure_pending'
+                   ELSE review_status
+                 END,
                  trend_phase_code = ?,
                  trend_phase_reason = ?,
                  updated_at = ?
              WHERE id = ?
                AND pool_status = 'active'
-               AND COALESCE(review_status, 'unreviewed') NOT IN ('rejected')`,
+               AND COALESCE(review_status, 'unreviewed') NOT IN ('rejected', 'plan_ready')`,
             [trendCode, trendReason, now, item.id]
           );
         } else if (decision.action === 'reject') {
@@ -414,54 +417,21 @@ export async function runFinanceCandidateFunnelPipeline(config?: FinanceCandidat
     const results = [];
     for (const item of trendReadyCandidates) {
       try {
-        const result = await callLocalApi('/api/finance/candidate-pool/evaluate-one', {
-          symbol: item.symbol,
-          asset_type: item.asset_type,
-          source: item.source || merged.source
-        });
-        const evaluation = result.data || {};
-        if (!evaluation.selected) {
-          await db.run(
-            `UPDATE financial_candidate_pool
-             SET pool_status = 'expired',
-                 review_status = 'rejected',
-                 last_checked_at = ?,
-                 updated_at = ?,
-                 candidate_reason = ?,
-                 priority_score = ?,
-                 forbidden_reason = ?,
-                 downgrade_reason = ?,
-                 risk_note = ?,
-                 gate_trace_json = ?,
-                 first_blocking_gate_key = ?,
-                 first_blocking_gate_label = ?,
-                 blocking_gate_labels = ?
-             WHERE id = ? AND pool_status = 'active'`,
-            [
-              nowIso(),
-              nowIso(),
-              evaluation.candidate_reason || evaluation.reason || '漏斗复核未满足入池条件',
-              evaluation.priority_score || 0,
-              evaluation.forbidden_reason || evaluation.reason || '漏斗复核未满足入池条件',
-              evaluation.downgrade_reason || null,
-              evaluation.risk_note || '',
-              evaluation.gate_trace ? JSON.stringify(evaluation.gate_trace) : null,
-              evaluation.first_blocking_gate_key || null,
-              evaluation.first_blocking_gate_label || null,
-              evaluation.blocking_gate_labels || null,
-              item.id
-            ]
-          );
-        } else {
+        const result = await callLocalApi(`/api/finance/candidate-pool/structure-queue/${item.id}/recheck`, undefined, 'POST');
+        const evaluation = result.data?.evaluation || {};
+        const queueItem = result.data?.item || {};
+        const passedStructure = queueItem.review_status === 'structure_ready' || result.data?.decision?.review_status === 'structure_ready';
+        if (passedStructure) {
           qualifiedCandidates.push(item);
         }
         results.push({
           symbol: item.symbol,
           name: item.name,
           asset_type: item.asset_type,
-          selected: Boolean(evaluation.selected),
+          selected: passedStructure,
+          review_status: queueItem.review_status || result.data?.decision?.review_status,
           priority_score: evaluation.priority_score,
-          reason: evaluation.candidate_reason || evaluation.reason || result.message
+          reason: queueItem.queue_reason || evaluation.candidate_reason || evaluation.reason || result.message
         });
       } catch (error) {
         results.push({
@@ -478,12 +448,14 @@ export async function runFinanceCandidateFunnelPipeline(config?: FinanceCandidat
     if (trendReadyCandidates.length > 0 && failedCount === trendReadyCandidates.length) {
       throw new Error(`备选资格复核全部失败：${failedCount}/${trendReadyCandidates.length} 个标的接口失败`);
     }
-    const rejectedCount = results.filter((item: any) => item.success !== false && !item.selected).length;
+    const rejectedCount = results.filter((item: any) => item.success !== false && item.review_status === 'rejected').length;
+    const watchCount = results.filter((item: any) => item.success !== false && ['structure_watch', 'trend_blocked', 'model_conflict'].includes(item.review_status)).length;
     return {
-      message: `备选资格复核完成：保留 ${qualifiedCandidates.length} 个，淘汰 ${rejectedCount} 个，失败 ${failedCount} 个`,
+      message: `单标的判断完成：通过 ${qualifiedCandidates.length} 个，观察/回退 ${watchCount} 个，淘汰 ${rejectedCount} 个，失败 ${failedCount} 个`,
       data: {
         results,
         selected_count: qualifiedCandidates.length,
+        watch_count: watchCount,
         rejected_count: rejectedCount,
         failed_count: failedCount,
         checked_count: trendReadyCandidates.length
@@ -508,7 +480,18 @@ export async function runFinanceCandidateFunnelPipeline(config?: FinanceCandidat
             snapshot?.structure_status === 'STRUCTURE_BROKEN' ||
             (snapshot?.close && snapshot?.invalidation_line && snapshot.close < snapshot.invalidation_line);
           const nextObservationStatus = invalidated ? 'invalidated' : 'watching';
-          const nextCandidateStatus = invalidated ? 'rejected' : 'wait_confirmation';
+          const trendReady = FUNNEL_READY_TREND_PHASES.has(snapshot?.trend_phase_code || '');
+          const structureDegraded =
+            snapshot?.structure_status !== 'STRUCTURE_CONFIRMED' ||
+            snapshot?.safe_zone_status !== 'SAFE_ZONE' ||
+            (typeof snapshot?.structure_score?.score === 'number' && snapshot.structure_score.score < 50);
+          const nextCandidateStatus = invalidated
+            ? 'rejected'
+            : !trendReady
+              ? 'trend_blocked'
+              : structureDegraded
+                ? 'structure_watch'
+                : 'wait_confirmation';
           const now = nowIso();
           const existingObservations = await db.all(
             `SELECT id
@@ -555,7 +538,13 @@ export async function runFinanceCandidateFunnelPipeline(config?: FinanceCandidat
                 snapshot?.ma60 || null,
                 snapshot?.invalidation_line || null,
                 JSON.stringify(snapshot || {}),
-                invalidated ? '入池漏斗预检：失效淘汰' : '入池漏斗预检：未达准备入场，退回观察',
+                invalidated
+                  ? '入池漏斗预检：失效淘汰'
+                  : nextCandidateStatus === 'structure_watch'
+                    ? '入池漏斗预检：结构/安全区退化，退回单标的判断'
+                    : nextCandidateStatus === 'trend_blocked'
+                      ? '入池漏斗预检：走势阶段退化，退回走势队列'
+                      : '入池漏斗预检：买点未触发，留在入场触发观察',
                 now,
                 ...existingObservations.map((row: any) => row.id)
               ]
@@ -569,7 +558,7 @@ export async function runFinanceCandidateFunnelPipeline(config?: FinanceCandidat
                AND asset_type = ?
                AND source = ?
                AND pool_status = 'active'
-               AND review_status IN ('plan_ready', 'wait_confirmation', 'unreviewed')`,
+               AND review_status IN ('structure_ready', 'plan_ready', 'wait_confirmation', 'unreviewed')`,
             [
               nextCandidateStatus,
               now,
@@ -652,7 +641,11 @@ export async function runFinanceCandidateFunnelPipeline(config?: FinanceCandidat
           ? 'plan_ready'
           : conclusion === '失效淘汰'
             ? 'rejected'
-            : 'wait_confirmation';
+            : conclusion === '退回单标的判断'
+              ? 'structure_watch'
+              : conclusion === '退回走势阶段'
+                ? 'trend_blocked'
+                : 'wait_confirmation';
         if (observation?.symbol) {
           await db.run(
             `UPDATE financial_candidate_pool

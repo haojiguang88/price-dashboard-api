@@ -185,6 +185,58 @@ function getEntryManualPriorityLevel(
   return 'C';
 }
 
+function resolveCandidateStatusAfterEntryScan(snapshot: any, invalidated: boolean, canUpgrade: boolean) {
+  const trendReady = ENTRY_READY_TREND_PHASES.has(snapshot?.trend_phase_code || '');
+  const structureDegraded =
+    snapshot?.structure_status !== 'STRUCTURE_CONFIRMED' ||
+    snapshot?.safe_zone_status !== 'SAFE_ZONE' ||
+    (typeof snapshot?.structure_score?.score === 'number' && snapshot.structure_score.score < 50);
+
+  if (invalidated) {
+    return {
+      reviewStatus: 'rejected',
+      poolStatus: 'expired',
+      finalStatus: 'REJECTED',
+      reviewAction: 'entry_trigger_invalidated',
+      conclusion: '失效淘汰'
+    };
+  }
+  if (canUpgrade) {
+    return {
+      reviewStatus: 'plan_ready',
+      poolStatus: 'active',
+      finalStatus: 'READY_FOR_PLAN',
+      reviewAction: 'entry_trigger_plan_ready',
+      conclusion: '可升级计划准备'
+    };
+  }
+  if (!trendReady) {
+    return {
+      reviewStatus: 'trend_blocked',
+      poolStatus: 'active',
+      finalStatus: 'WAIT',
+      reviewAction: 'entry_trigger_back_to_trend',
+      conclusion: '退回走势阶段'
+    };
+  }
+  if (structureDegraded) {
+    return {
+      reviewStatus: 'structure_watch',
+      poolStatus: 'active',
+      finalStatus: 'WAIT',
+      reviewAction: 'entry_trigger_back_to_structure',
+      conclusion: '退回单标的判断'
+    };
+  }
+  return {
+    reviewStatus: 'wait_confirmation',
+    poolStatus: 'active',
+    finalStatus: 'READY_FOR_PLAN',
+    reviewAction: 'entry_trigger_waiting',
+    conclusion: '继续等待'
+  };
+}
+
 function getEntryManualPriorityScore(
   trendPhaseCode: string | null | undefined,
   triggerScore: number,
@@ -1927,13 +1979,10 @@ router.post('/entry-trigger-observations/secondary-scan', async (req: Request, r
         snapshot.structure_status === 'STRUCTURE_BROKEN' ||
         (snapshot.close && snapshot.invalidation_line && snapshot.close < snapshot.invalidation_line);
       const canUpgrade = snapshot.action === 'READY_TO_PLAN' && !trendUnknown && !invalidated;
+      const candidateDecision = resolveCandidateStatusAfterEntryScan(snapshot, invalidated, canUpgrade);
       const status = invalidated ? 'invalidated' : canUpgrade ? 'confirmed' : 'watching';
-      const candidateReviewStatus = invalidated ? 'rejected' : canUpgrade ? 'plan_ready' : 'wait_confirmation';
-      const scanConclusion = invalidated
-        ? '失效淘汰'
-        : canUpgrade
-          ? '可升级计划准备'
-          : '继续等待';
+      const candidateReviewStatus = candidateDecision.reviewStatus;
+      const scanConclusion = candidateDecision.conclusion;
       const observationIds = [...target.observation_ids];
 
       if (observationIds.length > 0) {
@@ -2014,13 +2063,6 @@ router.post('/entry-trigger-observations/secondary-scan', async (req: Request, r
       }
 
       if (target.candidate_ids.length > 0) {
-        const candidatePoolStatus = invalidated ? 'expired' : 'active';
-        const candidateFinalStatus = invalidated ? 'REJECTED' : 'READY_FOR_PLAN';
-        const candidateReviewAction = invalidated
-          ? 'entry_trigger_invalidated'
-          : canUpgrade
-            ? 'entry_trigger_plan_ready'
-            : 'entry_trigger_waiting';
         await db.run(
           `UPDATE financial_candidate_pool
            SET review_status = ?,
@@ -2035,11 +2077,11 @@ router.post('/entry-trigger-observations/secondary-scan', async (req: Request, r
            WHERE id IN (${target.candidate_ids.map(() => '?').join(',')})`,
           [
             candidateReviewStatus,
-            candidatePoolStatus,
-            candidateFinalStatus,
+            candidateDecision.poolStatus,
+            candidateDecision.finalStatus,
             now,
             now,
-            candidateReviewAction,
+            candidateDecision.reviewAction,
             snapshot.trigger_reason || scanConclusion,
             invalidated ? 1 : 0,
             invalidated ? snapshot.trigger_reason || '入场触发失效淘汰' : null,
@@ -2115,16 +2157,10 @@ router.post('/entry-trigger-observations/:id/secondary-scan', async (req: Reques
       snapshot.structure_status === 'STRUCTURE_BROKEN' ||
       (snapshot.close && snapshot.invalidation_line && snapshot.close < snapshot.invalidation_line);
     const canUpgrade = snapshot.action === 'READY_TO_PLAN' && !trendUnknown && !invalidated;
+    const candidateDecision = resolveCandidateStatusAfterEntryScan(snapshot, invalidated, canUpgrade);
     const status = invalidated ? 'invalidated' : canUpgrade ? 'confirmed' : 'watching';
-    const candidateReviewStatus = invalidated ? 'rejected' : canUpgrade ? 'plan_ready' : 'wait_confirmation';
-    const candidatePoolStatus = invalidated ? 'expired' : 'active';
-    const candidateFinalStatus = invalidated ? 'REJECTED' : 'READY_FOR_PLAN';
-    const candidateReviewAction = invalidated
-      ? 'entry_trigger_invalidated'
-      : canUpgrade
-        ? 'entry_trigger_plan_ready'
-        : 'entry_trigger_waiting';
-    const conclusion = invalidated ? '失效淘汰' : canUpgrade ? '可升级计划准备' : '继续等待';
+    const candidateReviewStatus = candidateDecision.reviewStatus;
+    const conclusion = candidateDecision.conclusion;
 
     await db.run(
       `UPDATE financial_entry_trigger_observations
@@ -2181,14 +2217,14 @@ router.post('/entry-trigger-observations/:id/secondary-scan', async (req: Reques
          AND asset_type = ?
          AND source = ?
          AND pool_status = 'active'
-         AND review_status IN ('wait_confirmation', 'plan_ready', 'unreviewed')`,
+         AND review_status IN ('wait_confirmation', 'plan_ready', 'unreviewed', 'structure_ready', 'structure_watch')`,
       [
         candidateReviewStatus,
-        candidatePoolStatus,
-        candidateFinalStatus,
+        candidateDecision.poolStatus,
+        candidateDecision.finalStatus,
         now,
         now,
-        candidateReviewAction,
+        candidateDecision.reviewAction,
         snapshot.trigger_reason || conclusion,
         invalidated ? 1 : 0,
         invalidated ? snapshot.trigger_reason || '入场触发失效淘汰' : null,

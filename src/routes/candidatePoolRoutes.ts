@@ -20,6 +20,17 @@ const STOCK_AVG20_AMOUNT_MIN_YUAN = 100_000_000;
 const STOCK_MIN5_AMOUNT_MIN_YUAN = 30_000_000;
 const STOCK_CIRC_MARKET_CAP_MIN_YUAN = 5_000_000_000;
 const ETF_HARD_BLOCK_TREND_PHASES = new Set(['SURGE', 'REBOUND', 'SLOW_BLEED', 'CRASH_DROP']);
+const STRUCTURE_QUEUE_STATUSES = new Set(['structure_pending', 'structure_watch', 'structure_ready', 'model_conflict']);
+const STRUCTURE_READY_TREND_PHASES = new Set(['BREAKOUT', 'SLOW_GRIND_UP', 'RECOVERY']);
+const STRUCTURE_HARD_REJECT_GATES = new Set([
+  'asset_applicability',
+  'data_ready',
+  'special_treatment',
+  'liquidity_gate',
+  'market_cap_gate',
+  'extreme_trade_gate',
+  'etf_group_gate'
+]);
 const trainingRoot = process.env.MODEL_TRAINING_ROOT || '/Volumes/7100/model-training';
 const trainingPython = process.env.MODEL_TRAINING_PYTHON || path.join(trainingRoot, 'venv', 'bin', 'python');
 let candidateReviewSchemaReady = false;
@@ -1442,6 +1453,10 @@ function getReviewStatusLabel(status?: string | null): string {
   switch (status) {
     case 'drafted': return '已生成草稿';
     case 'trend_blocked': return '卡在走势阶段';
+    case 'structure_pending': return '待单标的判断';
+    case 'structure_watch': return '单标的观察';
+    case 'structure_ready': return '单标的通过';
+    case 'model_conflict': return '模型冲突待复核';
     case 'wait_confirmation': return '等待二次确认';
     case 'plan_ready': return '进入计划准备';
     case 'rejected': return '复盘淘汰';
@@ -1449,6 +1464,191 @@ function getReviewStatusLabel(status?: string | null): string {
     default:
       return '未复盘';
   }
+}
+
+function getStructureQueueStatusMeta(item: any): { key: string; label: string; tone: string; reason: string } {
+  const status = String(item?.review_status || 'structure_pending');
+  const trendCode = String(item?.trend_phase_code || '');
+  const reason = item?.candidate_reason || item?.forbidden_reason || item?.downgrade_reason || item?.trend_phase_reason || '等待单标的判断。';
+
+  if (status === 'structure_ready') {
+    return { key: 'ready', label: '可进入入场触发', tone: 'success', reason: reason || '结构、安全区和硬闸门已通过。' };
+  }
+  if (status === 'structure_watch') {
+    return { key: 'watch', label: '单标的观察', tone: 'warning', reason };
+  }
+  if (status === 'model_conflict') {
+    return { key: 'model_conflict', label: '模型冲突待复核', tone: 'cyan', reason };
+  }
+  if (status === 'trend_blocked' || (trendCode && !STRUCTURE_READY_TREND_PHASES.has(trendCode))) {
+    return { key: 'trend_blocked', label: '退回走势阶段', tone: 'warning', reason };
+  }
+  return { key: 'pending', label: '待单标的判断', tone: 'neutral', reason };
+}
+
+function resolveStructureQueueDecision(evaluation: any): {
+  review_status: string;
+  pool_status: string;
+  final_status: string;
+  review_action: string;
+  reason: string;
+} {
+  const reason = evaluation?.candidate_reason || evaluation?.forbidden_reason || evaluation?.reason || '单标的判断结果待确认';
+  if (evaluation?.selected) {
+    return {
+      review_status: 'structure_ready',
+      pool_status: 'active',
+      final_status: 'READY_FOR_PLAN',
+      review_action: 'single_target_passed',
+      reason: reason || '单标的判断通过，等待入场触发。'
+    };
+  }
+
+  const gateKey = String(evaluation?.first_blocking_gate_key || '');
+  if (gateKey === 'trend_phase_gate') {
+    return {
+      review_status: 'trend_blocked',
+      pool_status: 'active',
+      final_status: 'WAIT',
+      review_action: 'single_target_back_to_trend',
+      reason: `走势阶段未通过：${reason}`
+    };
+  }
+
+  if (STRUCTURE_HARD_REJECT_GATES.has(gateKey) || isHardBlockedFromModelRecheck(evaluation)) {
+    return {
+      review_status: 'rejected',
+      pool_status: 'expired',
+      final_status: 'REJECTED',
+      review_action: 'single_target_hard_rejected',
+      reason
+    };
+  }
+
+  return {
+    review_status: 'structure_watch',
+    pool_status: 'active',
+    final_status: 'WAIT',
+    review_action: 'single_target_watch',
+    reason
+  };
+}
+
+async function applyStructureQueueDecision(db: any, id: number, evaluation: any, name = '') {
+  const now = new Date().toISOString();
+  const decision = resolveStructureQueueDecision(evaluation);
+  const structure = evaluation.structure || {};
+  const trendPhase = evaluation.trend_phase || {};
+  const marketRegime = evaluation.market_regime || {};
+
+  if (evaluation.selected) {
+    await upsertCandidate(db, evaluation, name);
+  }
+
+  await db.run(
+    `UPDATE financial_candidate_pool
+     SET trade_date = COALESCE(?, trade_date),
+         close = COALESCE(?, close),
+         ma20 = COALESCE(?, ma20),
+         ma60 = COALESCE(?, ma60),
+         ma120 = COALESCE(?, ma120),
+         distance_to_ma60 = COALESCE(?, distance_to_ma60),
+         above_ma60_days = COALESCE(?, above_ma60_days),
+         structure_status = COALESCE(?, structure_status),
+         structure_reason = COALESCE(?, structure_reason),
+         safe_zone_status = COALESCE(?, safe_zone_status),
+         safe_zone_reason = COALESCE(?, safe_zone_reason),
+         trend_phase_code = COALESCE(?, trend_phase_code),
+         trend_phase_reason = COALESCE(?, trend_phase_reason),
+         market_regime = COALESCE(?, market_regime),
+         entry_permission = COALESCE(?, entry_permission),
+         final_status = ?,
+         pool_status = ?,
+         priority = COALESCE(?, priority),
+         priority_score = COALESCE(?, priority_score),
+         invalidation_line = COALESCE(?, invalidation_line),
+         candidate_reason = ?,
+         forbidden_reason = ?,
+         downgrade_reason = ?,
+         risk_note = ?,
+         review_status = ?,
+         gate_trace_json = ?,
+         first_blocking_gate_key = ?,
+         first_blocking_gate_label = ?,
+         blocking_gate_labels = ?,
+         last_checked_at = ?,
+         last_review_at = ?,
+         review_action = ?,
+         updated_at = ?
+     WHERE id = ?
+       AND rule_version = ?`,
+    [
+      structure.trade_date || null,
+      structure.close ?? null,
+      structure.ma20 ?? null,
+      structure.ma60 ?? null,
+      structure.ma120 ?? null,
+      structure.distance_to_ma60 ?? null,
+      structure.above_ma60_days ?? null,
+      structure.structure_status || null,
+      structure.structure_reason || null,
+      structure.safe_zone_status || null,
+      structure.safe_zone_reason || null,
+      trendPhase.trend_phase_code || null,
+      trendPhase.trend_phase_reason || null,
+      marketRegime.market_regime || null,
+      marketRegime.entry_permission || null,
+      decision.final_status,
+      decision.pool_status,
+      evaluation.priority || null,
+      evaluation.priority_score ?? null,
+      structure.invalidation_line ?? null,
+      decision.reason,
+      decision.review_status === 'rejected' ? (evaluation.forbidden_reason || decision.reason) : (evaluation.forbidden_reason || null),
+      evaluation.downgrade_reason || null,
+      evaluation.risk_note || '',
+      decision.review_status,
+      evaluation.gate_trace ? JSON.stringify(evaluation.gate_trace) : null,
+      evaluation.first_blocking_gate_key || null,
+      evaluation.first_blocking_gate_label || null,
+      evaluation.blocking_gate_labels || null,
+      now,
+      now,
+      decision.review_action,
+      now,
+      id,
+      CANDIDATE_RULE_VERSION
+    ]
+  );
+
+  return decision;
+}
+
+async function fetchStructureQueueItem(db: any, id: number) {
+  const row = await db.get(
+    `SELECT c.*,
+            (
+              SELECT GROUP_CONCAT(DISTINCT u.universe_type)
+              FROM financial_asset_universe u
+              WHERE u.symbol = c.symbol
+                AND u.asset_type = c.asset_type
+                AND u.source = c.source
+            ) AS universe_type
+     FROM financial_candidate_pool c
+     WHERE c.id = ?
+       AND c.rule_version = ?`,
+    [id, CANDIDATE_RULE_VERSION]
+  );
+  if (!row) return null;
+  const hydrated = hydrateCandidateItem(row);
+  const statusMeta = getStructureQueueStatusMeta(hydrated);
+  return {
+    ...hydrated,
+    queue_status: statusMeta.key,
+    queue_status_label: statusMeta.label,
+    queue_status_tone: statusMeta.tone,
+    queue_reason: statusMeta.reason
+  };
 }
 
 function splitReasonText(text?: string | null): string[] {
@@ -2242,6 +2442,182 @@ router.post('/candidate-pool/evaluate-one', async (req: Request, res: Response) 
   }
 });
 
+router.get('/candidate-pool/structure-queue', async (req: Request, res: Response) => {
+  try {
+    const db = await getDb();
+    await ensureCandidateReviewSchema(db);
+    const source = String(req.query.source || 'tushare');
+    const assetType = String(req.query.asset_type || '').trim();
+    const limit = Math.max(Math.min(parseInt(req.query.limit as string) || 80, 300), 1);
+    const readySql = Array.from(STRUCTURE_READY_TREND_PHASES).map(() => '?').join(',');
+
+    const params: any[] = [TREND_PHASE_VERSION, source, ...Array.from(STRUCTURE_READY_TREND_PHASES)];
+    const whereParts = [
+      `c.pool_status = 'active'`,
+      `c.asset_type IN ('stock', 'etf')`,
+      `c.source = ?`,
+      `COALESCE(c.review_status, 'unreviewed') NOT IN ('trend_blocked', 'wait_confirmation', 'plan_ready', 'rejected')`,
+      `(
+        COALESCE(c.review_status, 'unreviewed') IN ('structure_pending', 'structure_watch', 'structure_ready', 'model_conflict')
+        OR t.trend_phase_code IN (${readySql})
+      )`
+    ];
+
+    if (assetType === 'stock' || assetType === 'etf') {
+      whereParts.push(`c.asset_type = ?`);
+      params.push(assetType);
+    }
+
+    const latestTrendJoin = `
+      LEFT JOIN financial_trend_phase_results t ON t.id = (
+        SELECT t2.id
+        FROM financial_trend_phase_results t2
+        WHERE t2.symbol = c.symbol
+          AND t2.asset_type = c.asset_type
+          AND t2.source = c.source
+          AND t2.rule_version = ?
+        ORDER BY t2.trade_date DESC, t2.id DESC
+        LIMIT 1
+      )
+    `;
+    const whereSql = whereParts.join('\n      AND ');
+
+    const countParams = [...params];
+    const countRows = await db.all(
+      `SELECT
+         COALESCE(c.review_status, 'structure_pending') AS review_status,
+         COUNT(*) AS count
+       FROM financial_candidate_pool c
+       ${latestTrendJoin}
+       WHERE ${whereSql}
+       GROUP BY COALESCE(c.review_status, 'structure_pending')`,
+      countParams
+    );
+
+    const rows = await db.all(
+      `SELECT c.*,
+              t.trend_phase_code AS latest_trend_phase_code,
+              t.trend_phase_reason AS latest_trend_phase_reason,
+              (
+                SELECT GROUP_CONCAT(DISTINCT u.universe_type)
+                FROM financial_asset_universe u
+                WHERE u.symbol = c.symbol
+                  AND u.asset_type = c.asset_type
+                  AND u.source = c.source
+              ) AS universe_type
+       FROM financial_candidate_pool c
+       ${latestTrendJoin}
+       WHERE ${whereSql}
+       ORDER BY
+         CASE COALESCE(c.review_status, 'structure_pending')
+           WHEN 'structure_pending' THEN 0
+           WHEN 'model_conflict' THEN 1
+           WHEN 'structure_watch' THEN 2
+           WHEN 'structure_ready' THEN 3
+           ELSE 4
+         END,
+         c.priority_score DESC,
+         COALESCE(c.updated_at, c.last_checked_at) DESC,
+         c.id DESC
+       LIMIT ?`,
+      [...params, limit]
+    );
+
+    const items = rows.map((row: any) => {
+      const hydrated = hydrateCandidateItem({
+        ...row,
+        trend_phase_code: row.trend_phase_code || row.latest_trend_phase_code,
+        trend_phase_reason: row.trend_phase_reason || row.latest_trend_phase_reason,
+        review_status: STRUCTURE_QUEUE_STATUSES.has(row.review_status)
+          ? row.review_status
+          : 'structure_pending'
+      });
+      const statusMeta = getStructureQueueStatusMeta(hydrated);
+      return {
+        ...hydrated,
+        queue_status: statusMeta.key,
+        queue_status_label: statusMeta.label,
+        queue_status_tone: statusMeta.tone,
+        queue_reason: statusMeta.reason
+      };
+    });
+
+    const countMap = countRows.reduce((summary: Record<string, number>, row: any) => {
+      const status = STRUCTURE_QUEUE_STATUSES.has(row.review_status) ? row.review_status : 'structure_pending';
+      summary[status] = (summary[status] || 0) + Number(row.count || 0);
+      return summary;
+    }, {});
+
+    res.json({
+      success: true,
+      data: {
+        items,
+        summary: {
+          total: Object.values(countMap).reduce((sum, count) => sum + Number(count || 0), 0),
+          pending: countMap.structure_pending || 0,
+          watch: countMap.structure_watch || 0,
+          ready: countMap.structure_ready || 0,
+          model_conflict: countMap.model_conflict || 0
+        }
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: `获取单标的判断队列失败: ${(error as Error).message}`
+    });
+  }
+});
+
+router.post('/candidate-pool/structure-queue/:id/recheck', async (req: Request, res: Response) => {
+  try {
+    const db = await getDb();
+    await ensureCandidateReviewSchema(db);
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) {
+      return res.status(400).json({ success: false, message: '无效的队列ID' });
+    }
+
+    const candidate = await db.get(
+      `SELECT id, symbol, name, asset_type, source, pool_status
+       FROM financial_candidate_pool
+       WHERE id = ?
+         AND rule_version = ?
+       LIMIT 1`,
+      [id, CANDIDATE_RULE_VERSION]
+    );
+    if (!candidate) {
+      return res.status(404).json({ success: false, message: '单标的判断队列记录不存在' });
+    }
+    if (!CANDIDATE_POOL_ASSET_TYPES.includes(candidate.asset_type)) {
+      return res.status(400).json({ success: false, message: '该资产类型不进入单标的判断队列' });
+    }
+
+    const industryStrengthContext = candidate.asset_type === 'etf'
+      ? await buildIndustryEtfStrengthContext(db, { scope: 'focus', benchmarkSymbol: '000300' })
+      : undefined;
+    const evaluation = await evaluateCandidate(db, candidate.symbol, candidate.asset_type, candidate.source, industryStrengthContext);
+    const decision = await applyStructureQueueDecision(db, id, evaluation, candidate.name || '');
+    const item = await fetchStructureQueueItem(db, id);
+
+    res.json({
+      success: true,
+      message: `单标的判断完成：${getReviewStatusLabel(decision.review_status)}`,
+      data: {
+        selected: Boolean(evaluation.selected),
+        decision,
+        evaluation,
+        item
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: `单标的判断队列重算失败: ${(error as Error).message}`
+    });
+  }
+});
+
 router.post('/candidate-pool/scan-universe', async (req: Request, res: Response) => {
   try {
     const db = await getDb();
@@ -2566,7 +2942,18 @@ router.patch('/candidate-pool/:id/review-status', async (req: Request, res: Resp
     await ensureCandidateReviewSchema(db);
     const id = req.params.id;
     const status = req.body.status;
-    const validStatuses = ['unreviewed', 'drafted', 'trend_blocked', 'wait_confirmation', 'plan_ready', 'rejected'];
+    const validStatuses = [
+      'unreviewed',
+      'drafted',
+      'trend_blocked',
+      'structure_pending',
+      'structure_watch',
+      'structure_ready',
+      'model_conflict',
+      'wait_confirmation',
+      'plan_ready',
+      'rejected'
+    ];
 
     if (!validStatuses.includes(status)) {
       return res.status(400).json({ success: false, message: '无效的复盘状态' });
