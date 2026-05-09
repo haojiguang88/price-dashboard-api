@@ -35,6 +35,8 @@ interface SeriesStats {
   change_amount: number | null;
   change_percent: number | null;
   period_start_date: string | null;
+  period_start_price: number | null;
+  period_change_amount: number | null;
   period_change_percent: number | null;
   min_price: number;
   min_date: string;
@@ -103,6 +105,8 @@ const toInsightItem = (item: SeriesStats) => ({
   previous_price: item.previous_price === null ? null : roundNumber(item.previous_price),
   change_amount: roundNullable(item.change_amount),
   change_percent: roundNullable(item.change_percent),
+  period_start_price: item.period_start_price === null ? null : roundNumber(item.period_start_price),
+  period_change_amount: roundNullable(item.period_change_amount),
   period_change_percent: roundNullable(item.period_change_percent),
   min_price: roundNumber(item.min_price),
   max_price: roundNumber(item.max_price),
@@ -211,6 +215,7 @@ const buildPriceInsights = (records: PriceRecordRow[]) => {
       : null;
     const periodCutoff = toDateValue(last.date) - 30 * DAY_MS;
     const periodBase = [...seriesRecords].reverse().find(record => toDateValue(record.date) <= periodCutoff) || first;
+    const periodChangeAmount = periodBase.id !== last.id ? last.price - periodBase.price : null;
     const periodChangePercent = periodBase.id !== last.id ? percentChange(last.price, periodBase.price) : null;
     const changeAmount = previous ? last.price - previous.price : null;
     const changePercent = previous ? percentChange(last.price, previous.price) : null;
@@ -241,6 +246,8 @@ const buildPriceInsights = (records: PriceRecordRow[]) => {
       change_amount: changeAmount,
       change_percent: changePercent,
       period_start_date: periodBase.id !== last.id ? periodBase.date : null,
+      period_start_price: periodBase.id !== last.id ? periodBase.price : null,
+      period_change_amount: periodChangeAmount,
       period_change_percent: periodChangePercent,
       min_price: minRecord.price,
       min_date: minRecord.date,
