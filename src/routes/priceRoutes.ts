@@ -738,6 +738,7 @@ router.post("/import/price-records", async (req, res) => {
       if (!category_name || !object_name || price === undefined || !date) {
         failed++;
         failed_records.push({
+          row_index: i + 1,
           date: date,
           category_name: category_name,
           object_name: object_name,
@@ -752,6 +753,7 @@ router.post("/import/price-records", async (req, res) => {
       if (typeof price !== 'number') {
         failed++;
         failed_records.push({
+          row_index: i + 1,
           date: date,
           category_name: category_name,
           object_name: object_name,
@@ -767,6 +769,7 @@ router.post("/import/price-records", async (req, res) => {
       if (!dateRegex.test(date)) {
         failed++;
         failed_records.push({
+          row_index: i + 1,
           date: date,
           category_name: category_name,
           object_name: object_name,
@@ -782,6 +785,7 @@ router.post("/import/price-records", async (req, res) => {
       if (processedRecords.has(recordKey)) {
         skipped++;
         skipped_records.push({
+          row_index: i + 1,
           date: date,
           category_name: category_name,
           object_name: object_name,
@@ -798,6 +802,7 @@ router.post("/import/price-records", async (req, res) => {
         if (!category) {
           failed++;
           failed_records.push({
+            row_index: i + 1,
             date: date,
             category_name: category_name,
             object_name: object_name,
@@ -812,6 +817,7 @@ router.post("/import/price-records", async (req, res) => {
         if (!object) {
           failed++;
           failed_records.push({
+            row_index: i + 1,
             date: date,
             category_name: category_name,
             object_name: object_name,
@@ -828,6 +834,7 @@ router.post("/import/price-records", async (req, res) => {
           if (!variant) {
             failed++;
             failed_records.push({
+              row_index: i + 1,
               date: date,
               category_name: category_name,
               object_name: object_name,
@@ -848,6 +855,7 @@ router.post("/import/price-records", async (req, res) => {
         if (existingRecord) {
           skipped++;
           skipped_records.push({
+            row_index: i + 1,
             date: date,
             category_name: category_name,
             object_name: object_name,
@@ -869,6 +877,7 @@ router.post("/import/price-records", async (req, res) => {
       } catch (error) {
         failed++;
         failed_records.push({
+          row_index: i + 1,
           date: date,
           category_name: category_name,
           object_name: object_name,
