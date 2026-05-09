@@ -42,6 +42,8 @@ interface SeriesStats {
   max_date: string;
   drawdown_percent: number;
   from_first_percent: number;
+  historical_high_break_percent: number | null;
+  historical_low_break_percent: number | null;
   days_since_latest: number;
   source: string | null;
   note: string | null;
@@ -198,8 +200,15 @@ const buildPriceInsights = (records: PriceRecordRow[]) => {
     const first = seriesRecords[0];
     const last = seriesRecords[seriesRecords.length - 1];
     const previous = seriesRecords.length > 1 ? seriesRecords[seriesRecords.length - 2] : null;
+    const previousRecords = seriesRecords.slice(0, -1);
     const minRecord = seriesRecords.reduce((min, record) => record.price < min.price ? record : min, first);
     const maxRecord = seriesRecords.reduce((max, record) => record.price > max.price ? record : max, first);
+    const previousMinRecord = previousRecords.length > 0
+      ? previousRecords.reduce((min, record) => record.price < min.price ? record : min, previousRecords[0])
+      : null;
+    const previousMaxRecord = previousRecords.length > 0
+      ? previousRecords.reduce((max, record) => record.price > max.price ? record : max, previousRecords[0])
+      : null;
     const periodCutoff = toDateValue(last.date) - 30 * DAY_MS;
     const periodBase = [...seriesRecords].reverse().find(record => toDateValue(record.date) <= periodCutoff) || first;
     const periodChangePercent = periodBase.id !== last.id ? percentChange(last.price, periodBase.price) : null;
@@ -207,6 +216,12 @@ const buildPriceInsights = (records: PriceRecordRow[]) => {
     const changePercent = previous ? percentChange(last.price, previous.price) : null;
     const fromFirstPercent = percentChange(last.price, first.price) || 0;
     const drawdownPercent = percentChange(last.price, maxRecord.price) || 0;
+    const historicalHighBreakPercent = previousMaxRecord && last.price > previousMaxRecord.price
+      ? percentChange(last.price, previousMaxRecord.price)
+      : null;
+    const historicalLowBreakPercent = previousMinRecord && last.price < previousMinRecord.price
+      ? percentChange(last.price, previousMinRecord.price)
+      : null;
 
     seriesStats.push({
       label: buildSeriesLabel(last),
@@ -233,6 +248,8 @@ const buildPriceInsights = (records: PriceRecordRow[]) => {
       max_date: maxRecord.date,
       drawdown_percent: drawdownPercent,
       from_first_percent: fromFirstPercent,
+      historical_high_break_percent: historicalHighBreakPercent,
+      historical_low_break_percent: historicalLowBreakPercent,
       days_since_latest: daysBetween(last.date, latestDate),
       source: last.source,
       note: last.note
@@ -322,13 +339,13 @@ const buildPriceInsights = (records: PriceRecordRow[]) => {
       .slice(0, 12)
       .map(toInsightItem),
     record_highs: activeSeries
-      .filter(item => item.record_count >= 2 && item.current_price === item.max_price)
-      .sort((a, b) => b.from_first_percent - a.from_first_percent)
+      .filter(item => item.record_count >= 2 && item.historical_high_break_percent !== null)
+      .sort((a, b) => toDateValue(b.current_date) - toDateValue(a.current_date) || b.current_price - a.current_price)
       .slice(0, 10)
       .map(toInsightItem),
     record_lows: activeSeries
-      .filter(item => item.record_count >= 2 && item.current_price === item.min_price)
-      .sort((a, b) => a.from_first_percent - b.from_first_percent)
+      .filter(item => item.record_count >= 2 && item.historical_low_break_percent !== null)
+      .sort((a, b) => toDateValue(b.current_date) - toDateValue(a.current_date) || a.current_price - b.current_price)
       .slice(0, 10)
       .map(toInsightItem),
     stale_targets: staleSeries
