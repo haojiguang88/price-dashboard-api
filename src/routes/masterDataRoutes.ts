@@ -176,7 +176,7 @@ router.delete("/objects/:id", async (req, res) => {
 router.get("/variants", async (req, res) => {
   try {
     const db = await getDb();
-    const variants = await db.all("SELECT variants.id, variants.object_id, variants.name, objects.name as object_name, objects.category_id, categories.name as category_name, variants.created_at, variants.updated_at FROM variants JOIN objects ON variants.object_id = objects.id JOIN categories ON objects.category_id = categories.id");
+    const variants = await db.all("SELECT variants.id, variants.object_id, variants.name, COALESCE(variants.note, '') as note, objects.name as object_name, objects.category_id, categories.name as category_name, variants.created_at, variants.updated_at FROM variants JOIN objects ON variants.object_id = objects.id JOIN categories ON objects.category_id = categories.id ORDER BY categories.name ASC, objects.name ASC, variants.name ASC");
     res.json({ success: true, data: variants });
   } catch (error) {
     res.status(500).json({ success: false, message: "获取变体列表失败" });
@@ -186,13 +186,13 @@ router.get("/variants", async (req, res) => {
 router.post("/variants", async (req, res) => {
   try {
     const db = await getDb();
-    const { object_id, name } = req.body;
+    const { object_id, name, note } = req.body;
     if (!object_id || !name || !name.trim()) {
       return res.status(400).json({ success: false, message: "对象 ID 和名称不能为空" });
     }
     const now = new Date().toISOString();
     try {
-      const result = await db.run("INSERT INTO variants (object_id, name, created_at, updated_at) VALUES (?, ?, ?, ?)", [object_id, name.trim(), now, now]);
+      const result = await db.run("INSERT INTO variants (object_id, name, note, created_at, updated_at) VALUES (?, ?, ?, ?, ?)", [object_id, name.trim(), typeof note === "string" ? note : "", now, now]);
       res.json({ success: true, data: { id: result.lastID, message: "新增变体成功" } });
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
@@ -203,6 +203,26 @@ router.post("/variants", async (req, res) => {
     }
   } catch (error) {
     res.status(500).json({ success: false, message: "新增变体失败" });
+  }
+});
+
+router.patch("/variants/:id/note", async (req, res) => {
+  try {
+    const db = await getDb();
+    const { id } = req.params;
+    const { note } = req.body;
+    if (typeof note !== "string") {
+      return res.status(400).json({ success: false, message: "备注必须是文本" });
+    }
+
+    const now = new Date().toISOString();
+    const result = await db.run("UPDATE variants SET note = ?, updated_at = ? WHERE id = ?", [note, now, id]);
+    if (result.changes === 0) {
+      return res.status(404).json({ success: false, message: "变体不存在" });
+    }
+    res.json({ success: true, data: { message: "保存备注成功", updated_at: now } });
+  } catch (error) {
+    res.status(500).json({ success: false, message: "保存变体备注失败" });
   }
 });
 
