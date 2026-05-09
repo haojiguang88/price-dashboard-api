@@ -7,6 +7,7 @@ import {
   getFinancePlanProfileConfig,
   resolveFinancePlanProfile
 } from '../services/financePlanProfile';
+import { buildFinancePlanQuality } from '../services/financePlanQuality';
 
 const router = express.Router();
 const TREND_PHASE_VERSION = 'trend_phase_v1.1';
@@ -248,6 +249,89 @@ function getEntryManualPriorityScore(
   const trendScore = Math.max(0, 30 - getEntryTrendPriority(trendPhaseCode) * 10);
   const riskScore = maxLossPercent === null ? 0 : Math.max(0, Math.round((0.06 - Math.min(maxLossPercent, 0.06)) * 1000));
   return levelScore + trendScore + Math.round(triggerScore || 0) + Math.round((structureScore || 0) / 2) + riskScore;
+}
+
+function getPriorHigh(prices: DailyPrice[], days: number): number | null {
+  const priorPrices = prices.slice(0, -1).slice(-days);
+  const highs = priorPrices.map((price) => Number(price.high)).filter(Number.isFinite);
+  if (highs.length === 0) return null;
+  return Math.max(...highs);
+}
+
+async function buildPlanReadyValueMetrics(
+  db: any,
+  item: any,
+  snapshot: any,
+  maxLossPercent: number | null
+) {
+  const close = toNullableNumber(item.close_price) ?? toNullableNumber(snapshot?.close);
+  if (!close || close <= 0) {
+    return {
+      target_price: null,
+      target_source: '缺少当前价，无法计算上方空间',
+      target_space_percent: null,
+      downside_risk_percent: maxLossPercent,
+      risk_reward_ratio: null,
+      plan_quality: buildFinancePlanQuality({ ...item, max_loss_percent: maxLossPercent })
+    };
+  }
+
+  const params: any[] = [item.symbol, item.asset_type, item.source];
+  let tradeDateFilter = '';
+  if (item.trade_date) {
+    tradeDateFilter = 'AND trade_date <= ?';
+    params.push(item.trade_date);
+  }
+  const rows = await db.all(
+    `SELECT trade_date, open, high, low, close, volume, amount
+     FROM financial_daily_prices
+     WHERE symbol = ?
+       AND asset_type = ?
+       AND source = ?
+       ${tradeDateFilter}
+     ORDER BY trade_date DESC
+     LIMIT 160`,
+    params
+  );
+  const prices: DailyPrice[] = [...rows].reverse();
+  const high60 = getPriorHigh(prices, 60);
+  const high120 = getPriorHigh(prices, 120);
+  let targetPrice = Math.max(high60 || 0, high120 || 0);
+  let targetSource = targetPrice === high120 && high120
+    ? '近120日前高压力'
+    : targetPrice === high60 && high60
+      ? '近60日前高压力'
+      : '历史压力不足';
+
+  if (!Number.isFinite(targetPrice) || targetPrice <= close) {
+    const extension = item.asset_type === 'etf' ? 0.06 : 0.08;
+    targetPrice = close * (1 + extension);
+    targetSource = `近120日无明显上方压力，按${item.asset_type === 'etf' ? 'ETF' : '个股'}保守延展估算`;
+  }
+
+  const targetSpacePercent = targetPrice > close ? roundRatio((targetPrice - close) / close) : 0;
+  const downsideRiskPercent = maxLossPercent !== null ? roundRatio(Math.max(0, maxLossPercent)) : null;
+  const riskRewardRatio = downsideRiskPercent && downsideRiskPercent > 0 && targetSpacePercent !== null
+    ? Math.round((targetSpacePercent / downsideRiskPercent) * 100) / 100
+    : null;
+  const planQuality = buildFinancePlanQuality({
+    ...item,
+    close_price: close,
+    max_loss_percent: downsideRiskPercent,
+    target_space_percent: targetSpacePercent,
+    pressure_distance_percent: targetSpacePercent,
+    suggested_entry_zone: snapshot?.plan_draft?.suggested_entry_zone,
+    trigger_type: item.entry_action || snapshot?.action || 'READY_TO_PLAN'
+  });
+
+  return {
+    target_price: Math.round(targetPrice * 1000) / 1000,
+    target_source: targetSource,
+    target_space_percent: targetSpacePercent,
+    downside_risk_percent: downsideRiskPercent,
+    risk_reward_ratio: riskRewardRatio,
+    plan_quality: planQuality
+  };
 }
 
 function getTrendAction(
@@ -1843,14 +1927,15 @@ router.get('/entry-trigger-observations', async (req: Request, res: Response) =>
       item.has_existing_plan = existingPlan ? 1 : 0;
       item.existing_plan = existingPlan || null;
     }
-    items = items.map((item: any) => {
+    items = await Promise.all(items.map(async (item: any) => {
       const snapshot = parseJson(item.snapshot_json, null);
       const close = Number(item.close_price);
       const invalidation = Number(item.invalidation_line);
       const ma60 = Number(item.ma60);
-      const maxLossPercent = Number.isFinite(close) && close > 0 && Number.isFinite(invalidation) && invalidation > 0
+      const rawMaxLossPercent = Number.isFinite(close) && close > 0 && Number.isFinite(invalidation) && invalidation > 0
         ? (close - invalidation) / close
         : null;
+      const maxLossPercent = rawMaxLossPercent !== null ? Math.max(0, rawMaxLossPercent) : null;
       const distanceToMa60 = Number.isFinite(close) && close > 0 && Number.isFinite(ma60) && ma60 > 0
         ? (close - ma60) / ma60
         : null;
@@ -1865,10 +1950,22 @@ router.get('/entry-trigger-observations', async (req: Request, res: Response) =>
         ma60_slope: snapshot?.structure_score?.metrics?.ma60_slope,
         amplitude_20: snapshot?.structure_score?.metrics?.amplitude_20
       });
+      const planValueMetrics = await buildPlanReadyValueMetrics(db, item, snapshot, maxLossPercent);
+      const planQuality = planValueMetrics.plan_quality;
       return {
         ...item,
         opportunity_type: opportunityType,
         max_loss_percent: maxLossPercent,
+        target_price: planValueMetrics.target_price,
+        target_source: planValueMetrics.target_source,
+        target_space_percent: planValueMetrics.target_space_percent,
+        downside_risk_percent: planValueMetrics.downside_risk_percent,
+        risk_reward_ratio: planValueMetrics.risk_reward_ratio,
+        pressure_distance_percent: planValueMetrics.target_space_percent,
+        plan_quality: planQuality,
+        plan_quality_score: planQuality.score,
+        plan_quality_label: planQuality.label,
+        plan_quality_action: planQuality.action,
         manual_priority_level: getEntryManualPriorityLevel(
           item.trend_phase_code,
           Number(item.trigger_score || 0),
@@ -1883,9 +1980,18 @@ router.get('/entry-trigger-observations', async (req: Request, res: Response) =>
         ),
         trend_priority_rank: getEntryTrendPriority(item.trend_phase_code)
       };
-    });
+    }));
     if (observationStatus === 'confirmed') {
       items.sort((a: any, b: any) => {
+        if (Number(b.plan_quality_score || 0) !== Number(a.plan_quality_score || 0)) {
+          return Number(b.plan_quality_score || 0) - Number(a.plan_quality_score || 0);
+        }
+        if (Number(b.risk_reward_ratio || 0) !== Number(a.risk_reward_ratio || 0)) {
+          return Number(b.risk_reward_ratio || 0) - Number(a.risk_reward_ratio || 0);
+        }
+        if (Number(b.target_space_percent || 0) !== Number(a.target_space_percent || 0)) {
+          return Number(b.target_space_percent || 0) - Number(a.target_space_percent || 0);
+        }
         if (b.manual_priority_score !== a.manual_priority_score) {
           return b.manual_priority_score - a.manual_priority_score;
         }
