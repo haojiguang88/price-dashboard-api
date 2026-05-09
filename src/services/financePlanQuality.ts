@@ -1,3 +1,5 @@
+import { getFinancePlanProfileConfig, getFinanceStructureProfileConfig } from './financePlanProfile';
+
 function toNumber(value: any, fallback = 0): number {
   const num = Number(value);
   return Number.isFinite(num) ? num : fallback;
@@ -9,6 +11,9 @@ function toNullableNumber(value: any): number | null {
 }
 
 export function buildFinancePlanQuality(plan: any) {
+  const profileKey = plan.plan_profile || plan.profile_key || (plan.asset_type === 'etf' ? 'etf_broad_equity' : 'stock_equity');
+  const planProfile = getFinancePlanProfileConfig(profileKey);
+  const structureProfile = getFinanceStructureProfileConfig(profileKey);
   const structureScore = toNumber(plan.structure_score);
   const triggerScore = toNumber(plan.trigger_score);
   const close = toNumber(plan.close_price ?? plan.close);
@@ -23,12 +28,19 @@ export function buildFinancePlanQuality(plan: any) {
   const pressureDistancePercent = toNullableNumber(plan.pressure_distance_percent ?? plan.distance_to_pressure);
   const industryStrengthScore = toNullableNumber(plan.industry_strength_score ?? plan.industry_score);
   const accountRiskStatus = String(plan.account_risk_status || plan.account_status || 'NORMAL');
-  const rewardPercent = targetSpacePercent ?? (['BREAKOUT', 'SLOW_GRIND_UP', 'TREND_UP'].includes(trendPhase)
-    ? 0.16
+  const trendRewardEstimate = ['BREAKOUT', 'SLOW_GRIND_UP', 'TREND_UP'].includes(trendPhase)
+    ? structureProfile.targetExtensionPercent * 2
     : ['RECOVERY', 'TREND_TRANSITION'].includes(trendPhase)
-      ? 0.1
-      : 0.07);
+      ? structureProfile.targetExtensionPercent * 1.4
+      : structureProfile.targetExtensionPercent;
+  const rewardPercent = targetSpacePercent ?? trendRewardEstimate;
   const riskReward = riskPercent && riskPercent > 0 ? rewardPercent / riskPercent : null;
+  const tightRisk = planProfile.tightRiskPercent;
+  const maxRisk = planProfile.maxRiskPercent;
+  const looseRisk = maxRisk * 1.25;
+  const strongTarget = structureProfile.targetExtensionPercent * 2;
+  const okTarget = structureProfile.targetExtensionPercent * 1.4;
+  const minTarget = structureProfile.targetExtensionPercent;
 
   const factors = [
     {
@@ -46,8 +58,8 @@ export function buildFinancePlanQuality(plan: any) {
     {
       key: 'risk',
       label: '失效线距离',
-      score: riskPercent === null ? 5 : riskPercent <= 0.04 ? 18 : riskPercent <= 0.07 ? 13 : riskPercent <= 0.1 ? 7 : 2,
-      message: riskPercent === null ? '风险距离缺失，计划质量降级。' : riskPercent <= 0.04 ? '失效线近，风险可控。' : riskPercent <= 0.07 ? '风险距离可接受。' : '失效线偏远，计划不够划算。'
+      score: riskPercent === null ? 5 : riskPercent <= tightRisk ? 18 : riskPercent <= maxRisk ? 13 : riskPercent <= looseRisk ? 7 : 2,
+      message: riskPercent === null ? '风险距离缺失，计划质量降级。' : riskPercent <= tightRisk ? `符合${planProfile.label}的紧风险区。` : riskPercent <= maxRisk ? `符合${planProfile.label}的最大风险区。` : '失效线偏远，计划不够划算。'
     },
     {
       key: 'risk_reward',
@@ -64,14 +76,14 @@ export function buildFinancePlanQuality(plan: any) {
     {
       key: 'target_space',
       label: '目标空间',
-      score: rewardPercent >= 0.18 ? 9 : rewardPercent >= 0.12 ? 7 : rewardPercent >= 0.08 ? 4 : 2,
-      message: targetSpacePercent === null ? '暂未接入明确目标位，用走势阶段估算目标空间。' : rewardPercent >= 0.12 ? '目标空间相对充足。' : '目标空间偏窄，计划吸引力下降。'
+      score: rewardPercent >= strongTarget ? 9 : rewardPercent >= okTarget ? 7 : rewardPercent >= minTarget ? 4 : 2,
+      message: targetSpacePercent === null ? `暂未接入明确目标位，按${structureProfile.label}估算目标空间。` : rewardPercent >= okTarget ? '目标空间相对充足。' : '目标空间偏窄，计划吸引力下降。'
     },
     {
       key: 'pressure',
       label: '压力位距离',
-      score: pressureDistancePercent === null ? 4 : pressureDistancePercent >= 0.12 ? 7 : pressureDistancePercent >= 0.06 ? 5 : 2,
-      message: pressureDistancePercent === null ? '暂未接入压力位，后续需从结构/前高补充。' : pressureDistancePercent >= 0.06 ? '上方压力距离尚可。' : '离压力位过近，容易涨了也不好做。'
+      score: pressureDistancePercent === null ? 4 : pressureDistancePercent >= okTarget ? 7 : pressureDistancePercent >= minTarget ? 5 : 2,
+      message: pressureDistancePercent === null ? '暂未接入压力位，后续需从结构/前高补充。' : pressureDistancePercent >= minTarget ? '上方压力距离尚可。' : '离压力位过近，容易涨了也不好做。'
     },
     {
       key: 'industry_strength',

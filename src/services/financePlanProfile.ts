@@ -30,6 +30,32 @@ export interface FinancePlanProfileConfig {
   weakRatios: { base: number; tactical: number; observation: number };
 }
 
+export interface FinanceStructureProfileConfig {
+  key: FinancePlanProfileKey;
+  label: string;
+  minAboveMa60Days: number;
+  brokenBelowMa60Days: number;
+  safeZoneMin: number;
+  safeZoneMax: number;
+  highRiskChaseMin: number;
+  brokenZoneMax: number;
+  distanceTightMax: number;
+  distanceComfortMax: number;
+  distanceWatchMax: number;
+  drawdownGoodMax: number;
+  drawdownWatchMax: number;
+  drawdownWeakMax: number;
+  amplitudeGoodMax: number;
+  amplitudeWatchMax: number;
+  amplitudeWeakMax: number;
+  lowVolatilityMax: number;
+  emotionalAmplitudeMin: number;
+  targetExtensionPercent: number;
+  candidatePriorityPassScore: number;
+  modelHighProbability: number;
+  modelLowProbability: number;
+}
+
 const PROFILE_CONFIGS: Record<FinancePlanProfileKey, FinancePlanProfileConfig> = {
   stock_equity: {
     key: 'stock_equity',
@@ -213,6 +239,234 @@ const PROFILE_CONFIGS: Record<FinancePlanProfileKey, FinancePlanProfileConfig> =
   }
 };
 
+const STRUCTURE_PROFILE_CONFIGS: Record<FinancePlanProfileKey, FinanceStructureProfileConfig> = {
+  stock_equity: {
+    key: 'stock_equity',
+    label: '个股权益算法',
+    minAboveMa60Days: 3,
+    brokenBelowMa60Days: 3,
+    safeZoneMin: -0.03,
+    safeZoneMax: 0.05,
+    highRiskChaseMin: 0.08,
+    brokenZoneMax: -0.05,
+    distanceTightMax: 0.03,
+    distanceComfortMax: 0.08,
+    distanceWatchMax: 0.15,
+    drawdownGoodMax: 0.06,
+    drawdownWatchMax: 0.12,
+    drawdownWeakMax: 0.2,
+    amplitudeGoodMax: 0.12,
+    amplitudeWatchMax: 0.22,
+    amplitudeWeakMax: 0.35,
+    lowVolatilityMax: 0.14,
+    emotionalAmplitudeMin: 0.22,
+    targetExtensionPercent: 0.08,
+    candidatePriorityPassScore: 0,
+    modelHighProbability: 0.65,
+    modelLowProbability: 0.45
+  },
+  etf_broad_equity: {
+    key: 'etf_broad_equity',
+    label: '宽基ETF算法',
+    minAboveMa60Days: 2,
+    brokenBelowMa60Days: 4,
+    safeZoneMin: -0.035,
+    safeZoneMax: 0.045,
+    highRiskChaseMin: 0.07,
+    brokenZoneMax: -0.055,
+    distanceTightMax: 0.025,
+    distanceComfortMax: 0.065,
+    distanceWatchMax: 0.11,
+    drawdownGoodMax: 0.04,
+    drawdownWatchMax: 0.08,
+    drawdownWeakMax: 0.13,
+    amplitudeGoodMax: 0.08,
+    amplitudeWatchMax: 0.14,
+    amplitudeWeakMax: 0.22,
+    lowVolatilityMax: 0.08,
+    emotionalAmplitudeMin: 0.12,
+    targetExtensionPercent: 0.06,
+    candidatePriorityPassScore: 68,
+    modelHighProbability: 0.58,
+    modelLowProbability: 0.4
+  },
+  etf_industry_equity: {
+    key: 'etf_industry_equity',
+    label: '行业ETF算法',
+    minAboveMa60Days: 2,
+    brokenBelowMa60Days: 4,
+    safeZoneMin: -0.035,
+    safeZoneMax: 0.055,
+    highRiskChaseMin: 0.08,
+    brokenZoneMax: -0.055,
+    distanceTightMax: 0.03,
+    distanceComfortMax: 0.075,
+    distanceWatchMax: 0.13,
+    drawdownGoodMax: 0.05,
+    drawdownWatchMax: 0.09,
+    drawdownWeakMax: 0.16,
+    amplitudeGoodMax: 0.1,
+    amplitudeWatchMax: 0.18,
+    amplitudeWeakMax: 0.28,
+    lowVolatilityMax: 0.1,
+    emotionalAmplitudeMin: 0.16,
+    targetExtensionPercent: 0.07,
+    candidatePriorityPassScore: 70,
+    modelHighProbability: 0.6,
+    modelLowProbability: 0.4
+  },
+  etf_cross_border: {
+    key: 'etf_cross_border',
+    label: '跨境ETF算法',
+    minAboveMa60Days: 3,
+    brokenBelowMa60Days: 4,
+    safeZoneMin: -0.04,
+    safeZoneMax: 0.06,
+    highRiskChaseMin: 0.09,
+    brokenZoneMax: -0.065,
+    distanceTightMax: 0.035,
+    distanceComfortMax: 0.08,
+    distanceWatchMax: 0.14,
+    drawdownGoodMax: 0.06,
+    drawdownWatchMax: 0.1,
+    drawdownWeakMax: 0.18,
+    amplitudeGoodMax: 0.12,
+    amplitudeWatchMax: 0.2,
+    amplitudeWeakMax: 0.32,
+    lowVolatilityMax: 0.12,
+    emotionalAmplitudeMin: 0.18,
+    targetExtensionPercent: 0.06,
+    candidatePriorityPassScore: 78,
+    modelHighProbability: 0.62,
+    modelLowProbability: 0.42
+  },
+  etf_commodity: {
+    key: 'etf_commodity',
+    label: '商品ETF算法',
+    minAboveMa60Days: 3,
+    brokenBelowMa60Days: 4,
+    safeZoneMin: -0.04,
+    safeZoneMax: 0.06,
+    highRiskChaseMin: 0.09,
+    brokenZoneMax: -0.065,
+    distanceTightMax: 0.035,
+    distanceComfortMax: 0.08,
+    distanceWatchMax: 0.14,
+    drawdownGoodMax: 0.06,
+    drawdownWatchMax: 0.1,
+    drawdownWeakMax: 0.18,
+    amplitudeGoodMax: 0.12,
+    amplitudeWatchMax: 0.2,
+    amplitudeWeakMax: 0.32,
+    lowVolatilityMax: 0.12,
+    emotionalAmplitudeMin: 0.18,
+    targetExtensionPercent: 0.06,
+    candidatePriorityPassScore: 80,
+    modelHighProbability: 0.62,
+    modelLowProbability: 0.42
+  },
+  etf_bond_cash: {
+    key: 'etf_bond_cash',
+    label: '债券/货币ETF算法',
+    minAboveMa60Days: 5,
+    brokenBelowMa60Days: 5,
+    safeZoneMin: -0.01,
+    safeZoneMax: 0.015,
+    highRiskChaseMin: 0.03,
+    brokenZoneMax: -0.02,
+    distanceTightMax: 0.01,
+    distanceComfortMax: 0.02,
+    distanceWatchMax: 0.035,
+    drawdownGoodMax: 0.01,
+    drawdownWatchMax: 0.02,
+    drawdownWeakMax: 0.04,
+    amplitudeGoodMax: 0.02,
+    amplitudeWatchMax: 0.04,
+    amplitudeWeakMax: 0.07,
+    lowVolatilityMax: 0.03,
+    emotionalAmplitudeMin: 0.05,
+    targetExtensionPercent: 0.02,
+    candidatePriorityPassScore: 90,
+    modelHighProbability: 0.65,
+    modelLowProbability: 0.45
+  },
+  etf_special: {
+    key: 'etf_special',
+    label: '特殊基金算法',
+    minAboveMa60Days: 3,
+    brokenBelowMa60Days: 4,
+    safeZoneMin: -0.035,
+    safeZoneMax: 0.055,
+    highRiskChaseMin: 0.08,
+    brokenZoneMax: -0.055,
+    distanceTightMax: 0.03,
+    distanceComfortMax: 0.075,
+    distanceWatchMax: 0.13,
+    drawdownGoodMax: 0.05,
+    drawdownWatchMax: 0.09,
+    drawdownWeakMax: 0.16,
+    amplitudeGoodMax: 0.1,
+    amplitudeWatchMax: 0.18,
+    amplitudeWeakMax: 0.28,
+    lowVolatilityMax: 0.1,
+    emotionalAmplitudeMin: 0.16,
+    targetExtensionPercent: 0.05,
+    candidatePriorityPassScore: 85,
+    modelHighProbability: 0.62,
+    modelLowProbability: 0.42
+  },
+  etf_unknown: {
+    key: 'etf_unknown',
+    label: '未归类ETF算法',
+    minAboveMa60Days: 3,
+    brokenBelowMa60Days: 4,
+    safeZoneMin: -0.035,
+    safeZoneMax: 0.05,
+    highRiskChaseMin: 0.08,
+    brokenZoneMax: -0.055,
+    distanceTightMax: 0.03,
+    distanceComfortMax: 0.075,
+    distanceWatchMax: 0.13,
+    drawdownGoodMax: 0.05,
+    drawdownWatchMax: 0.09,
+    drawdownWeakMax: 0.16,
+    amplitudeGoodMax: 0.1,
+    amplitudeWatchMax: 0.18,
+    amplitudeWeakMax: 0.28,
+    lowVolatilityMax: 0.1,
+    emotionalAmplitudeMin: 0.16,
+    targetExtensionPercent: 0.05,
+    candidatePriorityPassScore: 85,
+    modelHighProbability: 0.62,
+    modelLowProbability: 0.42
+  },
+  market_index: {
+    key: 'market_index',
+    label: '指数算法',
+    minAboveMa60Days: 3,
+    brokenBelowMa60Days: 3,
+    safeZoneMin: -0.025,
+    safeZoneMax: 0.04,
+    highRiskChaseMin: 0.06,
+    brokenZoneMax: -0.04,
+    distanceTightMax: 0.025,
+    distanceComfortMax: 0.06,
+    distanceWatchMax: 0.1,
+    drawdownGoodMax: 0.035,
+    drawdownWatchMax: 0.07,
+    drawdownWeakMax: 0.12,
+    amplitudeGoodMax: 0.06,
+    amplitudeWatchMax: 0.1,
+    amplitudeWeakMax: 0.16,
+    lowVolatilityMax: 0.06,
+    emotionalAmplitudeMin: 0.1,
+    targetExtensionPercent: 0.05,
+    candidatePriorityPassScore: 90,
+    modelHighProbability: 0.65,
+    modelLowProbability: 0.45
+  }
+};
+
 function splitUniverseTypes(value: string | null | undefined): string[] {
   return String(value || '')
     .split(',')
@@ -222,6 +476,11 @@ function splitUniverseTypes(value: string | null | undefined): string[] {
 
 export function getFinancePlanProfileConfig(key?: string | null): FinancePlanProfileConfig {
   return PROFILE_CONFIGS[(key || 'stock_equity') as FinancePlanProfileKey] || PROFILE_CONFIGS.stock_equity;
+}
+
+export function getFinanceStructureProfileConfig(key?: string | null): FinanceStructureProfileConfig {
+  const profileKey = (key || 'stock_equity') as FinancePlanProfileKey;
+  return STRUCTURE_PROFILE_CONFIGS[profileKey] || STRUCTURE_PROFILE_CONFIGS.stock_equity;
 }
 
 export function resolveFinancePlanProfile(input: {

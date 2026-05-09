@@ -5,6 +5,7 @@ import path from 'path';
 import {
   calculateProfileInvalidationLine,
   getFinancePlanProfileConfig,
+  getFinanceStructureProfileConfig,
   resolveFinancePlanProfile
 } from '../services/financePlanProfile';
 import { buildFinancePlanQuality } from '../services/financePlanQuality';
@@ -159,11 +160,13 @@ function getEntryManualPriorityLevel(
   trendPhaseCode: string | null | undefined,
   triggerScore: number,
   structureScore: number,
-  maxLossPercent: number | null
+  maxLossPercent: number | null,
+  planProfileKey?: string | null
 ) {
+  const profile = getFinancePlanProfileConfig(planProfileKey);
   if (!ENTRY_READY_TREND_PHASES.has(trendPhaseCode || '')) return 'OBSERVE';
-  const riskOk = maxLossPercent !== null && maxLossPercent <= 0.05;
-  const riskTight = maxLossPercent !== null && maxLossPercent <= 0.04;
+  const riskOk = maxLossPercent !== null && maxLossPercent <= profile.maxRiskPercent;
+  const riskTight = maxLossPercent !== null && maxLossPercent <= profile.tightRiskPercent;
 
   if (trendPhaseCode === 'SLOW_GRIND_UP' && triggerScore >= 75 && structureScore >= 75 && riskTight) {
     return 'A';
@@ -242,12 +245,14 @@ function getEntryManualPriorityScore(
   trendPhaseCode: string | null | undefined,
   triggerScore: number,
   structureScore: number,
-  maxLossPercent: number | null
+  maxLossPercent: number | null,
+  planProfileKey?: string | null
 ) {
-  const level = getEntryManualPriorityLevel(trendPhaseCode, triggerScore, structureScore, maxLossPercent);
+  const profile = getFinancePlanProfileConfig(planProfileKey);
+  const level = getEntryManualPriorityLevel(trendPhaseCode, triggerScore, structureScore, maxLossPercent, planProfileKey);
   const levelScore = level === 'A' ? 300 : level === 'B' ? 200 : level === 'C' ? 100 : 0;
   const trendScore = Math.max(0, 30 - getEntryTrendPriority(trendPhaseCode) * 10);
-  const riskScore = maxLossPercent === null ? 0 : Math.max(0, Math.round((0.06 - Math.min(maxLossPercent, 0.06)) * 1000));
+  const riskScore = maxLossPercent === null ? 0 : Math.max(0, Math.round((profile.maxRiskPercent - Math.min(maxLossPercent, profile.maxRiskPercent)) * 1000));
   return levelScore + trendScore + Math.round(triggerScore || 0) + Math.round((structureScore || 0) / 2) + riskScore;
 }
 
@@ -272,7 +277,7 @@ async function buildPlanReadyValueMetrics(
       target_space_percent: null,
       downside_risk_percent: maxLossPercent,
       risk_reward_ratio: null,
-      plan_quality: buildFinancePlanQuality({ ...item, max_loss_percent: maxLossPercent })
+      plan_quality: buildFinancePlanQuality({ ...item, plan_profile: snapshot?.plan_profile || item.plan_profile, max_loss_percent: maxLossPercent })
     };
   }
 
@@ -304,9 +309,10 @@ async function buildPlanReadyValueMetrics(
       : '历史压力不足';
 
   if (!Number.isFinite(targetPrice) || targetPrice <= close) {
-    const extension = item.asset_type === 'etf' ? 0.06 : 0.08;
+    const profileKey = item.plan_profile || snapshot?.plan_profile || snapshot?.plan_draft?.plan_profile;
+    const extension = getFinanceStructureProfileConfig(profileKey).targetExtensionPercent;
     targetPrice = close * (1 + extension);
-    targetSource = `近120日无明显上方压力，按${item.asset_type === 'etf' ? 'ETF' : '个股'}保守延展估算`;
+    targetSource = `近120日无明显上方压力，按${getFinanceStructureProfileConfig(profileKey).label}保守延展估算`;
   }
 
   const targetSpacePercent = targetPrice > close ? roundRatio((targetPrice - close) / close) : 0;
@@ -316,6 +322,7 @@ async function buildPlanReadyValueMetrics(
     : null;
   const planQuality = buildFinancePlanQuality({
     ...item,
+    plan_profile: snapshot?.plan_profile || item.plan_profile,
     close_price: close,
     max_loss_percent: downsideRiskPercent,
     target_space_percent: targetSpacePercent,
@@ -495,6 +502,8 @@ function parseJson(value: unknown, fallback: any = null) {
 
 function classifyOpportunityType(input: {
   asset_type?: string;
+  plan_profile?: string | null;
+  profile_key?: string | null;
   structure_status?: string | null;
   safe_zone_status?: string | null;
   trend_phase_code?: string | null;
@@ -513,9 +522,10 @@ function classifyOpportunityType(input: {
   const safeZone = input.safe_zone_status === 'SAFE_ZONE';
   const ma20Slope = String(input.ma20_slope || '');
   const ma60Slope = String(input.ma60_slope || '');
-  const distanceComfortable = distanceToMa60 !== null && distanceToMa60 >= -0.01 && distanceToMa60 <= 0.08;
-  const distanceClose = distanceToMa60 !== null && distanceToMa60 >= -0.01 && distanceToMa60 <= 0.04;
-  const lowVolatility = amplitude20 !== null && amplitude20 <= (assetType === 'stock' ? 0.14 : 0.08);
+  const profile = getFinanceStructureProfileConfig(input.plan_profile || input.profile_key);
+  const distanceComfortable = distanceToMa60 !== null && distanceToMa60 >= profile.safeZoneMin && distanceToMa60 <= profile.distanceComfortMax;
+  const distanceClose = distanceToMa60 !== null && distanceToMa60 >= profile.safeZoneMin && distanceToMa60 <= profile.distanceTightMax;
+  const lowVolatility = amplitude20 !== null && amplitude20 <= profile.lowVolatilityMax;
 
   if (!['stock', 'etf'].includes(assetType)) {
     return {
@@ -528,7 +538,7 @@ function classifyOpportunityType(input: {
 
   if (
     trendPhaseCode === 'SURGE' ||
-    (amplitude20 !== null && amplitude20 >= (assetType === 'stock' ? 0.22 : 0.12) && !distanceClose)
+    (amplitude20 !== null && amplitude20 >= profile.emotionalAmplitudeMin && !distanceClose)
   ) {
     return {
       code: 'EMOTIONAL',
@@ -719,8 +729,10 @@ function roundRatio(value: number | null): number | null {
 
 function calculateStructureScore(
   structure: ReturnType<typeof calculateStructure>,
-  prices: DailyPrice[]
+  prices: DailyPrice[],
+  planProfileKey?: string | null
 ): StructureScoreResult {
+  const profile = getFinanceStructureProfileConfig(planProfileKey);
   const latestIndex = prices.length;
   const recent20 = prices.slice(-20);
   const recent60 = prices.slice(-60);
@@ -741,14 +753,14 @@ function calculateStructureScore(
     previous20High &&
     structure.close >= structure.ma20 &&
     structure.close >= structure.ma60 &&
-    structure.close <= previous20High * 1.03 &&
-    structure.close >= previous20High * 0.96
+    structure.close <= previous20High * (1 + Math.min(profile.safeZoneMax, 0.06)) &&
+    structure.close >= previous20High * (1 - Math.abs(profile.safeZoneMin))
   );
 
   const details: StructureScoreDetail[] = [];
   const addDetail = (detail: StructureScoreDetail) => details.push(detail);
 
-  const aboveDaysScore = structure.above_ma60_days >= 20 ? 15 : structure.above_ma60_days >= 10 ? 12 : structure.above_ma60_days >= 5 ? 8 : structure.above_ma60_days > 0 ? 4 : 0;
+  const aboveDaysScore = structure.above_ma60_days >= Math.max(20, profile.minAboveMa60Days * 5) ? 15 : structure.above_ma60_days >= Math.max(10, profile.minAboveMa60Days * 3) ? 12 : structure.above_ma60_days >= profile.minAboveMa60Days ? 8 : structure.above_ma60_days > 0 ? 4 : 0;
   addDetail({
     label: '站上MA60天数',
     score: aboveDaysScore,
@@ -776,16 +788,16 @@ function calculateStructureScore(
   });
 
   const distance = structure.distance_to_ma60;
-  const distanceScore = distance < 0 ? 0 : distance <= 0.08 ? 15 : distance <= 0.15 ? 10 : distance <= 0.25 ? 5 : 0;
+  const distanceScore = distance < 0 ? 0 : distance <= profile.distanceComfortMax ? 15 : distance <= profile.distanceWatchMax ? 10 : distance <= profile.highRiskChaseMin * 2.5 ? 5 : 0;
   addDetail({
     label: '距离MA60',
     score: distanceScore,
     max_score: 15,
     status: distanceScore >= 12 ? 'good' : distanceScore >= 5 ? 'neutral' : 'bad',
-    reason: distance < 0 ? '仍在 MA60 下方' : distance <= 0.08 ? '距离 MA60 较近' : distance <= 0.15 ? '距离 MA60 中等' : '距离 MA60 偏远，有追高风险'
+    reason: distance < 0 ? '仍在 MA60 下方' : distance <= profile.distanceComfortMax ? `符合${profile.label}的MA60舒适距离` : distance <= profile.distanceWatchMax ? `距离 MA60 中等，仍在${profile.label}观察区` : '距离 MA60 偏远，有追高风险'
   });
 
-  const drawdownScore = maxDrawdown20 === null ? 4 : maxDrawdown20 <= 0.06 ? 10 : maxDrawdown20 <= 0.12 ? 7 : maxDrawdown20 <= 0.2 ? 3 : 0;
+  const drawdownScore = maxDrawdown20 === null ? 4 : maxDrawdown20 <= profile.drawdownGoodMax ? 10 : maxDrawdown20 <= profile.drawdownWatchMax ? 7 : maxDrawdown20 <= profile.drawdownWeakMax ? 3 : 0;
   addDetail({
     label: '20日最大回撤',
     score: drawdownScore,
@@ -794,7 +806,7 @@ function calculateStructureScore(
     reason: maxDrawdown20 === null ? '20 日回撤数据不足' : `20 日最大回撤 ${(maxDrawdown20 * 100).toFixed(2)}%`
   });
 
-  const amplitudeScore = amplitude20 === null ? 4 : amplitude20 <= 0.12 ? 10 : amplitude20 <= 0.22 ? 7 : amplitude20 <= 0.35 ? 3 : 0;
+  const amplitudeScore = amplitude20 === null ? 4 : amplitude20 <= profile.amplitudeGoodMax ? 10 : amplitude20 <= profile.amplitudeWatchMax ? 7 : amplitude20 <= profile.amplitudeWeakMax ? 3 : 0;
   addDetail({
     label: '20日振幅',
     score: amplitudeScore,
@@ -1086,13 +1098,15 @@ function calculateEntryTriggerPlan(
     trendPhaseCode,
     triggerScore,
     structureScore.score,
-    maxLossPercent
+    maxLossPercent,
+    planProfile.key
   );
   const manualPriorityScore = getEntryManualPriorityScore(
     trendPhaseCode,
     triggerScore,
     structureScore.score,
-    maxLossPercent
+    maxLossPercent,
+    planProfile.key
   );
   const positionSuggestion = action === 'READY_TO_PLAN'
     ? manualPriorityLevel === 'A' && trendPhaseCode === 'SLOW_GRIND_UP'
@@ -1454,9 +1468,29 @@ router.post('/structure-check', async (req: Request, res: Response) => {
 
     const marketRegime = marketRegimeResult?.market_regime || 'UNKNOWN';
     const entryPermission = marketRegimeResult?.entry_permission || 'OBSERVE_ONLY';
+    const nameResult = await db.get(
+      `SELECT name FROM financial_daily_prices
+       WHERE symbol = ? AND asset_type = ? AND source = ? AND name IS NOT NULL AND TRIM(name) <> ''
+       ORDER BY trade_date DESC LIMIT 1`,
+      [symbol, assetType, source]
+    );
+    const universeNameResult = await db.get(
+      `SELECT COALESCE(MAX(NULLIF(name, '')), '') as name,
+              GROUP_CONCAT(DISTINCT universe_type) as universe_type
+       FROM financial_asset_universe
+       WHERE symbol = ? AND asset_type = ? AND source = ?`,
+      [symbol, assetType, source]
+    );
+    const name = nameResult?.name || universeNameResult?.name || symbol;
+    const planProfile = resolveFinancePlanProfile({
+      assetType,
+      symbol,
+      name,
+      universeType: universeNameResult?.universe_type || ''
+    });
 
-    const result = calculateStructure(prices);
-    const structureScore = calculateStructureScore(result, prices);
+    const result = calculateStructure(prices, planProfile.key);
+    const structureScore = calculateStructureScore(result, prices, planProfile.key);
     const trendPhase = await db.get(
       `SELECT trend_phase_code, trend_phase_reason
        FROM financial_trend_phase_results
@@ -1467,6 +1501,7 @@ router.post('/structure-check', async (req: Request, res: Response) => {
     const trendAction = getTrendAction(trendPhase?.trend_phase_code, structureScore, result);
     const opportunityType = classifyOpportunityType({
       asset_type: assetType,
+      plan_profile: planProfile.key,
       structure_status: result.structure_status,
       safe_zone_status: result.safe_zone_status,
       trend_phase_code: trendPhase?.trend_phase_code || 'UNKNOWN',
@@ -1508,19 +1543,6 @@ router.post('/structure-check', async (req: Request, res: Response) => {
 
     const status = await getDataStatus(db, symbol);
     const availableSources = status.sources.map((s: any) => s.source);
-    const nameResult = await db.get(
-      `SELECT name FROM financial_daily_prices
-       WHERE symbol = ? AND source = ? AND name IS NOT NULL AND TRIM(name) <> ''
-       ORDER BY trade_date DESC LIMIT 1`,
-      [symbol, source]
-    );
-    const universeNameResult = await db.get(
-      `SELECT name FROM financial_asset_universe
-       WHERE symbol = ? AND source = ? AND name IS NOT NULL AND TRIM(name) <> ''
-       LIMIT 1`,
-      [symbol, source]
-    );
-    const name = nameResult?.name || universeNameResult?.name || symbol;
     const mlPrediction = await getModelPrediction(db, symbol, assetType, 'structure');
 
     res.json({
@@ -1529,6 +1551,9 @@ router.post('/structure-check', async (req: Request, res: Response) => {
         symbol,
         name,
         asset_type: assetType,
+        plan_profile: planProfile.key,
+        plan_profile_label: planProfile.label,
+        plan_profile_note: planProfile.note,
         ...result,
         structure_score: structureScore,
         market_regime: marketRegime,
@@ -1610,13 +1635,13 @@ async function buildEntryTriggerSnapshot(db: any, symbol: string, assetType: str
     name: displayName,
     universeType: universeResult?.universe_type || ''
   });
-  const rawStructure = calculateStructure(prices);
+  const rawStructure = calculateStructure(prices, planProfile.key);
   const profileInvalidationLine = calculateProfileInvalidationLine(planProfile.key, { ma60: rawStructure.ma60 }) || rawStructure.invalidation_line;
   const structure = {
     ...rawStructure,
     invalidation_line: profileInvalidationLine
   };
-  const structureScore = calculateStructureScore(structure, prices);
+  const structureScore = calculateStructureScore(structure, prices, planProfile.key);
   const trendPhase = await db.get(
       `SELECT trend_phase_code, trend_phase_reason
        FROM financial_trend_phase_results
@@ -1627,6 +1652,7 @@ async function buildEntryTriggerSnapshot(db: any, symbol: string, assetType: str
   const trendAction = getTrendAction(trendPhase?.trend_phase_code, structureScore, structure);
   const opportunityType = classifyOpportunityType({
     asset_type: assetType,
+    plan_profile: planProfile.key,
     structure_status: structure.structure_status,
     safe_zone_status: structure.safe_zone_status,
     trend_phase_code: trendPhase?.trend_phase_code || 'UNKNOWN',
@@ -1941,6 +1967,7 @@ router.get('/entry-trigger-observations', async (req: Request, res: Response) =>
         : null;
       const opportunityType = snapshot?.opportunity_type || classifyOpportunityType({
         asset_type: item.asset_type,
+        plan_profile: snapshot?.plan_profile || snapshot?.plan_draft?.plan_profile || item.plan_profile,
         structure_status: snapshot?.structure_status,
         safe_zone_status: snapshot?.safe_zone_status,
         trend_phase_code: item.trend_phase_code,
@@ -1952,6 +1979,7 @@ router.get('/entry-trigger-observations', async (req: Request, res: Response) =>
       });
       const planValueMetrics = await buildPlanReadyValueMetrics(db, item, snapshot, maxLossPercent);
       const planQuality = planValueMetrics.plan_quality;
+      const planProfileKey = snapshot?.plan_profile || snapshot?.plan_draft?.plan_profile || item.plan_profile;
       return {
         ...item,
         opportunity_type: opportunityType,
@@ -1970,13 +1998,15 @@ router.get('/entry-trigger-observations', async (req: Request, res: Response) =>
           item.trend_phase_code,
           Number(item.trigger_score || 0),
           Number(item.structure_score || 0),
-          maxLossPercent
+          maxLossPercent,
+          planProfileKey
         ),
         manual_priority_score: getEntryManualPriorityScore(
           item.trend_phase_code,
           Number(item.trigger_score || 0),
           Number(item.structure_score || 0),
-          maxLossPercent
+          maxLossPercent,
+          planProfileKey
         ),
         trend_priority_rank: getEntryTrendPriority(item.trend_phase_code)
       };
@@ -2412,7 +2442,9 @@ router.delete('/entry-trigger-observations/:id', async (req: Request, res: Respo
   }
 });
 
-function calculateStructure(prices: DailyPrice[]): Omit<StructureCheckResult, 'symbol' | 'name' | 'asset_type' | 'market_regime' | 'entry_permission' | 'final_status' | 'final_reason' | 'data_source_used' | 'available_sources'> {
+function calculateStructure(prices: DailyPrice[], planProfileKey?: string | null): Omit<StructureCheckResult, 'symbol' | 'name' | 'asset_type' | 'market_regime' | 'entry_permission' | 'final_status' | 'final_reason' | 'data_source_used' | 'available_sources'> {
+  const profile = getFinanceStructureProfileConfig(planProfileKey);
+  const planProfile = getFinancePlanProfileConfig(planProfileKey);
   const latestPrice = prices[prices.length - 1];
   const close = latestPrice.close;
   const tradeDate = latestPrice.trade_date;
@@ -2429,7 +2461,9 @@ function calculateStructure(prices: DailyPrice[]): Omit<StructureCheckResult, 's
   const ma60Slope = ma60 >= ma60Prev ? 'up' : 'down';
 
   const last120Prices = prices.slice(-120);
-  const ma120 = last120Prices.reduce((sum, p) => sum + p.close, 0) / 120;
+  const ma120 = last120Prices.length >= 120
+    ? last120Prices.reduce((sum, p) => sum + p.close, 0) / 120
+    : ma60;
 
   const distanceToMa60 = (close - ma60) / ma60;
 
@@ -2474,19 +2508,20 @@ function calculateStructure(prices: DailyPrice[]): Omit<StructureCheckResult, 's
   let structureStatus: string;
   let structureReason: string;
 
-  if (close > ma60 && ma60 >= ma60Prev && aboveMa60Days >= 3) {
+  const ma60NotFalling = ma60 >= ma60Prev;
+  if (close > ma60 && ma60NotFalling && aboveMa60Days >= profile.minAboveMa60Days) {
     structureStatus = 'STRUCTURE_CONFIRMED';
-    structureReason = '收盘价站上MA60并连续站稳3天，MA60未下弯。';
-  } else if (belowMa60Days >= 3) {
+    structureReason = `按${profile.label}：收盘价站上MA60并连续站稳${profile.minAboveMa60Days}天，MA60未下弯。`;
+  } else if (belowMa60Days >= profile.brokenBelowMa60Days) {
     structureStatus = 'STRUCTURE_BROKEN';
-    structureReason = '收盘价连续跌破MA60超过3天，结构破坏。';
+    structureReason = `按${profile.label}：收盘价连续跌破MA60达到${profile.brokenBelowMa60Days}天，结构破坏。`;
   } else {
     structureStatus = 'STRUCTURE_WATCH';
     const reasons: string[] = [];
-    if (Math.abs(distanceToMa60) < 0.02) {
+    if (Math.abs(distanceToMa60) < profile.distanceTightMax) {
       reasons.push('价格接近MA60');
     }
-    if (close > ma60 && aboveMa60Days < 3) {
+    if (close > ma60 && aboveMa60Days < profile.minAboveMa60Days) {
       reasons.push('站上MA60但天数不足');
     }
     if (ma60 < ma60Prev) {
@@ -2498,27 +2533,28 @@ function calculateStructure(prices: DailyPrice[]): Omit<StructureCheckResult, 's
   let safeZoneStatus: string;
   let safeZoneReason: string;
 
-  if (distanceToMa60 >= -0.03 && distanceToMa60 <= 0.05) {
+  if (distanceToMa60 >= profile.safeZoneMin && distanceToMa60 <= profile.safeZoneMax) {
     safeZoneStatus = 'SAFE_ZONE';
-    safeZoneReason = '价格在MA60附近，处于相对安全区。';
-  } else if (distanceToMa60 > 0.08) {
+    safeZoneReason = `按${profile.label}：价格在MA60附近，处于相对安全区。`;
+  } else if (distanceToMa60 > profile.highRiskChaseMin) {
     safeZoneStatus = 'HIGH_RISK_CHASE';
-    safeZoneReason = '价格明显高于MA60，处于追高区。';
-  } else if (distanceToMa60 < -0.05) {
+    safeZoneReason = `按${profile.label}：价格明显高于MA60，处于追高区。`;
+  } else if (distanceToMa60 < profile.brokenZoneMax) {
     safeZoneStatus = 'BROKEN_ZONE';
-    safeZoneReason = '价格明显跌破MA60，处于破位区。';
+    safeZoneReason = `按${profile.label}：价格明显跌破MA60，处于破位区。`;
   } else {
     safeZoneStatus = 'NEUTRAL_ZONE';
-    if (distanceToMa60 > 0.05 && distanceToMa60 <= 0.08) {
+    if (distanceToMa60 > profile.safeZoneMax && distanceToMa60 <= profile.highRiskChaseMin) {
       safeZoneReason = '价格略高于MA60，但未进入明显追高区。';
-    } else if (distanceToMa60 >= -0.05 && distanceToMa60 < -0.03) {
+    } else if (distanceToMa60 >= profile.brokenZoneMax && distanceToMa60 < profile.safeZoneMin) {
       safeZoneReason = '价格略低于MA60，但未进入明显破位区。';
     } else {
       safeZoneReason = '当前位置中性。';
     }
   }
 
-  const invalidationLine = ma60;
+  const invalidationLine = ma60 * (1 - planProfile.invalidationBufferPercent);
+  const digits = planProfile.key.startsWith('etf_') ? 4 : 3;
 
   return {
     trade_date: tradeDate,
@@ -2540,7 +2576,7 @@ function calculateStructure(prices: DailyPrice[]): Omit<StructureCheckResult, 's
     structure_reason: structureReason,
     safe_zone_status: safeZoneStatus,
     safe_zone_reason: safeZoneReason,
-    invalidation_line: Math.round(invalidationLine * 1000) / 1000
+    invalidation_line: Math.round(invalidationLine * 10 ** digits) / 10 ** digits
   };
 }
 

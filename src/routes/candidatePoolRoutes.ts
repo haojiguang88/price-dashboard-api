@@ -10,6 +10,11 @@ import {
   type IndustryEtfStrengthContext,
   type IndustryEtfStrengthItem
 } from '../services/industryEtfStrengthService';
+import {
+  getFinancePlanProfileConfig,
+  getFinanceStructureProfileConfig,
+  resolveFinancePlanProfile
+} from '../services/financePlanProfile';
 
 const router = express.Router();
 
@@ -166,8 +171,6 @@ const MODEL_RECHECK_HARD_BLOCKING_GATES = new Set([
   'structure_gate',
   'risk_forbidden_gate',
 ]);
-const MODEL_RECHECK_MIN_PROBABILITY = 0.45;
-
 function isHardBlockedFromModelRecheck(item: any) {
   const firstBlockingGateKey = String(item?.first_blocking_gate_key || '').trim();
   const firstBlockingGateLabel = String(item?.first_blocking_gate_label || '').trim();
@@ -182,10 +185,11 @@ function isHardBlockedFromModelRecheck(item: any) {
 
 function isVisibleModelRecheckItem(item: any) {
   const probability = Number(item?.ml_probability);
+  const structureProfile = getFinanceStructureProfileConfig(resolveCandidateProfile(item).key);
   return !isHardBlockedFromModelRecheck(item)
     && item?.ml_available
     && Number.isFinite(probability)
-    && probability >= MODEL_RECHECK_MIN_PROBABILITY;
+    && probability >= structureProfile.modelLowProbability;
 }
 
 function parseJson(value: unknown, fallback: any = null) {
@@ -320,6 +324,7 @@ function buildStoredGateTrace(item: any) {
   const trendConfirmed = Boolean(item.trend_phase_code && item.trend_phase_code !== 'UNKNOWN');
   const hasForbidden = Boolean(item.forbidden_reason);
   const priorityScore = Number(item.priority_score || 0);
+  const structureProfile = getFinanceStructureProfileConfig(resolveCandidateProfile(item).key);
 
   return buildGateTrace([
     makeGate(
@@ -411,9 +416,9 @@ function buildStoredGateTrace(item: any) {
     isEtf
       ? makeGate(
           'priority_gate',
-          priorityScore >= 70 ? 'passed' : 'failed',
-          `ETF优先分 ${priorityScore}，入池阈值 70。`,
-          priorityScore < 70
+          priorityScore >= structureProfile.candidatePriorityPassScore ? 'passed' : 'failed',
+          `ETF优先分 ${priorityScore}，${structureProfile.label}入池阈值 ${structureProfile.candidatePriorityPassScore}。`,
+          priorityScore < structureProfile.candidatePriorityPassScore
         )
       : makeGate('priority_gate', 'not_applicable', `个股无固定优先分入池阈值，当前优先分 ${priorityScore} 只用于排序。`),
     makeGate('model_reference', 'not_applicable', '模型概率不决定入池，只用于入池后的分层、复盘和风控参考。')
@@ -422,13 +427,21 @@ function buildStoredGateTrace(item: any) {
 
 function hydrateCandidateItem(item: any) {
   const parsedGateTrace = parseJson(item.gate_trace_json, null);
+  const planProfile = item.plan_profile
+    ? getFinancePlanProfileConfig(item.plan_profile)
+    : resolveCandidateProfile(item);
+  const itemWithProfile = {
+    ...item,
+    plan_profile: item.plan_profile || planProfile.key,
+    plan_profile_label: item.plan_profile_label || planProfile.label
+  };
   const hasCurrentGateShape = parsedGateTrace?.gates && CANDIDATE_GATE_DEFINITIONS.every(definition =>
     parsedGateTrace.gates.some((gate: CandidateGate) => gate.key === definition.key)
   );
-  const gateTrace = hasCurrentGateShape ? parsedGateTrace : buildStoredGateTrace(item);
+  const gateTrace = hasCurrentGateShape ? parsedGateTrace : buildStoredGateTrace(itemWithProfile);
   return {
-    ...item,
-    opportunity_type: item.opportunity_type || classifyOpportunityType(item),
+    ...itemWithProfile,
+    opportunity_type: item.opportunity_type || classifyOpportunityType(itemWithProfile),
     gate_trace: gateTrace,
     first_blocking_gate_key: item.first_blocking_gate_key || gateTrace.first_blocking_gate?.key || null,
     first_blocking_gate_label: item.first_blocking_gate_label || gateTrace.first_blocking_gate?.label || null,
@@ -495,6 +508,8 @@ async function ensureCandidateReviewSchema(db: any) {
     ['first_blocking_gate_key', `ALTER TABLE financial_candidate_pool ADD COLUMN first_blocking_gate_key TEXT`],
     ['first_blocking_gate_label', `ALTER TABLE financial_candidate_pool ADD COLUMN first_blocking_gate_label TEXT`],
     ['blocking_gate_labels', `ALTER TABLE financial_candidate_pool ADD COLUMN blocking_gate_labels TEXT`],
+    ['plan_profile', `ALTER TABLE financial_candidate_pool ADD COLUMN plan_profile TEXT`],
+    ['plan_profile_label', `ALTER TABLE financial_candidate_pool ADD COLUMN plan_profile_label TEXT`],
   ];
 
   for (const [columnName, sql] of alterStatements) {
@@ -719,14 +734,15 @@ async function calculateStockTradeQualification(
 function getEtfGateReason(
   assetType: string,
   route: EtfStrategyRoute | null | undefined,
-  priorityResult: CandidatePriorityResult
+  priorityResult: CandidatePriorityResult,
+  passScore = 70
 ): string | null {
   if (assetType !== 'etf') return null;
   if (route && !route.current_pool_applicable) {
     return null;
   }
-  if (priorityResult.priority_score < 70) {
-    return `ETF优先分 ${priorityResult.priority_score} 低于入池阈值70。`;
+  if (priorityResult.priority_score < passScore) {
+    return `ETF优先分 ${priorityResult.priority_score} 低于入池阈值${passScore}。`;
   }
   return null;
 }
@@ -771,7 +787,9 @@ function runCandidateScoreWorker(limit: number, poolStatus: 'active' | 'expired'
   });
 }
 
-function calculateStructure(prices: DailyPrice[]) {
+function calculateStructure(prices: DailyPrice[], planProfileKey?: string | null) {
+  const profile = getFinanceStructureProfileConfig(planProfileKey);
+  const planProfile = getFinancePlanProfileConfig(planProfileKey);
   const latestPrice = prices[prices.length - 1];
   const close = latestPrice.close;
   const tradeDate = latestPrice.trade_date;
@@ -786,7 +804,9 @@ function calculateStructure(prices: DailyPrice[]) {
   const ma60Prev = prev60Prices.reduce((sum, p) => sum + p.close, 0) / 60;
 
   const last120Prices = prices.slice(-120);
-  const ma120 = last120Prices.reduce((sum, p) => sum + p.close, 0) / 120;
+  const ma120 = last120Prices.length >= 120
+    ? last120Prices.reduce((sum, p) => sum + p.close, 0) / 120
+    : ma60;
 
   const distanceToMa60 = (close - ma60) / ma60;
 
@@ -815,17 +835,17 @@ function calculateStructure(prices: DailyPrice[]) {
   let structureStatus: string;
   let structureReason: string;
 
-  if (close > ma60 && ma60 >= ma60Prev && aboveMa60Days >= 3) {
+  if (close > ma60 && ma60 >= ma60Prev && aboveMa60Days >= profile.minAboveMa60Days) {
     structureStatus = 'STRUCTURE_CONFIRMED';
-    structureReason = '收盘价站上MA60并连续站稳3天，MA60未下弯。';
-  } else if (belowMa60Days >= 3) {
+    structureReason = `按${profile.label}：收盘价站上MA60并连续站稳${profile.minAboveMa60Days}天，MA60未下弯。`;
+  } else if (belowMa60Days >= profile.brokenBelowMa60Days) {
     structureStatus = 'STRUCTURE_BROKEN';
-    structureReason = '收盘价连续跌破MA60超过3天，结构破坏。';
+    structureReason = `按${profile.label}：收盘价连续跌破MA60达到${profile.brokenBelowMa60Days}天，结构破坏。`;
   } else {
     structureStatus = 'STRUCTURE_WATCH';
     const reasons: string[] = [];
-    if (Math.abs(distanceToMa60) < 0.02) reasons.push('价格接近MA60');
-    if (close > ma60 && aboveMa60Days < 3) reasons.push('站上MA60但天数不足');
+    if (Math.abs(distanceToMa60) < profile.distanceTightMax) reasons.push('价格接近MA60');
+    if (close > ma60 && aboveMa60Days < profile.minAboveMa60Days) reasons.push('站上MA60但天数不足');
     if (ma60 < ma60Prev) reasons.push('MA60仍下弯');
     structureReason = reasons.length > 0 ? `${reasons.join('，')}。` : '继续观察结构变化。';
   }
@@ -833,19 +853,21 @@ function calculateStructure(prices: DailyPrice[]) {
   let safeZoneStatus: string;
   let safeZoneReason: string;
 
-  if (distanceToMa60 >= -0.03 && distanceToMa60 <= 0.05) {
+  if (distanceToMa60 >= profile.safeZoneMin && distanceToMa60 <= profile.safeZoneMax) {
     safeZoneStatus = 'SAFE_ZONE';
-    safeZoneReason = '价格在MA60附近，处于相对安全区。';
-  } else if (distanceToMa60 > 0.08) {
+    safeZoneReason = `按${profile.label}：价格在MA60附近，处于相对安全区。`;
+  } else if (distanceToMa60 > profile.highRiskChaseMin) {
     safeZoneStatus = 'HIGH_RISK_CHASE';
-    safeZoneReason = '价格明显高于MA60，处于追高区。';
-  } else if (distanceToMa60 < -0.05) {
+    safeZoneReason = `按${profile.label}：价格明显高于MA60，处于追高区。`;
+  } else if (distanceToMa60 < profile.brokenZoneMax) {
     safeZoneStatus = 'BROKEN_ZONE';
-    safeZoneReason = '价格明显跌破MA60，处于破位区。';
+    safeZoneReason = `按${profile.label}：价格明显跌破MA60，处于破位区。`;
   } else {
     safeZoneStatus = 'NEUTRAL_ZONE';
-    safeZoneReason = '当前位置中性。';
+    safeZoneReason = `当前位置中性，未进入${profile.label}的安全区或硬风险区。`;
   }
+  const invalidationLine = ma60 * (1 - planProfile.invalidationBufferPercent);
+  const digits = planProfile.key.startsWith('etf_') ? 4 : 3;
 
   return {
     trade_date: tradeDate,
@@ -860,7 +882,7 @@ function calculateStructure(prices: DailyPrice[]) {
     structure_reason: structureReason,
     safe_zone_status: safeZoneStatus,
     safe_zone_reason: safeZoneReason,
-    invalidation_line: Math.round(ma60 * 1000) / 1000
+    invalidation_line: Math.round(invalidationLine * 10 ** digits) / 10 ** digits
   };
 }
 
@@ -882,8 +904,10 @@ function calculateWindowMaxDrawdown(prices: DailyPrice[]): number | null {
 function calculateRecentRiskProfile(
   prices: DailyPrice[],
   structure: ReturnType<typeof calculateStructure>,
-  assetType: string
+  assetType: string,
+  planProfileKey?: string | null
 ): RecentRiskProfile {
+  const profile = getFinanceStructureProfileConfig(planProfileKey);
   const last20 = prices.slice(-20);
   const latest = prices[prices.length - 1];
   const previous = prices[prices.length - 2];
@@ -893,26 +917,15 @@ function calculateRecentRiskProfile(
   const pullbackFrom20High = high20 > 0 ? Math.round((latest.close / high20 - 1) * 10000) / 10000 : null;
   const range20 = low20 > 0 ? Math.round((high20 / low20 - 1) * 10000) / 10000 : null;
   const latestChange = previous?.close > 0 ? Math.round((latest.close / previous.close - 1) * 10000) / 10000 : null;
-  const isLowVolAsset = assetType === 'etf' || assetType === 'index';
-  const thresholds = isLowVolAsset
-    ? {
-        hardPullback: -0.06,
-        warnPullback: -0.035,
-        hardDrawdown: -0.1,
-        warnDrawdown: -0.07,
-        warnRange: 0.18,
-        warnLatestSurge: 0.035,
-        fakeBreakPullback: -0.03
-      }
-    : {
-        hardPullback: -0.1,
-        warnPullback: -0.06,
-        hardDrawdown: -0.15,
-        warnDrawdown: -0.1,
-        warnRange: 0.35,
-        warnLatestSurge: 0.07,
-        fakeBreakPullback: -0.05
-      };
+  const thresholds = {
+    hardPullback: -profile.drawdownWatchMax,
+    warnPullback: -profile.drawdownGoodMax,
+    hardDrawdown: -profile.drawdownWeakMax,
+    warnDrawdown: -profile.drawdownWatchMax,
+    warnRange: profile.amplitudeWatchMax,
+    warnLatestSurge: profile.emotionalAmplitudeMin / 3,
+    fakeBreakPullback: -Math.max(profile.drawdownGoodMax * 0.8, 0.02)
+  };
 
   const forbiddenReasons: string[] = [];
   const downgradeReasons: string[] = [];
@@ -967,8 +980,10 @@ function calculateCandidatePriority(
   structure: ReturnType<typeof calculateStructure>,
   marketEntryPermission?: string,
   trendPhaseCode?: string,
-  riskProfile?: RecentRiskProfile
+  riskProfile?: RecentRiskProfile,
+  planProfileKey?: string | null
 ): CandidatePriorityResult {
+  const profile = getFinanceStructureProfileConfig(planProfileKey);
   const forbiddenReasons: string[] = [];
   const downgradeReasons: string[] = [];
   let score = 0;
@@ -999,18 +1014,18 @@ function calculateCandidatePriority(
     forbiddenReasons.push('处于破位区，不进入备选池');
   }
 
-  if (structure.distance_to_ma60 >= -0.01 && structure.distance_to_ma60 <= 0.03) {
+  if (structure.distance_to_ma60 >= -0.01 && structure.distance_to_ma60 <= profile.distanceTightMax) {
     score += 15;
-  } else if (structure.distance_to_ma60 >= -0.03 && structure.distance_to_ma60 <= 0.05) {
+  } else if (structure.distance_to_ma60 >= profile.safeZoneMin && structure.distance_to_ma60 <= profile.safeZoneMax) {
     score += 10;
-  } else if (structure.distance_to_ma60 > 0.05) {
+  } else if (structure.distance_to_ma60 > profile.safeZoneMax) {
     score -= 8;
-    downgradeReasons.push('距离 MA60 偏远，追高风险上升');
+    downgradeReasons.push(`距离 MA60 超出${profile.label}安全区，追高风险上升`);
   }
 
-  if (structure.above_ma60_days >= 10) {
+  if (structure.above_ma60_days >= Math.max(10, profile.minAboveMa60Days * 3)) {
     score += 10;
-  } else if (structure.above_ma60_days >= 3) {
+  } else if (structure.above_ma60_days >= profile.minAboveMa60Days) {
     score += 6;
   } else {
     downgradeReasons.push('站上 MA60 时间偏短');
@@ -1114,9 +1129,10 @@ function classifyOpportunityType(input: any): OpportunityTypeTag {
   const ma60Slope = String(input?.ma60_slope || input?.structure_score?.metrics?.ma60_slope || input?.structure?.ma60_slope || '');
   const structureConfirmed = structureStatus === 'STRUCTURE_CONFIRMED';
   const safeZone = safeZoneStatus === 'SAFE_ZONE';
-  const distanceComfortable = distanceToMa60 !== null && distanceToMa60 >= -0.01 && distanceToMa60 <= 0.08;
-  const distanceClose = distanceToMa60 !== null && distanceToMa60 >= -0.01 && distanceToMa60 <= 0.04;
-  const lowVolatility = amplitudeOrRange !== null && amplitudeOrRange <= (assetType === 'stock' ? 0.14 : 0.08);
+  const profile = getFinanceStructureProfileConfig(input?.plan_profile || input?.profile_key);
+  const distanceComfortable = distanceToMa60 !== null && distanceToMa60 >= profile.safeZoneMin && distanceToMa60 <= profile.distanceComfortMax;
+  const distanceClose = distanceToMa60 !== null && distanceToMa60 >= profile.safeZoneMin && distanceToMa60 <= profile.distanceTightMax;
+  const lowVolatility = amplitudeOrRange !== null && amplitudeOrRange <= profile.lowVolatilityMax;
 
   if (!['stock', 'etf'].includes(assetType)) {
     return {
@@ -1129,7 +1145,7 @@ function classifyOpportunityType(input: any): OpportunityTypeTag {
 
   if (
     trendPhaseCode === 'SURGE' ||
-    (amplitudeOrRange !== null && amplitudeOrRange >= (assetType === 'stock' ? 0.22 : 0.12) && !distanceClose)
+    (amplitudeOrRange !== null && amplitudeOrRange >= profile.emotionalAmplitudeMin && !distanceClose)
   ) {
     return {
       code: 'EMOTIONAL',
@@ -1401,10 +1417,24 @@ function formatSignedPercent(value?: number | null, digits = 1): string {
   return `${percent > 0 ? '+' : ''}${percent.toFixed(digits)}%`;
 }
 
+function resolveCandidateProfile(item: any) {
+  return resolveFinancePlanProfile({
+    assetType: item?.asset_type,
+    symbol: item?.symbol,
+    name: item?.name,
+    universeType: item?.universe_types || item?.universe_type || item?.etf_universe_types
+  });
+}
+
+function hasSupportedModelTarget(item: any): boolean {
+  return !item?.ml_target || item.ml_target === 'label_structure_safe_20d';
+}
+
 function getCandidateModelSignal(item: any): 'accept' | 'neutral' | 'conflict' | 'unscored' {
   if (!item.ml_available || item.ml_probability === undefined || item.ml_probability === null) return 'unscored';
-  const highThreshold = item.asset_type === 'etf' ? 0.58 : 0.65;
-  const lowThreshold = item.asset_type === 'etf' ? 0.4 : 0.45;
+  const structureProfile = getFinanceStructureProfileConfig(resolveCandidateProfile(item).key);
+  const highThreshold = structureProfile.modelHighProbability;
+  const lowThreshold = structureProfile.modelLowProbability;
   if (item.ml_probability >= highThreshold) return 'accept';
   if (item.ml_probability < lowThreshold) return 'conflict';
   return 'neutral';
@@ -1423,7 +1453,7 @@ function getCandidateRiskSignal(item: any): 'clean' | 'warning' | 'danger' {
 function getCandidatePoolLane(item: any): { key: string; label: string } {
   const modelKey = getCandidateModelSignal(item);
   const riskKey = getCandidateRiskSignal(item);
-  const targetMismatch = item.asset_type !== 'stock' || (item.ml_target && item.ml_target !== 'label_structure_safe_20d');
+  const targetMismatch = !hasSupportedModelTarget(item);
   if (modelKey === 'accept' && riskKey === 'clean' && !targetMismatch) return { key: 'focus', label: '模型认可重点池' };
   if (modelKey === 'accept' && riskKey !== 'clean' && !targetMismatch) return { key: 'risk_downgrade', label: '模型认可但风险降级' };
   if ((modelKey === 'neutral' || modelKey === 'accept') && !targetMismatch) return { key: 'observe', label: '中性观察池' };
@@ -1433,7 +1463,7 @@ function getCandidatePoolLane(item: any): { key: string; label: string } {
 function getSuggestedReviewAction(item: any): { key: string; label: string; tone: string } {
   const modelKey = getCandidateModelSignal(item);
   const riskKey = getCandidateRiskSignal(item);
-  const targetMismatch = item.asset_type !== 'stock' || (item.ml_target && item.ml_target !== 'label_structure_safe_20d');
+  const targetMismatch = !hasSupportedModelTarget(item);
   if (targetMismatch || modelKey === 'unscored') {
     return { key: 'MOVE_TO_RESIDUAL', label: '移入规则残留', tone: 'neutral' };
   }
@@ -1562,6 +1592,8 @@ async function applyStructureQueueDecision(db: any, id: number, evaluation: any,
          trend_phase_reason = COALESCE(?, trend_phase_reason),
          market_regime = COALESCE(?, market_regime),
          entry_permission = COALESCE(?, entry_permission),
+         plan_profile = COALESCE(?, plan_profile),
+         plan_profile_label = COALESCE(?, plan_profile_label),
          final_status = ?,
          pool_status = ?,
          priority = COALESCE(?, priority),
@@ -1598,6 +1630,8 @@ async function applyStructureQueueDecision(db: any, id: number, evaluation: any,
       trendPhase.trend_phase_reason || null,
       marketRegime.market_regime || null,
       marketRegime.entry_permission || null,
+      evaluation.plan_profile || null,
+      evaluation.plan_profile_label || null,
       decision.final_status,
       decision.pool_status,
       evaluation.priority || null,
@@ -1664,7 +1698,7 @@ function buildCandidateReviewDraft(item: any) {
   const riskKey = getCandidateRiskSignal(item);
   const lane = getCandidatePoolLane(item);
   const action = getSuggestedReviewAction(item);
-  const targetMismatch = item.asset_type !== 'stock' || (item.ml_target && item.ml_target !== 'label_structure_safe_20d');
+  const targetMismatch = !hasSupportedModelTarget(item);
   const riskItems = [
     ...splitReasonText(item.forbidden_reason),
     ...splitReasonText(item.downgrade_reason),
@@ -1828,6 +1862,13 @@ async function evaluateCandidate(
   const etfRoute = assetType === 'etf'
     ? classifyEtfStrategyRoute(symbol, assetMeta?.name, assetMeta?.universe_types, industryStrengthContext)
     : null;
+  const planProfile = resolveFinancePlanProfile({
+    assetType,
+    symbol,
+    name: assetMeta?.name || symbol,
+    universeType: assetMeta?.universe_types || ''
+  });
+  const structureProfile = getFinanceStructureProfileConfig(planProfile.key);
   const etfPreGate = assetType === 'etf'
     ? await evaluateEtfPreGate(db, symbol, source, assetMeta?.name, assetMeta?.universe_types, prices, industryStrengthContext, etfRoute || undefined)
     : null;
@@ -1835,8 +1876,8 @@ async function evaluateCandidate(
     ? await calculateStockTradeQualification(db, symbol, source, prices)
     : null;
 
-  const structure = calculateStructure(prices);
-  const riskProfile = calculateRecentRiskProfile(prices, structure, assetType);
+  const structure = calculateStructure(prices, planProfile.key);
+  const riskProfile = calculateRecentRiskProfile(prices, structure, assetType, planProfile.key);
   const trendPhase = await db.get(
     `SELECT trend_phase_code, trend_phase_reason
      FROM financial_trend_phase_results
@@ -1856,10 +1897,12 @@ async function evaluateCandidate(
     structure,
     marketRegime?.entry_permission || 'OBSERVE_ONLY',
     trendPhase?.trend_phase_code,
-    riskProfile
+    riskProfile,
+    planProfile.key
   );
   const opportunityType = classifyOpportunityType({
     asset_type: assetType,
+    plan_profile: planProfile.key,
     structure,
     structure_status: structure.structure_status,
     safe_zone_status: structure.safe_zone_status,
@@ -1872,7 +1915,8 @@ async function evaluateCandidate(
   const etfGateReason = getEtfGateReason(
     assetType,
     etfRoute,
-    priorityResult
+    priorityResult,
+    structureProfile.candidatePriorityPassScore
   );
   const etfPreGateReason = etfPreGate?.forbidden_reason
     ? `${etfPreGate.forbidden_reason.replace(/[。；;]+$/, '')}；当前结果只表示不进入“权益主升ETF池”，结构扫描结果仍保留。`
@@ -2002,9 +2046,9 @@ async function evaluateCandidate(
     assetType === 'etf'
       ? makeGate(
           'priority_gate',
-          priorityResult.priority_score >= 70 ? 'passed' : 'failed',
-          `ETF优先分 ${priorityResult.priority_score}，入池阈值 70。`,
-          priorityResult.priority_score < 70
+          priorityResult.priority_score >= structureProfile.candidatePriorityPassScore ? 'passed' : 'failed',
+          `ETF优先分 ${priorityResult.priority_score}，${structureProfile.label}入池阈值 ${structureProfile.candidatePriorityPassScore}。`,
+          priorityResult.priority_score < structureProfile.candidatePriorityPassScore
         )
       : makeGate('priority_gate', 'not_applicable', `个股无固定优先分入池阈值，当前优先分 ${priorityResult.priority_score} 只用于排序。`),
     makeGate('model_reference', 'not_applicable', '模型概率不决定入池，只用于入池后的分层、复盘和风控参考。')
@@ -2025,6 +2069,8 @@ async function evaluateCandidate(
     risk_note: joinReasonParts(priorityResult.risk_note, stockTradeNote) || priorityResult.risk_note,
     industry_strength: etfPreGate?.strength || null,
     etf_strategy_route: etfRoute,
+    plan_profile: planProfile.key,
+    plan_profile_label: planProfile.label,
     stock_trade_qualification: stockTradeQualification,
     opportunity_type: opportunityType,
     candidate_reason: fullCandidateReason,
@@ -2046,12 +2092,13 @@ async function upsertCandidate(db: any, evaluation: any, name = '') {
       symbol, name, asset_type, source, trade_date, close, ma20, ma60, ma120,
       distance_to_ma60, above_ma60_days, structure_status, structure_reason,
       safe_zone_status, safe_zone_reason, trend_phase_code, trend_phase_reason,
-      market_regime, entry_permission, final_status, pool_status, priority, priority_score,
+      market_regime, entry_permission, plan_profile, plan_profile_label,
+      final_status, pool_status, priority, priority_score,
       invalidation_line, candidate_reason, forbidden_reason, downgrade_reason, risk_note,
       gate_trace_json, first_blocking_gate_key, first_blocking_gate_label, blocking_gate_labels,
       rule_version,
       first_selected_at, last_checked_at, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(symbol, asset_type, source, rule_version) DO UPDATE SET
       name = COALESCE(NULLIF(excluded.name, ''), financial_candidate_pool.name),
       trade_date = excluded.trade_date,
@@ -2069,6 +2116,8 @@ async function upsertCandidate(db: any, evaluation: any, name = '') {
       trend_phase_reason = excluded.trend_phase_reason,
       market_regime = excluded.market_regime,
       entry_permission = excluded.entry_permission,
+      plan_profile = excluded.plan_profile,
+      plan_profile_label = excluded.plan_profile_label,
       final_status = excluded.final_status,
       pool_status = 'active',
       priority = excluded.priority,
@@ -2104,6 +2153,8 @@ async function upsertCandidate(db: any, evaluation: any, name = '') {
       trendPhase?.trend_phase_reason || null,
       marketRegime?.market_regime || 'UNKNOWN',
       marketRegime?.entry_permission || 'OBSERVE_ONLY',
+      evaluation.plan_profile || null,
+      evaluation.plan_profile_label || null,
       'READY_FOR_PLAN',
       'active',
       evaluation.priority,
@@ -2150,6 +2201,8 @@ async function recordRejectedCandidateEvaluation(db: any, evaluation: any) {
          trend_phase_reason = ?,
          market_regime = ?,
          entry_permission = ?,
+         plan_profile = ?,
+         plan_profile_label = ?,
          final_status = 'REJECTED',
          pool_status = 'expired',
          priority = ?,
@@ -2188,6 +2241,8 @@ async function recordRejectedCandidateEvaluation(db: any, evaluation: any) {
       trendPhase?.trend_phase_reason || null,
       marketRegime?.market_regime || 'UNKNOWN',
       marketRegime?.entry_permission || 'OBSERVE_ONLY',
+      evaluation.plan_profile || null,
+      evaluation.plan_profile_label || null,
       evaluation.priority || 'medium',
       evaluation.priority_score || 0,
       structure.invalidation_line ?? null,

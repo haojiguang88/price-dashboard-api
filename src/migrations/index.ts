@@ -542,6 +542,8 @@ const migrations: Migration[] = [
         trend_phase_reason TEXT,
         market_regime TEXT,
         entry_permission TEXT,
+        plan_profile TEXT,
+        plan_profile_label TEXT,
         final_status TEXT NOT NULL,
         pool_status TEXT NOT NULL DEFAULT 'active',
         priority TEXT NOT NULL DEFAULT 'medium',

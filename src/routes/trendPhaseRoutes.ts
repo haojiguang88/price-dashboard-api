@@ -1,5 +1,6 @@
 import express, { Request, Response } from 'express';
 import getDb from '../config/database';
+import { resolveFinancePlanProfile } from '../services/financePlanProfile';
 
 const router = express.Router();
 
@@ -119,7 +120,91 @@ const THRESHOLD_PROFILES: Record<string, TrendThresholds> = {
   }
 };
 
-function getThresholds(assetType: string): TrendThresholds {
+THRESHOLD_PROFILES.etf_broad_equity = {
+  ...THRESHOLD_PROFILES.etf,
+  label: '宽基ETF',
+  CRASH_5D: -0.045,
+  CRASH_20D: -0.09,
+  BLEED_20D: -0.055,
+  SIDEWAYS_RET20_ABS: 0.035,
+  SIDEWAYS_RANGE20: 0.07,
+  SIDEWAYS_RANGE20_WIDE: 0.1,
+  SLOW_UP_20D: 0.045,
+  SLOW_UP_MAX_DRAWDOWN20: 0.05,
+  SLOW_UP_MAX_RANGE20: 0.12,
+  SURGE_5D: 0.065,
+  SURGE_1D: 0.035,
+  HIGH_BASE_BIAS60: 0.055
+};
+
+THRESHOLD_PROFILES.etf_industry_equity = {
+  ...THRESHOLD_PROFILES.etf,
+  label: '行业/主题ETF',
+  CRASH_5D: -0.055,
+  CRASH_20D: -0.11,
+  BLEED_20D: -0.065,
+  SIDEWAYS_RET20_ABS: 0.045,
+  SIDEWAYS_RANGE20: 0.09,
+  SIDEWAYS_RANGE20_WIDE: 0.13,
+  SLOW_UP_20D: 0.055,
+  SLOW_UP_MAX_DRAWDOWN20: 0.065,
+  SLOW_UP_MAX_RANGE20: 0.16,
+  SURGE_5D: 0.085,
+  SURGE_1D: 0.045,
+  HIGH_BASE_BIAS60: 0.07
+};
+
+THRESHOLD_PROFILES.etf_bond_cash = {
+  ...THRESHOLD_PROFILES.index,
+  label: '债券/货币ETF',
+  CRASH_5D: -0.015,
+  CRASH_20D: -0.03,
+  BLEED_20D: -0.018,
+  SIDEWAYS_RET20_ABS: 0.01,
+  SIDEWAYS_RANGE20: 0.02,
+  SIDEWAYS_RANGE20_WIDE: 0.035,
+  SLOW_UP_20D: 0.012,
+  SLOW_UP_MAX_DRAWDOWN20: 0.015,
+  SLOW_UP_MAX_RANGE20: 0.04,
+  REBOUND_5D: 0.012,
+  RECOVERY_BIAS60_ABS: 0.01,
+  BREAKOUT_MARGIN: 0.001,
+  BREAKOUT_BASE_RANGE20: 0.025,
+  SURGE_5D: 0.02,
+  SURGE_1D: 0.01,
+  HIGH_BASE_BIAS60: 0.015
+};
+
+THRESHOLD_PROFILES.etf_cross_border = {
+  ...THRESHOLD_PROFILES.etf_industry_equity,
+  label: '跨境ETF',
+  CRASH_5D: -0.06,
+  CRASH_20D: -0.12,
+  SURGE_5D: 0.09,
+  SURGE_1D: 0.05
+};
+
+THRESHOLD_PROFILES.etf_commodity = {
+  ...THRESHOLD_PROFILES.etf_industry_equity,
+  label: '商品ETF',
+  CRASH_5D: -0.06,
+  CRASH_20D: -0.12,
+  SURGE_5D: 0.09,
+  SURGE_1D: 0.05
+};
+
+THRESHOLD_PROFILES.etf_special = {
+  ...THRESHOLD_PROFILES.etf,
+  label: '特殊基金/LOF'
+};
+
+THRESHOLD_PROFILES.etf_unknown = {
+  ...THRESHOLD_PROFILES.etf,
+  label: '未归类ETF'
+};
+
+function getThresholds(assetType: string, profileKey?: string | null): TrendThresholds {
+  if (profileKey && THRESHOLD_PROFILES[profileKey]) return THRESHOLD_PROFILES[profileKey];
   return THRESHOLD_PROFILES[assetType] || THRESHOLD_PROFILES.etf;
 }
 
@@ -273,8 +358,8 @@ function getMaxClose(prices: DailyPrice[], index: number): number {
   return Math.max(...slice.map(p => p.close));
 }
 
-function calculateTrendPhase(prices: DailyPrice[], index: number, assetType: string): { code: string; reason: string; reason_code: string; reason_details: string } {
-  const th = getThresholds(assetType);
+function calculateTrendPhase(prices: DailyPrice[], index: number, assetType: string, profileKey?: string | null): { code: string; reason: string; reason_code: string; reason_details: string } {
+  const th = getThresholds(assetType, profileKey);
   const close = prices[index].close;
   const ma20 = calculateMA(prices, 20, index);
   const ma60 = calculateMA(prices, 60, index);
@@ -690,6 +775,20 @@ router.post('/recalc', async (req: Request, res: Response) => {
 
     logUpdate(`趋势阶段重算: ${symbol} ${asset_type} ${source}`, symbol);
 
+    const assetMeta = await db.get(
+      `SELECT COALESCE(MAX(NULLIF(name, '')), '') as name,
+              GROUP_CONCAT(DISTINCT universe_type) as universe_type
+       FROM financial_asset_universe
+       WHERE symbol = ? AND asset_type = ? AND source = ?`,
+      [symbol, asset_type, source]
+    );
+    const planProfile = resolveFinancePlanProfile({
+      assetType: asset_type,
+      symbol,
+      name: assetMeta?.name || symbol,
+      universeType: assetMeta?.universe_type || ''
+    });
+
     const allPrices = await db.all(
       `SELECT trade_date, open, high, low, close 
        FROM financial_daily_prices 
@@ -740,7 +839,7 @@ router.post('/recalc', async (req: Request, res: Response) => {
     let updatedCount = 0;
 
     for (let i = startIdx; i <= endIdx; i++) {
-      const result = calculateTrendPhase(prices, i, asset_type);
+      const result = calculateTrendPhase(prices, i, asset_type, planProfile.key);
       const ma20 = calculateMA(prices, 20, i);
       const ma60 = calculateMA(prices, 60, i);
       const ret5 = calculateRet(prices, 5, i);
@@ -803,7 +902,9 @@ router.post('/recalc', async (req: Request, res: Response) => {
         first_trade_date: firstDate,
         last_trade_date: lastDate,
         total_count: insertedCount + updatedCount,
-        rule_version: TREND_PHASE_VERSION
+        rule_version: TREND_PHASE_VERSION,
+        profile_key: planProfile.key,
+        profile_label: planProfile.label
       }
     });
   } catch (error) {
@@ -884,6 +985,13 @@ router.get('/queue', async (req: Request, res: Response) => {
          c.priority_score,
          c.review_status,
          c.candidate_reason,
+         (
+           SELECT GROUP_CONCAT(DISTINCT u.universe_type)
+           FROM financial_asset_universe u
+           WHERE u.symbol = c.symbol
+             AND u.asset_type = c.asset_type
+             AND u.source = c.source
+         ) AS universe_type,
          c.last_checked_at,
          c.updated_at,
          t.trade_date,
@@ -912,9 +1020,17 @@ router.get('/queue', async (req: Request, res: Response) => {
     );
 
     const items = rows.map((row: any) => {
+      const planProfile = resolveFinancePlanProfile({
+        assetType: row.asset_type,
+        symbol: row.symbol,
+        name: row.name,
+        universeType: row.universe_type || ''
+      });
       const stageStatus = getTrendQueueStatus(row.trend_phase_code, row.review_status);
       return {
         ...row,
+        plan_profile: planProfile.key,
+        plan_profile_label: planProfile.label,
         trend_phase_code: row.trend_phase_code || 'UNKNOWN',
         trend_phase_reason: row.trend_phase_reason || row.candidate_reason || '暂无走势阶段结果，等待流水线重算。',
         stage_status: stageStatus.key,
