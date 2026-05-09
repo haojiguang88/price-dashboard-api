@@ -163,6 +163,7 @@ export async function runFinanceDailyPipeline(config?: FinancePipelineConfig | n
     { key: 'candidate_funnel', label: '入池漏斗刷新', status: 'pending' },
     { key: 'entry_trigger_scan', label: '入场触发扫描', status: 'pending' },
     { key: 'active_plan_suggestions', label: '持仓/计划建议同步', status: 'pending' },
+    { key: 'decision_sample_tracking', label: '决策样本轨迹', status: 'pending' },
     { key: 'workflow_summary', label: '指挥台快照', status: 'pending' }
   ];
 
@@ -209,6 +210,8 @@ export async function runFinanceDailyPipeline(config?: FinancePipelineConfig | n
   if (!await runStep('active_plan_suggestions', () => callLocalApi('/api/finance/trade-plans/sync-active-suggestions', {
     limit: merged.active_plan_limit
   }))) return buildResult();
+
+  if (!await runStep('decision_sample_tracking', () => callLocalApi('/api/finance/decision-samples/sync'))) return buildResult();
 
   await runStep('workflow_summary', () => callLocalApi('/api/finance/workflow-summary', undefined, 'GET'));
 

@@ -47,6 +47,38 @@ const ACCOUNT_RISK_CONFIG_DEFAULTS = [
   { key: 'same_asset_type_count_warn', label: '同类资产计划数预警', value: 5, unit: '个', note: '同一资产类型过度集中时提示。' }
 ];
 
+const DECISION_SAMPLE_STAGES = [
+  { key: 'candidate_pool', label: '备选池', note: '从标的进入个股/ETF备选池开始记录。' },
+  { key: 'trend_phase', label: '走势阶段', note: '验证走势阶段是否真的过滤掉不适合推进的标的。' },
+  { key: 'single_asset_check', label: '单标的判断', note: '验证结构、安全区、流动性和模型辅助是否有过滤价值。' },
+  { key: 'entry_trigger', label: '入场触发', note: '验证触发条件是否提升后续计划质量。' },
+  { key: 'plan_ready', label: '计划准备池', note: '验证已具备建计划资格的标的后续表现。' },
+  { key: 'trade_plan', label: '正式计划', note: '验证正式买入计划的执行质量和失效纪律。' }
+];
+
+const DECISION_SAMPLE_STAGE_LABELS = Object.fromEntries(
+  DECISION_SAMPLE_STAGES.map(stage => [stage.key, stage.label])
+);
+
+const DECISION_SAMPLE_ADVANCED_STATUSES = new Set([
+  'trend_ready',
+  'wait_confirmation',
+  'plan_ready',
+  'confirmed',
+  'planned'
+]);
+
+const DECISION_SAMPLE_BLOCKED_STATUSES = new Set([
+  'expired',
+  'rejected',
+  'trend_blocked',
+  'structure_watch',
+  'invalidated',
+  'returned',
+  'blocked',
+  'failed'
+]);
+
 async function ensureFinanceDecisionSupportSchema(db: any) {
   if (decisionSupportSchemaReady) return;
 
@@ -98,6 +130,71 @@ async function ensureFinanceDecisionSupportSchema(db: any) {
       note TEXT,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
+
+    CREATE TABLE IF NOT EXISTS finance_decision_samples (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      source_type TEXT NOT NULL,
+      source_id INTEGER NOT NULL,
+      stage_key TEXT NOT NULL,
+      symbol TEXT NOT NULL,
+      name TEXT,
+      asset_type TEXT,
+      source TEXT,
+      trade_date TEXT,
+      current_status TEXT,
+      stage_status TEXT,
+      reason TEXT,
+      rule_version TEXT,
+      model_key TEXT,
+      model_probability REAL,
+      model_signal TEXT,
+      score_json TEXT,
+      context_json TEXT,
+      first_seen_at TEXT,
+      last_seen_at TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_finance_decision_samples_unique
+      ON finance_decision_samples(source_type, source_id, stage_key);
+
+    CREATE INDEX IF NOT EXISTS idx_finance_decision_samples_symbol
+      ON finance_decision_samples(symbol, asset_type, source);
+
+    CREATE INDEX IF NOT EXISTS idx_finance_decision_samples_stage
+      ON finance_decision_samples(stage_key, stage_status, updated_at);
+
+    CREATE TABLE IF NOT EXISTS finance_decision_sample_snapshots (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      sample_id INTEGER NOT NULL,
+      snapshot_date TEXT NOT NULL,
+      stage_key TEXT NOT NULL,
+      current_status TEXT,
+      trade_date TEXT,
+      close_price REAL,
+      invalidation_line REAL,
+      trend_phase_code TEXT,
+      structure_score REAL,
+      trigger_score REAL,
+      plan_quality_score REAL,
+      model_probability REAL,
+      ret_5d REAL,
+      ret_10d REAL,
+      ret_20d REAL,
+      max_drawdown_20d REAL,
+      broke_invalidation INTEGER NOT NULL DEFAULT 0,
+      outcome_label TEXT,
+      snapshot_json TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_finance_decision_sample_snapshots_day
+      ON finance_decision_sample_snapshots(sample_id, snapshot_date);
+
+    CREATE INDEX IF NOT EXISTS idx_finance_decision_sample_snapshots_stage
+      ON finance_decision_sample_snapshots(snapshot_date, stage_key, outcome_label);
   `);
 
   for (const item of ACCOUNT_RISK_CONFIG_DEFAULTS) {
@@ -267,6 +364,541 @@ function compactSample(row: any, metrics: ForwardMetrics) {
     modelProbability: row.model_probability ?? null,
     reason: row.first_blocking_gate_label || row.forbidden_reason || row.downgrade_reason || row.risk_note || row.trigger_reason || row.entry_reason || '',
     metrics
+  };
+}
+
+function getDecisionSampleStageLabel(stageKey: string) {
+  return DECISION_SAMPLE_STAGE_LABELS[stageKey] || stageKey;
+}
+
+function getDecisionSampleStatusCategory(status: string | null | undefined) {
+  const value = String(status || '').toLowerCase();
+  if (DECISION_SAMPLE_ADVANCED_STATUSES.has(value)) return 'advanced';
+  if (DECISION_SAMPLE_BLOCKED_STATUSES.has(value)) return 'blocked';
+  if (value.includes('fail') || value.includes('invalid')) return 'blocked';
+  if (value.includes('wait') || value.includes('pending') || value.includes('unreviewed')) return 'tracking';
+  return 'tracking';
+}
+
+function getDecisionSampleOutcome(metrics: ForwardMetrics) {
+  if (metrics.brokeInvalidation) return '跌破失效';
+  if (metrics.ret20 !== null && metrics.ret20 > 0) return '20日正收益';
+  if (metrics.ret20 !== null && metrics.ret20 <= 0) return '20日负收益';
+  if (metrics.ret10 !== null && metrics.ret10 > 0) return '10日正收益';
+  if (metrics.ret10 !== null && metrics.ret10 <= 0) return '10日负收益';
+  return '跟踪中';
+}
+
+function getCandidateStageStatus(row: any, stageKey: string) {
+  const poolStatus = String(row.pool_status || 'active');
+  const reviewStatus = String(row.review_status || 'unreviewed');
+  const trendCode = String(row.trend_phase_code || '');
+  if (poolStatus === 'expired') return reviewStatus === 'rejected' ? 'rejected' : 'expired';
+  if (stageKey === 'candidate_pool') return poolStatus;
+  if (stageKey === 'trend_phase') {
+    if (reviewStatus === 'trend_blocked') return 'trend_blocked';
+    if (['structure_pending', 'structure_watch', 'wait_confirmation', 'plan_ready'].includes(reviewStatus)) return 'trend_ready';
+    if (['BREAKOUT', 'SLOW_GRIND_UP', 'RECOVERY'].includes(trendCode)) return 'trend_ready';
+    return 'waiting';
+  }
+  if (stageKey === 'single_asset_check') {
+    if (reviewStatus === 'structure_watch') return 'structure_watch';
+    if (reviewStatus === 'wait_confirmation') return 'wait_confirmation';
+    if (reviewStatus === 'plan_ready') return 'plan_ready';
+    if (reviewStatus === 'rejected') return 'rejected';
+    if (reviewStatus === 'structure_pending') return 'pending';
+    return reviewStatus;
+  }
+  return reviewStatus;
+}
+
+function hasReachedSingleAssetCheck(row: any) {
+  return ['structure_pending', 'structure_watch', 'wait_confirmation', 'plan_ready', 'rejected'].includes(String(row.review_status || ''));
+}
+
+function extractModelFromSnapshot(snapshot: any) {
+  const prediction = snapshot?.ml_prediction?.prediction || snapshot?.mlPrediction?.prediction || snapshot?.model_prediction || {};
+  const model = snapshot?.ml_prediction?.model || snapshot?.mlPrediction?.model || {};
+  const probability = Number(
+    prediction.probability ??
+    snapshot?.model_probability ??
+    snapshot?.modelProbability ??
+    model.probability
+  );
+  return {
+    modelKey: model.modelKey || model.model_key || snapshot?.model_key || snapshot?.modelKey || null,
+    modelProbability: Number.isFinite(probability) ? probability : null,
+    modelSignal: prediction.label || prediction.signal || snapshot?.model_signal || snapshot?.modelSignal || null
+  };
+}
+
+function extractDecisionSampleRow(row: any) {
+  return {
+    id: row.id,
+    sampleId: row.sample_id,
+    stageKey: row.stage_key,
+    stageLabel: getDecisionSampleStageLabel(row.stage_key),
+    sourceType: row.source_type,
+    sourceId: row.source_id,
+    symbol: row.symbol,
+    name: row.name,
+    assetType: row.asset_type,
+    source: row.source,
+    tradeDate: row.trade_date,
+    status: row.stage_status || row.current_status,
+    currentStatus: row.current_status,
+    stageStatus: row.stage_status,
+    reason: row.reason,
+    modelKey: row.model_key,
+    modelProbability: row.model_probability,
+    modelSignal: row.model_signal,
+    score: parseJson(row.score_json, {}),
+    context: parseJson(row.context_json, {}),
+    snapshotDate: row.snapshot_date,
+    closePrice: row.close_price,
+    invalidationLine: row.invalidation_line,
+    trendPhase: row.trend_phase_code,
+    outcomeLabel: row.outcome_label,
+    updatedAt: row.updated_at,
+    metrics: {
+      ret5: row.ret_5d,
+      ret10: row.ret_10d,
+      ret20: row.ret_20d,
+      maxDrawdown20: row.max_drawdown_20d,
+      brokeInvalidation: row.broke_invalidation === 1
+    }
+  };
+}
+
+function getModelCompareKey(item: any) {
+  const probability = Number(item.modelProbability);
+  if (!Number.isFinite(probability)) return 'no_model';
+  const category = getDecisionSampleStatusCategory(item.stageStatus || item.status);
+  if (probability >= 0.65 && category === 'advanced') return 'model_high_rule_passed';
+  if (probability >= 0.65 && category === 'blocked') return 'model_high_rule_blocked';
+  if (probability < 0.5 && category === 'advanced') return 'model_low_rule_passed';
+  return 'model_neutral';
+}
+
+function getModelCompareLabel(key: string) {
+  switch (key) {
+    case 'model_high_rule_passed': return '模型高分 + 规则通过';
+    case 'model_high_rule_blocked': return '模型高分 + 规则拦截';
+    case 'model_low_rule_passed': return '模型低分 + 规则通过';
+    case 'model_neutral': return '模型中性/低冲突';
+    default: return '暂无模型分';
+  }
+}
+
+async function upsertDecisionSample(db: any, item: any) {
+  await db.run(
+    `INSERT INTO finance_decision_samples
+      (source_type, source_id, stage_key, symbol, name, asset_type, source, trade_date,
+       current_status, stage_status, reason, rule_version, model_key, model_probability, model_signal,
+       score_json, context_json, first_seen_at, last_seen_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+     ON CONFLICT(source_type, source_id, stage_key) DO UPDATE SET
+       symbol = excluded.symbol,
+       name = excluded.name,
+       asset_type = excluded.asset_type,
+       source = excluded.source,
+       trade_date = excluded.trade_date,
+       current_status = excluded.current_status,
+       stage_status = excluded.stage_status,
+       reason = excluded.reason,
+       rule_version = excluded.rule_version,
+       model_key = excluded.model_key,
+       model_probability = excluded.model_probability,
+       model_signal = excluded.model_signal,
+       score_json = excluded.score_json,
+       context_json = excluded.context_json,
+       first_seen_at = COALESCE(finance_decision_samples.first_seen_at, excluded.first_seen_at),
+       last_seen_at = excluded.last_seen_at,
+       updated_at = CURRENT_TIMESTAMP`,
+    [
+      item.sourceType,
+      item.sourceId,
+      item.stageKey,
+      item.symbol,
+      item.name || '',
+      item.assetType || 'stock',
+      item.source || 'tushare',
+      item.tradeDate || null,
+      item.currentStatus || null,
+      item.stageStatus || null,
+      item.reason || '',
+      item.ruleVersion || DECISION_SUPPORT_RULE_VERSION,
+      item.modelKey || null,
+      item.modelProbability ?? null,
+      item.modelSignal || null,
+      JSON.stringify(item.score || {}),
+      JSON.stringify(item.context || {}),
+      item.firstSeenAt || null,
+      item.lastSeenAt || item.firstSeenAt || null
+    ]
+  );
+}
+
+async function syncDecisionSamplesFromSources(db: any, options: { captureSnapshots?: boolean } = {}) {
+  await ensureFinanceDecisionSupportSchema(db);
+  let processed = 0;
+
+  const candidateRows = await db.all(
+    `SELECT c.id, c.symbol, c.name, c.asset_type, c.source, c.trade_date, c.close,
+            c.pool_status, c.review_status, c.priority_score, c.trend_phase_code,
+            c.trend_phase_reason, c.structure_status, c.safe_zone_status,
+            c.invalidation_line, c.first_blocking_gate_label, c.candidate_reason,
+            c.forbidden_reason, c.downgrade_reason, c.risk_note, c.rule_version,
+            c.first_selected_at, c.last_checked_at, c.created_at, c.updated_at,
+            c.gate_trace_json, r.model_key, r.model_probability, r.lane_label
+     FROM financial_candidate_pool c
+     LEFT JOIN financial_candidate_reviews r ON r.id = c.last_review_id
+     WHERE c.asset_type IN ('stock', 'etf')
+     ORDER BY COALESCE(c.updated_at, c.last_checked_at, c.created_at) DESC
+     LIMIT 900`
+  );
+
+  for (const row of candidateRows) {
+    const candidateReason = row.first_blocking_gate_label || row.candidate_reason || row.forbidden_reason || row.downgrade_reason || row.risk_note || row.trend_phase_reason || '';
+    const base = {
+      sourceType: 'candidate_pool',
+      sourceId: row.id,
+      symbol: row.symbol,
+      name: row.name,
+      assetType: row.asset_type,
+      source: row.source,
+      tradeDate: row.trade_date,
+      currentStatus: row.pool_status,
+      reason: candidateReason,
+      ruleVersion: row.rule_version,
+      modelKey: row.model_key,
+      modelProbability: row.model_probability,
+      modelSignal: row.lane_label,
+      firstSeenAt: row.first_selected_at || row.created_at,
+      lastSeenAt: row.updated_at || row.last_checked_at,
+      score: {
+        priorityScore: row.priority_score,
+        invalidationLine: row.invalidation_line
+      },
+      context: {
+        close: row.close,
+        poolStatus: row.pool_status,
+        reviewStatus: row.review_status,
+        trendPhase: row.trend_phase_code,
+        structureStatus: row.structure_status,
+        safeZoneStatus: row.safe_zone_status,
+        gateTrace: parseJson(row.gate_trace_json, [])
+      }
+    };
+
+    for (const stageKey of ['candidate_pool', 'trend_phase']) {
+      await upsertDecisionSample(db, {
+        ...base,
+        stageKey,
+        stageStatus: getCandidateStageStatus(row, stageKey)
+      });
+      processed += 1;
+    }
+
+    if (hasReachedSingleAssetCheck(row)) {
+      await upsertDecisionSample(db, {
+        ...base,
+        stageKey: 'single_asset_check',
+        stageStatus: getCandidateStageStatus(row, 'single_asset_check')
+      });
+      processed += 1;
+    }
+  }
+
+  const observationRows = await db.all(
+    `SELECT *
+     FROM financial_entry_trigger_observations
+     WHERE asset_type IN ('stock', 'etf')
+     ORDER BY COALESCE(updated_at, created_at) DESC
+     LIMIT 600`
+  );
+
+  for (const row of observationRows) {
+    const snapshot = parseJson(row.snapshot_json, {});
+    const modelInfo = extractModelFromSnapshot(snapshot);
+    const base = {
+      sourceType: 'entry_observation',
+      sourceId: row.id,
+      symbol: row.symbol,
+      name: row.name,
+      assetType: row.asset_type,
+      source: row.source,
+      tradeDate: row.trade_date,
+      currentStatus: row.observation_status,
+      reason: row.trigger_reason || row.note || '',
+      ruleVersion: snapshot?.rule_version || DECISION_SUPPORT_RULE_VERSION,
+      modelKey: modelInfo.modelKey,
+      modelProbability: modelInfo.modelProbability,
+      modelSignal: modelInfo.modelSignal,
+      firstSeenAt: row.created_at,
+      lastSeenAt: row.updated_at,
+      score: {
+        triggerScore: row.trigger_score,
+        structureScore: row.structure_score,
+        invalidationLine: row.invalidation_line
+      },
+      context: {
+        action: row.entry_action,
+        actionLabel: row.action_label,
+        trendPhase: row.trend_phase_code,
+        marketRegime: row.market_regime,
+        entryPermission: row.entry_permission,
+        close: row.close_price,
+        ma20: row.ma20,
+        ma60: row.ma60,
+        snapshot
+      }
+    };
+
+    await upsertDecisionSample(db, {
+      ...base,
+      stageKey: 'entry_trigger',
+      stageStatus: row.observation_status
+    });
+    processed += 1;
+
+    if (['confirmed', 'planned'].includes(String(row.observation_status))) {
+      await upsertDecisionSample(db, {
+        ...base,
+        stageKey: 'plan_ready',
+        stageStatus: row.observation_status
+      });
+      processed += 1;
+    }
+  }
+
+  const planRows = await db.all(
+    `SELECT *
+     FROM financial_trade_plans
+     WHERE is_deleted = 0
+     ORDER BY COALESCE(updated_at, created_at) DESC
+     LIMIT 500`
+  );
+
+  for (const row of planRows) {
+    const planQuality = buildFinancePlanQuality(row);
+    const snapshot = parseJson(row.trigger_snapshot_json, {});
+    const modelInfo = extractModelFromSnapshot(snapshot);
+    await upsertDecisionSample(db, {
+      sourceType: 'trade_plan',
+      sourceId: row.id,
+      stageKey: 'trade_plan',
+      symbol: row.symbol,
+      name: row.name,
+      assetType: row.asset_type,
+      source: row.source,
+      tradeDate: row.trade_date,
+      currentStatus: row.status,
+      stageStatus: row.status,
+      reason: row.trigger_reason || row.entry_reason || row.note || '',
+      ruleVersion: snapshot?.rule_version || DECISION_SUPPORT_RULE_VERSION,
+      modelKey: modelInfo.modelKey,
+      modelProbability: modelInfo.modelProbability,
+      modelSignal: modelInfo.modelSignal,
+      firstSeenAt: row.created_at,
+      lastSeenAt: row.updated_at,
+      score: {
+        triggerScore: row.trigger_score,
+        structureScore: row.structure_score,
+        planQualityScore: planQuality.score,
+        planQualityLabel: planQuality.label,
+        invalidationLine: row.invalidation_line,
+        maxLossPercent: row.max_loss_percent
+      },
+      context: {
+        close: row.close_price,
+        trendPhase: row.trend_phase_code,
+        marketRegime: row.market_regime,
+        entryPermission: row.entry_permission,
+        planProfile: row.plan_profile,
+        snapshot
+      }
+    });
+    processed += 1;
+  }
+
+  const snapshotResult = options.captureSnapshots ? await captureDecisionSampleSnapshots(db) : { processed: 0 };
+  return { processed, snapshots: snapshotResult.processed };
+}
+
+async function captureDecisionSampleSnapshots(db: any) {
+  await ensureFinanceDecisionSupportSchema(db);
+  const dateRow = await db.get(`SELECT date('now', 'localtime') as snapshot_date`);
+  const snapshotDate = dateRow?.snapshot_date || new Date().toISOString().slice(0, 10);
+  const samples = await db.all(
+    `SELECT *
+     FROM finance_decision_samples
+     ORDER BY COALESCE(updated_at, created_at) DESC
+     LIMIT 1800`
+  );
+  let processed = 0;
+
+  for (const sample of samples) {
+    const context = parseJson(sample.context_json, {});
+    const score = parseJson(sample.score_json, {});
+    const latestPrice = await db.get(
+      `SELECT trade_date, close
+       FROM financial_daily_prices
+       WHERE symbol = ?
+         AND asset_type = ?
+         AND source = ?
+       ORDER BY trade_date DESC
+       LIMIT 1`,
+      [sample.symbol, sample.asset_type || 'stock', sample.source || 'tushare']
+    );
+    const close = toNumber(context.close ?? context.entryPrice ?? latestPrice?.close, 0);
+    const invalidationLine = toNumber(score.invalidationLine ?? context.invalidationLine, 0);
+    const metrics = await getForwardMetrics(db, {
+      symbol: sample.symbol,
+      asset_type: sample.asset_type || 'stock',
+      source: sample.source || 'tushare',
+      trade_date: sample.trade_date || sample.first_seen_at?.slice(0, 10),
+      close,
+      invalidation_line: invalidationLine,
+      created_at: sample.first_seen_at
+    });
+    const outcomeLabel = getDecisionSampleOutcome(metrics);
+    await db.run(
+      `INSERT INTO finance_decision_sample_snapshots
+        (sample_id, snapshot_date, stage_key, current_status, trade_date, close_price,
+         invalidation_line, trend_phase_code, structure_score, trigger_score, plan_quality_score,
+         model_probability, ret_5d, ret_10d, ret_20d, max_drawdown_20d, broke_invalidation,
+         outcome_label, snapshot_json, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+       ON CONFLICT(sample_id, snapshot_date) DO UPDATE SET
+         stage_key = excluded.stage_key,
+         current_status = excluded.current_status,
+         trade_date = excluded.trade_date,
+         close_price = excluded.close_price,
+         invalidation_line = excluded.invalidation_line,
+         trend_phase_code = excluded.trend_phase_code,
+         structure_score = excluded.structure_score,
+         trigger_score = excluded.trigger_score,
+         plan_quality_score = excluded.plan_quality_score,
+         model_probability = excluded.model_probability,
+         ret_5d = excluded.ret_5d,
+         ret_10d = excluded.ret_10d,
+         ret_20d = excluded.ret_20d,
+         max_drawdown_20d = excluded.max_drawdown_20d,
+         broke_invalidation = excluded.broke_invalidation,
+         outcome_label = excluded.outcome_label,
+         snapshot_json = excluded.snapshot_json,
+         updated_at = CURRENT_TIMESTAMP`,
+      [
+        sample.id,
+        snapshotDate,
+        sample.stage_key,
+        sample.stage_status || sample.current_status,
+        sample.trade_date || sample.first_seen_at?.slice(0, 10) || null,
+        close || null,
+        invalidationLine || null,
+        context.trendPhase || null,
+        score.structureScore ?? null,
+        score.triggerScore ?? null,
+        score.planQualityScore ?? null,
+        sample.model_probability ?? null,
+        metrics.ret5,
+        metrics.ret10,
+        metrics.ret20,
+        metrics.maxDrawdown20,
+        metrics.brokeInvalidation ? 1 : 0,
+        outcomeLabel,
+        JSON.stringify({
+          latestTradeDate: latestPrice?.trade_date || metrics.latestTradeDate,
+          statusCategory: getDecisionSampleStatusCategory(sample.stage_status || sample.current_status),
+          context,
+          score
+        })
+      ]
+    );
+    processed += 1;
+  }
+
+  return { processed, snapshotDate };
+}
+
+async function getDecisionSampleTrackingSummary(db: any, options: { sync?: boolean } = {}) {
+  await ensureFinanceDecisionSupportSchema(db);
+  if (options.sync !== false) {
+    await syncDecisionSamplesFromSources(db, { captureSnapshots: true });
+  }
+
+  const rows = await db.all(
+    `WITH latest AS (
+       SELECT sample_id, MAX(snapshot_date) as snapshot_date
+       FROM finance_decision_sample_snapshots
+       GROUP BY sample_id
+     )
+     SELECT s.*,
+            ds.snapshot_date,
+            ds.close_price,
+            ds.invalidation_line,
+            ds.trend_phase_code,
+            ds.structure_score,
+            ds.trigger_score,
+            ds.plan_quality_score,
+            ds.ret_5d,
+            ds.ret_10d,
+            ds.ret_20d,
+            ds.max_drawdown_20d,
+            ds.broke_invalidation,
+            ds.outcome_label
+     FROM finance_decision_samples s
+     LEFT JOIN latest l ON l.sample_id = s.id
+     LEFT JOIN finance_decision_sample_snapshots ds
+       ON ds.sample_id = s.id
+      AND ds.snapshot_date = l.snapshot_date
+     ORDER BY COALESCE(s.updated_at, s.created_at) DESC
+     LIMIT 1800`
+  );
+  const items: any[] = rows.map(extractDecisionSampleRow);
+  const stageSummaries = DECISION_SAMPLE_STAGES.map(stage => {
+    const stageItems = items.filter((item: any) => item.stageKey === stage.key);
+    const categories = stageItems.reduce((acc: Record<string, number>, item: any) => {
+      const category = getDecisionSampleStatusCategory(item.stageStatus || item.status);
+      acc[category] = (acc[category] || 0) + 1;
+      return acc;
+    }, {});
+    return {
+      ...stage,
+      total: stageItems.length,
+      advanced: categories.advanced || 0,
+      tracking: categories.tracking || 0,
+      blocked: categories.blocked || 0,
+      summary: summarize(stageItems)
+    };
+  });
+
+  const compareMap = new Map<string, any[]>();
+  items.forEach((item: any) => {
+    const key = getModelCompareKey(item);
+    compareMap.set(key, [...(compareMap.get(key) || []), item]);
+  });
+  const compareOrder = ['model_high_rule_passed', 'model_high_rule_blocked', 'model_low_rule_passed', 'model_neutral', 'no_model'];
+  const modelCompare = compareOrder
+    .map(key => {
+      const groupItems = compareMap.get(key) || [];
+      return {
+        key,
+        label: getModelCompareLabel(key),
+        total: groupItems.length,
+        summary: summarize(groupItems),
+        items: groupItems.slice(0, 8)
+      };
+    })
+    .filter(group => group.total > 0);
+
+  return {
+    totalSamples: items.length,
+    snapshotCount: rows.filter((row: any) => row.snapshot_date).length,
+    stages: stageSummaries,
+    modelCompare,
+    recentItems: items.slice(0, 40)
   };
 }
 
@@ -680,6 +1312,11 @@ function compactSnapshotSummary(summary: any) {
     cards: summary.cards,
     planScoreBuckets: summary.planScoreBuckets,
     scoreBucketGroups: summary.scoreBucketGroups,
+    decisionTracking: {
+      totalSamples: summary.decisionTracking?.totalSamples || 0,
+      stages: summary.decisionTracking?.stages || [],
+      modelCompare: summary.decisionTracking?.modelCompare || []
+    },
     trendFailure: summary.trendFailure,
     failureSamples: {
       total: summary.failureSamples?.total || 0,
@@ -794,6 +1431,7 @@ async function buildSampleValidationSummary(db: any) {
       reviewNeeded: rejectedRows.filter((row: any) => row.decision_quality === 'needs_review' || row.later_status === 'trigger_review').length,
       items: rejectedRows.slice(0, 20)
     },
+    decisionTracking: await getDecisionSampleTrackingSummary(db),
     failureSamples: await getFailureSampleSummary(db),
     snapshots: await getSampleValidationSnapshots(db),
     permissionStages: PERMISSION_STAGES,
@@ -964,6 +1602,24 @@ router.post('/failure-samples/sync', async (_req: Request, res: Response) => {
     });
   } catch (error) {
     res.status(500).json({ success: false, message: `同步失败样本失败：${(error as Error).message}` });
+  }
+});
+
+router.post('/decision-samples/sync', async (_req: Request, res: Response) => {
+  try {
+    const db = await getDb();
+    await ensureFinanceDecisionSupportSchema(db);
+    const syncResult = await syncDecisionSamplesFromSources(db, { captureSnapshots: true });
+    const decisionTracking = await getDecisionSampleTrackingSummary(db, { sync: false });
+    res.json({
+      success: true,
+      data: {
+        syncResult,
+        decisionTracking
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: `同步决策样本失败：${(error as Error).message}` });
   }
 });
 
