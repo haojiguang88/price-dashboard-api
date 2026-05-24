@@ -357,16 +357,22 @@ router.get("/positions/insights", async (req, res) => {
           date
         FROM (
           SELECT 
-            category,
-            object_name,
-            COALESCE(variant, '') as variant,
-            price,
-            date,
+            pr.category,
+            pr.object_name,
+            COALESCE(pr.variant, '') as variant,
+            pr.price,
+            pr.date,
             ROW_NUMBER() OVER (
-              PARTITION BY category, object_name, COALESCE(variant, '') 
-              ORDER BY date DESC, created_at DESC, id DESC
+              PARTITION BY pr.category, pr.object_name, COALESCE(pr.variant, '') 
+              ORDER BY pr.date DESC, pr.created_at DESC, pr.id DESC
             ) as rn
-          FROM price_records
+          FROM price_records pr
+          LEFT JOIN categories c ON c.name = pr.category
+          LEFT JOIN objects o ON o.category_id = c.id AND o.name = pr.object_name
+          LEFT JOIN variants v ON v.object_id = o.id AND v.name = COALESCE(pr.variant, '') AND COALESCE(pr.variant, '') <> ''
+          WHERE COALESCE(c.is_archived, 0) = 0
+            AND COALESCE(o.is_archived, 0) = 0
+            AND (COALESCE(pr.variant, '') = '' OR COALESCE(v.is_archived, 0) = 0)
         )
         WHERE rn = 1
       ),
@@ -405,6 +411,9 @@ router.get("/positions/insights", async (req, res) => {
       LEFT JOIN categories c ON c.name = ps.category_name
       LEFT JOIN objects o ON o.category_id = c.id AND o.name = ps.object_name
       LEFT JOIN variants v ON v.object_id = o.id AND v.name = ps.variant_name AND ps.variant_name <> ''
+      WHERE COALESCE(c.is_archived, 0) = 0
+        AND COALESCE(o.is_archived, 0) = 0
+        AND (ps.variant_name = '' OR COALESCE(v.is_archived, 0) = 0)
       ORDER BY ps.total_cost DESC, ps.id DESC
     `),
       db.get('SELECT MAX(date) as latest_date FROM price_records')

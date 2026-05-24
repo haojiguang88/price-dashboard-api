@@ -123,27 +123,49 @@ const toJumpInsightItem = (item: JumpInsight) => ({
 });
 
 const getTargetIdMaps = async (db: any) => {
-  const categories = await db.all('SELECT id, name FROM categories');
-  const objects = await db.all('SELECT id, category_id, name FROM objects');
-  const variants = await db.all('SELECT id, object_id, name FROM variants');
+  const categories = await db.all('SELECT id, name, COALESCE(is_archived, 0) AS is_archived FROM categories');
+  const objects = await db.all('SELECT id, category_id, name, COALESCE(is_archived, 0) AS is_archived FROM objects');
+  const variants = await db.all('SELECT id, object_id, name, COALESCE(is_archived, 0) AS is_archived FROM variants');
 
   const categoryIds = new Map<string, number>();
   const objectIds = new Map<string, number>();
   const variantIds = new Map<string, number>();
+  const archivedCategories = new Set<string>();
+  const archivedObjects = new Set<string>();
+  const archivedVariants = new Set<string>();
 
   categories.forEach((category: any) => {
     categoryIds.set(category.name, category.id);
+    if (Number(category.is_archived) === 1) {
+      archivedCategories.add(category.name);
+    }
   });
 
   objects.forEach((object: any) => {
     objectIds.set(`${object.category_id}|${object.name}`, object.id);
+    if (Number(object.is_archived) === 1) {
+      archivedObjects.add(`${object.category_id}|${object.name}`);
+    }
   });
 
   variants.forEach((variant: any) => {
     variantIds.set(`${variant.object_id}|${variant.name}`, variant.id);
+    if (Number(variant.is_archived) === 1) {
+      archivedVariants.add(`${variant.object_id}|${variant.name}`);
+    }
   });
 
-  return { categoryIds, objectIds, variantIds };
+  return { categoryIds, objectIds, variantIds, archivedCategories, archivedObjects, archivedVariants };
+};
+
+const isArchivedPriceRecord = (record: PriceRecordRow, maps: Awaited<ReturnType<typeof getTargetIdMaps>>) => {
+  if (maps.archivedCategories.has(record.category)) return true;
+  const categoryId = maps.categoryIds.get(record.category);
+  if (!categoryId) return false;
+  if (maps.archivedObjects.has(`${categoryId}|${record.object_name}`)) return true;
+  const objectId = maps.objectIds.get(`${categoryId}|${record.object_name}`);
+  if (!objectId || !record.variant) return false;
+  return maps.archivedVariants.has(`${objectId}|${record.variant}`);
 };
 
 const buildPriceInsights = (records: PriceRecordRow[]) => {
@@ -370,7 +392,8 @@ const buildPriceInsights = (records: PriceRecordRow[]) => {
 router.get("/price-records/insights", async (req, res) => {
   try {
     const db = await getDb();
-    const { categoryIds, objectIds, variantIds } = await getTargetIdMaps(db);
+    const maps = await getTargetIdMaps(db);
+    const { categoryIds, objectIds, variantIds } = maps;
     const rows = await db.all(`
       SELECT 
         id,
@@ -406,7 +429,8 @@ router.get("/price-records/insights", async (req, res) => {
           variant_id: variantId
         };
       })
-      .filter((row: PriceRecordRow) => row.date && row.category && row.object_name && Number.isFinite(row.price));
+      .filter((row: PriceRecordRow) => row.date && row.category && row.object_name && Number.isFinite(row.price))
+      .filter((row: PriceRecordRow) => !isArchivedPriceRecord(row, maps));
 
     res.json({
       status: "success",
@@ -422,6 +446,7 @@ router.get("/price-records", async (req, res) => {
   try {
     const db = await getDb();
     const { category, object_name, variant } = req.query;
+    const includeArchived = String(req.query.include_archived || "").toLowerCase() === "1" || String(req.query.include_archived || "").toLowerCase() === "true";
     
     let query = "SELECT * FROM price_records";
     const params = [];
@@ -445,7 +470,25 @@ router.get("/price-records", async (req, res) => {
     }
     
     const priceRecords = await db.all(query, params);
-    res.json({ status: "success", data: priceRecords });
+    if (includeArchived) {
+      return res.json({ status: "success", data: priceRecords });
+    }
+
+    const maps = await getTargetIdMaps(db);
+    const activePriceRecords = priceRecords.filter((row: any) => !isArchivedPriceRecord({
+      id: Number(row.id),
+      date: String(row.date || '').slice(0, 10),
+      category: String(row.category || '').trim(),
+      object_name: String(row.object_name || '').trim(),
+      variant: String(row.variant || '').trim(),
+      price: Number(row.price),
+      source: row.source || null,
+      note: row.note || null,
+      category_id: null,
+      object_id: null,
+      variant_id: null
+    }, maps));
+    res.json({ status: "success", data: activePriceRecords });
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     res.status(500).json({ status: "error", message: "Failed to fetch price records", error: errorMessage });
@@ -492,7 +535,7 @@ router.post("/price-records", async (req, res) => {
     const variant = variant_name || '';
     
     // 校验主数据是否存在
-    const category = await db.get("SELECT * FROM categories WHERE name = ?", [category_name]);
+    const category = await db.get("SELECT * FROM categories WHERE name = ? AND COALESCE(is_archived, 0) = 0", [category_name]);
     if (!category) {
       return res.status(400).json({ 
         success: false, 
@@ -502,7 +545,7 @@ router.post("/price-records", async (req, res) => {
       });
     }
     
-    const object = await db.get("SELECT * FROM objects WHERE category_id = ? AND name = ?", [category.id, object_name]);
+    const object = await db.get("SELECT * FROM objects WHERE category_id = ? AND name = ? AND COALESCE(is_archived, 0) = 0", [category.id, object_name]);
     if (!object) {
       return res.status(400).json({ 
         success: false, 
@@ -514,7 +557,7 @@ router.post("/price-records", async (req, res) => {
     
     // 如果 variant_name 不为空，校验变体是否存在
     if (variant_name) {
-      const variant = await db.get("SELECT * FROM variants WHERE object_id = ? AND name = ?", [object.id, variant_name]);
+      const variant = await db.get("SELECT * FROM variants WHERE object_id = ? AND name = ? AND COALESCE(is_archived, 0) = 0", [object.id, variant_name]);
       if (!variant) {
         return res.status(400).json({ 
           success: false, 
@@ -616,7 +659,7 @@ router.put("/price-records/:id", async (req, res) => {
     }
     
     // 校验主数据是否存在
-    const category = await db.get("SELECT * FROM categories WHERE name = ?", [normalizedCategoryName]);
+    const category = await db.get("SELECT * FROM categories WHERE name = ? AND COALESCE(is_archived, 0) = 0", [normalizedCategoryName]);
     if (!category) {
       return res.status(400).json({ 
         success: false, 
@@ -626,7 +669,7 @@ router.put("/price-records/:id", async (req, res) => {
       });
     }
     
-    const object = await db.get("SELECT * FROM objects WHERE category_id = ? AND name = ?", [category.id, normalizedObjectName]);
+    const object = await db.get("SELECT * FROM objects WHERE category_id = ? AND name = ? AND COALESCE(is_archived, 0) = 0", [category.id, normalizedObjectName]);
     if (!object) {
       return res.status(400).json({ 
         success: false, 
@@ -638,7 +681,7 @@ router.put("/price-records/:id", async (req, res) => {
     
     // 如果 variant_name 不为空，校验变体是否存在
     if (normalizedVariantName) {
-      const variant = await db.get("SELECT * FROM variants WHERE object_id = ? AND name = ?", [object.id, normalizedVariantName]);
+      const variant = await db.get("SELECT * FROM variants WHERE object_id = ? AND name = ? AND COALESCE(is_archived, 0) = 0", [object.id, normalizedVariantName]);
       if (!variant) {
         return res.status(400).json({ 
           success: false, 
@@ -805,7 +848,7 @@ router.post("/import/price-records", async (req, res) => {
       
       // 校验主数据是否存在
       try {
-        const category = await db.get("SELECT * FROM categories WHERE name = ?", [category_name]);
+        const category = await db.get("SELECT * FROM categories WHERE name = ? AND COALESCE(is_archived, 0) = 0", [category_name]);
         if (!category) {
           failed++;
           failed_records.push({
@@ -820,7 +863,7 @@ router.post("/import/price-records", async (req, res) => {
           continue;
         }
         
-        const object = await db.get("SELECT * FROM objects WHERE category_id = ? AND name = ?", [category.id, object_name]);
+        const object = await db.get("SELECT * FROM objects WHERE category_id = ? AND name = ? AND COALESCE(is_archived, 0) = 0", [category.id, object_name]);
         if (!object) {
           failed++;
           failed_records.push({
@@ -837,7 +880,7 @@ router.post("/import/price-records", async (req, res) => {
         
         // 如果 variant_name 不为空，校验变体是否存在
         if (variant_name) {
-          const variant = await db.get("SELECT * FROM variants WHERE object_id = ? AND name = ?", [object.id, variant_name]);
+          const variant = await db.get("SELECT * FROM variants WHERE object_id = ? AND name = ? AND COALESCE(is_archived, 0) = 0", [object.id, variant_name]);
           if (!variant) {
             failed++;
             failed_records.push({

@@ -5,7 +5,7 @@ const sqlite3 = require('sqlite3').verbose();
 const positionsData = JSON.parse(fs.readFileSync('positions_export.json', 'utf8'));
 
 // 连接数据库
-const db = new sqlite3.Database('./db/price_dashboard_dev.db');
+const db = new sqlite3.Database(process.env.DB_PATH || '/Volumes/7100/price-dashboard-data/db/price_dashboard_dev.db');
 
 db.serialize(() => {
   // 导入前清空表，避免重复导入

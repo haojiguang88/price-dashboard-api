@@ -474,6 +474,20 @@ function splitUniverseTypes(value: string | null | undefined): string[] {
     .filter(Boolean);
 }
 
+const INDUSTRY_THEME_ETF_PATTERN = /半导体|芯片|人工智能|AI|CPO|通信|云计算|算力|机器人|电力|绿色电力|储能|新能源|光伏|医疗|医药|创新药|生物|证券|银行|保险|金融科技|白酒|酒ETF|消费|食品饮料|传媒|游戏|军工|有色|煤炭|钢铁|化工|机械|汽车|稀土|农业|畜牧|养殖|地产|基建|建材|物流|旅游|家电|软件|信创|数据|低空|无人机|卫星/;
+const BROAD_EQUITY_ETF_PATTERN = /沪深300|中证(500|1000|2000|A500)|上证50|深证100|科创(50|100)|创业板ETF|创业板50|A500|红利|央企|国企|宽基|MSCI|深红利|基本面/;
+
+export function isIndustryThemeEtfLike(input: { name?: string | null; symbol?: string | null }) {
+  const text = `${input.name || ''} ${input.symbol || ''}`;
+  return INDUSTRY_THEME_ETF_PATTERN.test(text);
+}
+
+export function isBroadEquityEtfLike(input: { name?: string | null; symbol?: string | null }) {
+  const text = `${input.name || ''} ${input.symbol || ''}`;
+  if (isIndustryThemeEtfLike(input)) return false;
+  return BROAD_EQUITY_ETF_PATTERN.test(text);
+}
+
 export function getFinancePlanProfileConfig(key?: string | null): FinancePlanProfileConfig {
   return PROFILE_CONFIGS[(key || 'stock_equity') as FinancePlanProfileKey] || PROFILE_CONFIGS.stock_equity;
 }
@@ -510,8 +524,8 @@ export function resolveFinancePlanProfile(input: {
   if (typeSet.has('special_fund') || /LOF|封闭|REIT|REITS|基础设施|创新未来|定开/.test(text)) {
     return PROFILE_CONFIGS.etf_special;
   }
-  if (typeSet.has('industry_etf')) return PROFILE_CONFIGS.etf_industry_equity;
-  if (typeSet.has('broad_etf')) return PROFILE_CONFIGS.etf_broad_equity;
+  if (typeSet.has('industry_etf') || isIndustryThemeEtfLike(input)) return PROFILE_CONFIGS.etf_industry_equity;
+  if (typeSet.has('broad_etf') || isBroadEquityEtfLike(input)) return PROFILE_CONFIGS.etf_broad_equity;
 
   return PROFILE_CONFIGS.etf_unknown;
 }

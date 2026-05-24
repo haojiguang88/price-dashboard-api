@@ -1,5 +1,5 @@
 import express, { Request, Response } from 'express';
-import getDb from '../config/database';
+import getDb, { getDatabasePath } from '../config/database';
 import { exec, execFile } from 'child_process';
 import path from 'path';
 import {
@@ -9,9 +9,12 @@ import {
   resolveFinancePlanProfile
 } from '../services/financePlanProfile';
 import { buildFinancePlanQuality } from '../services/financePlanQuality';
+import { recordSignalLifecycleCheck } from '../services/financeSignalLifecycle';
+import { getFreshMarketRegime } from '../utils/financeMarketRegime';
 
 const router = express.Router();
 const TREND_PHASE_VERSION = 'trend_phase_v1.1';
+const CANDIDATE_RULE_VERSION = 'candidate_pool_v1';
 const ENTRY_READY_TREND_PHASES = new Set(['BREAKOUT', 'SLOW_GRIND_UP', 'RECOVERY']);
 const ENTRY_HARD_BLOCK_TREND_PHASES = new Set(['REBOUND', 'SLOW_BLEED', 'CRASH_DROP']);
 const ENTRY_TREND_PRIORITY: Record<string, number> = {
@@ -19,6 +22,7 @@ const ENTRY_TREND_PRIORITY: Record<string, number> = {
   BREAKOUT: 1,
   RECOVERY: 2
 };
+type EntryObservationScope = 'actionable' | 'risk_priority_recheck' | 'watching' | 'confirmed' | 'invalidated' | 'returned' | 'resolved' | 'all';
 const TRAINING_ROOT = process.env.MODEL_TRAINING_ROOT || '/Volumes/7100/model-training';
 const TRAINING_PYTHON = process.env.MODEL_TRAINING_PYTHON || path.join(TRAINING_ROOT, 'venv', 'bin', 'python');
 let entryTriggerObservationSchemaReady = false;
@@ -122,6 +126,10 @@ async function ensureEntryTriggerObservationSchema(db: any) {
       invalidation_line REAL,
       snapshot_json TEXT NOT NULL,
       note TEXT,
+      manual_review_action TEXT,
+      manual_review_label TEXT,
+      manual_review_note TEXT,
+      manual_reviewed_at TEXT,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
@@ -130,7 +138,54 @@ async function ensureEntryTriggerObservationSchema(db: any) {
     ON financial_entry_trigger_observations(symbol, asset_type, source, observation_status);
   `);
 
+  const columns = await db.all(`PRAGMA table_info(financial_entry_trigger_observations)`);
+  const existingColumns = new Set(columns.map((column: any) => column.name));
+  const extraColumns = [
+    ['manual_review_action', `ALTER TABLE financial_entry_trigger_observations ADD COLUMN manual_review_action TEXT`],
+    ['manual_review_label', `ALTER TABLE financial_entry_trigger_observations ADD COLUMN manual_review_label TEXT`],
+    ['manual_review_note', `ALTER TABLE financial_entry_trigger_observations ADD COLUMN manual_review_note TEXT`],
+    ['manual_reviewed_at', `ALTER TABLE financial_entry_trigger_observations ADD COLUMN manual_reviewed_at TEXT`]
+  ];
+  for (const [columnName, sql] of extraColumns) {
+    if (!existingColumns.has(columnName)) {
+      await db.exec(sql);
+    }
+  }
+
   entryTriggerObservationSchemaReady = true;
+}
+
+function isEntryMarketGateOpen(entryPermission?: string | null) {
+  return entryPermission === 'ALLOW_STRUCTURE_CHECK';
+}
+
+function getEntryMarketGateBlockReason(marketGate: any) {
+  if (marketGate?.stale) return marketGate.freshness_reason;
+  return marketGate?.entry_reason
+    || marketGate?.result_reason
+    || marketGate?.freshness_reason
+    || '市场总闸未开放单标的结构判断。';
+}
+
+async function getEntryMarketGateBlocker(db: any, source: string) {
+  const marketGate = await getFreshMarketRegime(db, { source });
+  if (isEntryMarketGateOpen(marketGate?.entry_permission)) return null;
+  return {
+    marketGate,
+    message: `市场总闸未通过，禁止推进单标的判断/入场触发；本轮不修改入场观察和候选池状态：${getEntryMarketGateBlockReason(marketGate)}`
+  };
+}
+
+function isEntrySnapshotBlockedByMarketGate(snapshot: any) {
+  return snapshot?.action === 'BLOCKED' && !isEntryMarketGateOpen(snapshot?.entry_permission);
+}
+
+function isEntrySnapshotInvalidated(snapshot: any) {
+  if (isEntrySnapshotBlockedByMarketGate(snapshot)) return false;
+  return snapshot?.action === 'BLOCKED'
+    || snapshot?.action === 'INVALIDATED'
+    || snapshot?.structure_status === 'STRUCTURE_BROKEN'
+    || (snapshot?.close && snapshot?.invalidation_line && snapshot.close < snapshot.invalidation_line);
 }
 
 function getTrendPhaseLabel(code?: string | null): string {
@@ -235,9 +290,28 @@ function resolveCandidateStatusAfterEntryScan(snapshot: any, invalidated: boolea
   return {
     reviewStatus: 'wait_confirmation',
     poolStatus: 'active',
-    finalStatus: 'READY_FOR_PLAN',
+    finalStatus: 'WAIT',
     reviewAction: 'entry_trigger_waiting',
     conclusion: '继续等待'
+  };
+}
+
+function signalLifecycleAllowsPlan(lifecycle: any) {
+  return ['mature_plan', 'stable_plan'].includes(String(lifecycle?.maturity_status || ''));
+}
+
+function applySignalLifecycleGate(decision: any, lifecycle: any, rawCanUpgrade: boolean, invalidated: boolean) {
+  if (!rawCanUpgrade || invalidated || signalLifecycleAllowsPlan(lifecycle)) return decision;
+
+  const maturityStatus = String(lifecycle?.maturity_status || 'new_trigger');
+  const label = lifecycle?.maturity_label || (maturityStatus === 'rechecking' ? '复核中' : '新触发');
+
+  return {
+    reviewStatus: 'wait_confirmation',
+    poolStatus: 'active',
+    finalStatus: 'WAIT',
+    reviewAction: 'entry_trigger_lifecycle_recheck',
+    conclusion: maturityStatus === 'rechecking' ? '复核中继续观察' : `${label}仅观察`
   };
 }
 
@@ -410,32 +484,119 @@ async function getModelPrediction(
   }
 
   const scriptPath = path.join(process.cwd(), 'scripts', 'model_training', 'predict.py');
-  const dbPath = process.env.DB_PATH || path.join(process.cwd(), 'db', 'price_dashboard_dev.db');
+  const dbPath = getDatabasePath();
+  const latestLocalPrice = await db.get(
+    `SELECT MAX(trade_date) AS latest_trade_date
+     FROM financial_daily_prices
+     WHERE symbol = ?
+       AND asset_type = ?
+       AND source = 'tushare'
+       AND close IS NOT NULL
+       AND close > 0`,
+    [symbol, assetType]
+  );
+  const latestLocalTradeDate = latestLocalPrice?.latest_trade_date || null;
+  const args = [
+    scriptPath,
+    '--db',
+    dbPath,
+    '--domain',
+    assetType,
+    '--symbol',
+    symbol,
+    '--model-key',
+    feedback.default_model_key
+  ];
+  if (latestLocalTradeDate) {
+    args.push('--trade-date', latestLocalTradeDate);
+  }
+
+  const buildUnavailablePrediction = (reason: string, options: { stale?: boolean; modelTradeDate?: string | null } = {}) => {
+    const isStale = Boolean(options.stale) || /特征库滞后|特征日|落后/.test(reason);
+    const domainLabel = assetType === 'etf' ? 'ETF' : '个股';
+    const featureTradeDate = options.modelTradeDate || null;
+    return {
+      available: false,
+      stale: isStale,
+      mode: feedback.mode,
+      tradeDate: featureTradeDate,
+      latestTradeDate: latestLocalTradeDate,
+      error: reason,
+      note: isStale
+        ? `模型辅助层特征滞后，已阻止使用旧特征预测；原结构规则照常生效。`
+        : '模型辅助层暂不可用，原结构规则照常生效。',
+      remediation: {
+        code: isStale ? 'MODEL_FEATURE_STALE' : 'MODEL_PREDICTION_UNAVAILABLE',
+        title: isStale ? `${domainLabel}模型特征需要刷新` : `${domainLabel}模型预测需要检查`,
+        reason: isStale
+          ? `当前本地日线口径 ${latestLocalTradeDate || '--'}，模型特征口径 ${featureTradeDate || '未知'}，不能用旧特征参与判断。`
+          : reason,
+        featureTradeDate,
+        latestTradeDate: latestLocalTradeDate,
+        actions: [
+          {
+            label: '运行金融日终流水线',
+            path: '/finance',
+            description: '先刷新行情、模型特征和候选模型分数，让单标的页重新读取同一口径。'
+          },
+          {
+            label: `检查${domainLabel}模型训练`,
+            path: `/model-training/${assetType}`,
+            description: '查看特征库、训练产物和启用模型；必要时重训或同步候选评分。'
+          }
+        ]
+      }
+    };
+  };
+
+  const parsePredictionPayload = (text: string) => {
+    const trimmed = text.trim();
+    if (!trimmed) return null;
+    try {
+      return JSON.parse(trimmed);
+    } catch (_error) {
+      return null;
+    }
+  };
 
   return new Promise((resolve) => {
     execFile(
       TRAINING_PYTHON,
-      [scriptPath, '--db', dbPath, '--domain', assetType, '--symbol', symbol, '--model-key', feedback.default_model_key],
+      args,
       { timeout: 30000 },
       (error, stdout) => {
         if (error) {
-          resolve({
-            available: false,
-            mode: feedback.mode,
-            error: error.message,
-            note: '模型辅助层暂不可用，原结构规则照常生效。'
-          });
+          const payload = parsePredictionPayload(stdout || '');
+          const reason = payload?.message || error.message;
+          resolve(buildUnavailablePrediction(reason, {
+            stale: /特征库滞后|特征日|落后/.test(reason),
+            modelTradeDate: payload?.data?.tradeDate
+              || payload?.data?.trade_date
+              || payload?.data?.latestFeatureTradeDate
+              || payload?.data?.asOfTradeDate
+              || null
+          }));
           return;
         }
         try {
-          const payload = JSON.parse(stdout.trim());
+          const payload = parsePredictionPayload(stdout || '');
+          if (!payload) {
+            throw new Error('模型预测输出为空或不是 JSON');
+          }
           if (!payload.success) {
-            resolve({
-              available: false,
-              mode: feedback.mode,
-              error: payload.message || '模型预测失败',
-              note: '模型辅助层暂不可用，原结构规则照常生效。'
-            });
+            resolve(buildUnavailablePrediction(payload.message || '模型预测失败'));
+            return;
+          }
+          const modelTradeDate = payload.data?.tradeDate
+            || payload.data?.trade_date
+            || payload.data?.latestFeatureTradeDate
+            || payload.data?.asOfTradeDate
+            || null;
+          if (modelTradeDate && latestLocalTradeDate && String(modelTradeDate) < String(latestLocalTradeDate)) {
+            resolve(buildUnavailablePrediction(
+              `模型辅助层日期 ${modelTradeDate} 落后本地日线 ${latestLocalTradeDate}。`,
+              { stale: true, modelTradeDate }
+            ));
             return;
           }
           resolve({
@@ -447,12 +608,7 @@ async function getModelPrediction(
             ...payload.data
           });
         } catch (parseError) {
-          resolve({
-            available: false,
-            mode: feedback.mode,
-            error: `模型预测结果解析失败：${(parseError as Error).message}`,
-            note: '模型辅助层暂不可用，原结构规则照常生效。'
-          });
+          resolve(buildUnavailablePrediction(`模型预测结果解析失败：${(parseError as Error).message}`));
         }
       }
     );
@@ -498,6 +654,213 @@ function parseJson(value: unknown, fallback: any = null) {
   } catch {
     return fallback;
   }
+}
+
+function entryObservationKey(row: any) {
+  return `${row.symbol || ''}|${row.asset_type || ''}|${row.source || ''}`;
+}
+
+async function loadLatestSignalLifecycleMap(db: any, rows: any[]) {
+  if (!rows.length) return new Map<string, any>();
+  const symbols = Array.from(new Set(rows.map(row => row.symbol).filter(Boolean)));
+  if (!symbols.length) return new Map<string, any>();
+  const placeholders = symbols.map(() => '?').join(',');
+  let lifecycleRows: any[] = [];
+  try {
+    lifecycleRows = await db.all(
+      `WITH ranked_lifecycles AS (
+         SELECT l.*,
+                ROW_NUMBER() OVER (
+                  PARTITION BY l.symbol, l.asset_type, l.source
+                  ORDER BY COALESCE(l.latest_check_date, l.updated_at) DESC, l.id DESC
+                ) AS rn
+         FROM financial_signal_lifecycles l
+         WHERE l.symbol IN (${placeholders})
+       )
+       SELECT *
+       FROM ranked_lifecycles
+       WHERE rn = 1`,
+      symbols
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/no such table/i.test(message)) return new Map<string, any>();
+    throw error;
+  }
+  const wanted = new Set(rows.map(entryObservationKey));
+  const map = new Map<string, any>();
+  lifecycleRows.forEach((row: any) => {
+    const key = entryObservationKey(row);
+    if (wanted.has(key)) map.set(key, row);
+  });
+  return map;
+}
+
+function buildEntryObservationQueueInfo(item: any, snapshot: any, lifecycle: any) {
+  const status = String(item.observation_status || '');
+  const rawAction = String(snapshot?.action || item.entry_action || '');
+  const maturityStatus = String(lifecycle?.maturity_status || '');
+  const maturityLabel = lifecycle?.maturity_label || maturityStatus || null;
+  const consecutiveValidDays = Number(lifecycle?.consecutive_valid_days || 0);
+  const triggerScore = Number(item.trigger_score || snapshot?.trigger_score || 0);
+  const structureScore = Number(item.structure_score || snapshot?.structure_score?.score || snapshot?.structure_score || 0);
+  const manualReviewAction = String(item.manual_review_action || '');
+  const manualReviewLabel = item.manual_review_label || '';
+  const manualReviewNote = item.manual_review_note || '';
+  const close = Number(item.close_price ?? snapshot?.close ?? snapshot?.close_price);
+  const invalidationLine = Number(item.invalidation_line ?? snapshot?.invalidation_line);
+  const maxLossPercent = Number.isFinite(close) && close > 0 && Number.isFinite(invalidationLine) && invalidationLine > 0
+    ? Math.max(0, (close - invalidationLine) / close)
+    : null;
+  const rawReadyToPlan = rawAction === 'READY_TO_PLAN';
+  const highTriggerRiskReview = rawReadyToPlan
+    && triggerScore >= 80
+    && structureScore >= 75
+    && (maxLossPercent === null || maxLossPercent <= 0.06);
+  const needsHighTriggerRiskReview = highTriggerRiskReview && !['continue_observe', 'return_risk_hold'].includes(manualReviewAction);
+
+  let bucket = 'waiting_trigger';
+  let label = '继续观察触发';
+  let recommendation = 'continue_observe';
+  let reason = item.trigger_reason || '等待触发条件继续确认。';
+
+  if (['confirmed', 'plan_candidate'].includes(status)) {
+    bucket = 'plan_ready';
+    label = '计划准备池';
+    recommendation = 'manual_create_trade_plan';
+    reason = '入场触发已确认，可进入计划准备；生成正式计划和金额仍需人工确认。';
+  } else if (status === 'watching' && rawReadyToPlan) {
+    if (['mature_plan', 'stable_plan'].includes(maturityStatus)) {
+      bucket = 'ready_to_plan';
+      label = '应进计划准备';
+      recommendation = 'auto_advance_to_plan_ready';
+      reason = `${maturityLabel || '生命周期已成熟'}，且触发分 ${triggerScore} / 结构分 ${structureScore}，应由自动流程推进到计划准备池。`;
+    } else if (['face_slap_zone', 'short_lived_signal', 'invalidation_watch', 'invalidated'].includes(maturityStatus)) {
+      if (maturityStatus === 'face_slap_zone' && highTriggerRiskReview) {
+        if (manualReviewAction === 'return_risk_hold') {
+          bucket = 'risk_hold';
+          label = manualReviewLabel || '人工退回风险观察';
+          recommendation = 'continue_risk_observe';
+          reason = `人工复核已退回风险观察：${manualReviewNote || '生命周期仍有真实翻转，先不占高触发优先位。'}`;
+        } else if (manualReviewAction === 'continue_observe') {
+          bucket = 'lifecycle_recheck';
+          label = manualReviewLabel || '人工继续观察';
+          recommendation = 'continue_lifecycle_recheck';
+          reason = `人工复核选择继续观察：${manualReviewNote || '保留观察记录，等待后续自动流水线重新确认。'}`;
+        } else {
+          bucket = 'risk_priority_recheck';
+          label = manualReviewAction === 'wait_next_day' ? (manualReviewLabel || '等下一日确认') : '高触发复核';
+          recommendation = manualReviewAction === 'wait_next_day' ? 'wait_next_day_recheck' : 'manual_risk_recheck';
+          reason = manualReviewAction === 'wait_next_day'
+            ? `人工复核选择等下一日确认：${manualReviewNote || '今天不进计划，下一交易日继续优先复核。'}`
+            : `${maturityLabel || '扇脸区'}，但触发分 ${triggerScore} / 结构分 ${structureScore} 较高，失效线距离${maxLossPercent !== null ? ` ${(maxLossPercent * 100).toFixed(1)}%` : '可控'}；不自动进计划，建议优先人工复核是否继续观察或等待下一日确认。`;
+        }
+      } else {
+        bucket = 'risk_hold';
+        label = maturityStatus === 'face_slap_zone' ? '扇脸风险观察' : '风险观察';
+        recommendation = 'continue_risk_observe';
+        reason = `${maturityLabel || '生命周期风险'}，虽然触发条件满足，但历史复核不稳定，先不推进计划准备。`;
+      }
+    } else if (maturityStatus === 'rechecking') {
+      bucket = 'lifecycle_recheck';
+      label = '已触发待复核';
+      recommendation = 'continue_lifecycle_recheck';
+      reason = `触发条件已满足，但生命周期只有连续 ${consecutiveValidDays} 天有效；需要至少 3 天稳定后再进计划准备。`;
+    } else {
+      bucket = 'lifecycle_recheck';
+      label = '新触发待复核';
+      recommendation = 'continue_lifecycle_recheck';
+      reason = '触发条件刚满足，先观察生命周期是否连续有效，避免当天假触发直接进计划。';
+    }
+  } else if (status === 'watching' && rawAction === 'WAIT_PULLBACK') {
+    bucket = 'wait_pullback';
+    label = '等待回踩';
+    recommendation = 'continue_wait_pullback';
+    reason = item.trigger_reason || '位置不在安全触发区，继续等待回踩确认。';
+  } else if (status === 'watching') {
+    bucket = 'waiting_trigger';
+    label = '触发未完成';
+    recommendation = 'continue_wait_trigger';
+    reason = item.trigger_reason || '结构仍可观察，但入场触发条件还不完整。';
+  } else if (['invalidated', 'returned', 'planned'].includes(status)) {
+    bucket = 'resolved';
+    label = status === 'invalidated' ? '已失效' : status === 'planned' ? '已建计划' : '已退回';
+    recommendation = 'resolved';
+    reason = item.note || item.trigger_reason || '该记录已归档。';
+  }
+
+  return {
+    observation_queue_bucket: bucket,
+    observation_queue_label: label,
+    observation_queue_reason: reason,
+    observation_queue_recommendation: recommendation,
+    raw_entry_action: rawAction || null,
+    lifecycle_status: maturityStatus || null,
+    lifecycle_label: maturityLabel,
+    lifecycle_check_count: lifecycle?.check_count ?? null,
+    lifecycle_consecutive_valid_days: lifecycle?.consecutive_valid_days ?? null,
+    lifecycle_valid_check_count: lifecycle?.valid_check_count ?? null,
+    lifecycle_flip_count: lifecycle?.flip_count ?? null,
+    high_trigger_risk_review: needsHighTriggerRiskReview ? 1 : 0,
+    should_auto_advance_to_plan_ready: recommendation === 'auto_advance_to_plan_ready' ? 1 : 0
+  };
+}
+
+function buildObservationQueueSummary(items: Array<{ observation_queue_bucket?: string; should_auto_advance_to_plan_ready?: number }>) {
+  const summary: Record<string, number> = {
+    plan_ready: 0,
+    ready_to_plan: 0,
+    risk_priority_recheck: 0,
+    lifecycle_recheck: 0,
+    risk_hold: 0,
+    wait_pullback: 0,
+    waiting_trigger: 0,
+    resolved: 0,
+    should_auto_advance: 0
+  };
+  items.forEach((item) => {
+    const bucket = item.observation_queue_bucket || 'waiting_trigger';
+    summary[bucket] = Number(summary[bucket] || 0) + 1;
+    if (item.should_auto_advance_to_plan_ready) {
+      summary.should_auto_advance += 1;
+    }
+  });
+  return summary;
+}
+
+function getObservationQueueSortRank(item: any) {
+  switch (item.observation_queue_bucket) {
+    case 'ready_to_plan':
+    case 'plan_ready':
+      return 0;
+    case 'risk_priority_recheck':
+      return 1;
+    case 'lifecycle_recheck':
+      return 2;
+    case 'risk_hold':
+      return 3;
+    case 'wait_pullback':
+      return 4;
+    case 'waiting_trigger':
+      return 5;
+    default:
+      return 9;
+  }
+}
+
+function compareObservationQueueItems(a: any, b: any) {
+  const bucketDiff = getObservationQueueSortRank(a) - getObservationQueueSortRank(b);
+  if (bucketDiff !== 0) return bucketDiff;
+  const triggerDiff = Number(b.trigger_score || 0) - Number(a.trigger_score || 0);
+  if (triggerDiff !== 0) return triggerDiff;
+  const structureDiff = Number(b.structure_score || 0) - Number(a.structure_score || 0);
+  if (structureDiff !== 0) return structureDiff;
+  const aLoss = typeof a.max_loss_percent === 'number' ? a.max_loss_percent : 9;
+  const bLoss = typeof b.max_loss_percent === 'number' ? b.max_loss_percent : 9;
+  if (aLoss !== bLoss) return aLoss - bLoss;
+  const flipDiff = Number(b.lifecycle_flip_count || 0) - Number(a.lifecycle_flip_count || 0);
+  if (flipDiff !== 0) return flipDiff;
+  return new Date(b.updated_at || b.created_at || 0).getTime() - new Date(a.updated_at || a.created_at || 0).getTime();
 }
 
 function classifyOpportunityType(input: {
@@ -1159,8 +1522,8 @@ async function fetchAndUpdateData(db: any, symbol: string, assetType: string, so
   const lastUpdateResult = await db.get(
     `SELECT MAX(updated_at) as last_updated, MAX(trade_date) as last_trade_date
      FROM financial_daily_prices 
-     WHERE symbol = ? AND source = ?`,
-    [symbol, source]
+     WHERE symbol = ? AND asset_type = ? AND source = ?`,
+    [symbol, assetType, source]
   );
 
   if (!forceUpdate && lastUpdateResult.last_updated) {
@@ -1416,6 +1779,191 @@ router.get('/daily-prices', async (req: Request, res: Response) => {
   }
 });
 
+function getCandidateReviewStatusLabel(status?: string | null) {
+  switch (status) {
+    case 'wait_confirmation': return '等待入场触发';
+    case 'trend_blocked': return '退回走势阶段';
+    case 'structure_watch': return '单标的观察';
+    case 'rejected': return '已淘汰';
+    default: return status || '未同步';
+  }
+}
+
+function resolveManualStructureCandidateDecision(input: {
+  finalStatus: string;
+  finalReason: string;
+  trendAction?: string | null;
+  structureStatus?: string | null;
+}) {
+  if (input.finalStatus === 'READY_FOR_PLAN') {
+    return {
+      review_status: 'wait_confirmation',
+      pool_status: 'active',
+      final_status: 'WAIT',
+      review_action: 'manual_structure_passed_to_entry',
+      reason: input.finalReason || '手工单标的判断通过，已推进入场触发。'
+    };
+  }
+  if (input.trendAction === 'BLOCK') {
+    return {
+      review_status: 'trend_blocked',
+      pool_status: 'active',
+      final_status: 'WAIT',
+      review_action: 'manual_structure_back_to_trend',
+      reason: input.finalReason || '手工单标的判断显示走势阶段未通过，退回走势阶段。'
+    };
+  }
+  if (input.structureStatus === 'STRUCTURE_BROKEN') {
+    return {
+      review_status: 'rejected',
+      pool_status: 'expired',
+      final_status: 'REJECTED',
+      review_action: 'manual_structure_hard_rejected',
+      reason: input.finalReason || '手工单标的判断显示结构破坏，已从活跃候选中淘汰。'
+    };
+  }
+  return {
+    review_status: 'structure_watch',
+    pool_status: 'active',
+    final_status: 'WAIT',
+    review_action: 'manual_structure_watch',
+    reason: input.finalReason || '手工单标的判断未通过，继续结构观察。'
+  };
+}
+
+async function syncManualStructureCheckCandidate(
+  db: any,
+  input: {
+    candidateId?: number;
+    symbol: string;
+    assetType: string;
+    source: string;
+    name: string;
+    planProfile: { key: string; label: string };
+    result: any;
+    structureScore: any;
+    trendPhase: any;
+    marketRegime: string;
+    entryPermission: string;
+    finalStatus: string;
+    finalReason: string;
+    trendAction: string;
+  }
+) {
+  const candidate = input.candidateId && input.candidateId > 0
+    ? await db.get(
+      `SELECT id, review_status, pool_status
+       FROM financial_candidate_pool
+       WHERE id = ?
+         AND symbol = ?
+         AND asset_type = ?
+         AND source = ?
+         AND rule_version = ?
+       LIMIT 1`,
+      [input.candidateId, input.symbol, input.assetType, input.source, CANDIDATE_RULE_VERSION]
+    )
+    : await db.get(
+      `SELECT id, review_status, pool_status
+       FROM financial_candidate_pool
+       WHERE symbol = ?
+         AND asset_type = ?
+         AND source = ?
+         AND rule_version = ?
+         AND pool_status = 'active'
+       ORDER BY updated_at DESC, id DESC
+       LIMIT 1`,
+      [input.symbol, input.assetType, input.source, CANDIDATE_RULE_VERSION]
+    );
+
+  if (!candidate || String(candidate.pool_status || '') !== 'active') {
+    return { synced: false, reason: '未找到可同步的候选池记录。' };
+  }
+
+  const decision = resolveManualStructureCandidateDecision({
+    finalStatus: input.finalStatus,
+    finalReason: input.finalReason,
+    trendAction: input.trendAction,
+    structureStatus: input.result.structure_status
+  });
+  const now = new Date().toISOString();
+  await db.run(
+    `UPDATE financial_candidate_pool
+     SET name = COALESCE(NULLIF(?, ''), name),
+         trade_date = COALESCE(?, trade_date),
+         close = COALESCE(?, close),
+         ma20 = COALESCE(?, ma20),
+         ma60 = COALESCE(?, ma60),
+         ma120 = COALESCE(?, ma120),
+         distance_to_ma60 = COALESCE(?, distance_to_ma60),
+         above_ma60_days = COALESCE(?, above_ma60_days),
+         structure_status = COALESCE(?, structure_status),
+         structure_reason = COALESCE(?, structure_reason),
+         safe_zone_status = COALESCE(?, safe_zone_status),
+         safe_zone_reason = COALESCE(?, safe_zone_reason),
+         trend_phase_code = COALESCE(?, trend_phase_code),
+         trend_phase_reason = COALESCE(?, trend_phase_reason),
+         market_regime = ?,
+         entry_permission = ?,
+         plan_profile = ?,
+         plan_profile_label = ?,
+         final_status = ?,
+         pool_status = ?,
+         invalidation_line = COALESCE(?, invalidation_line),
+         candidate_reason = ?,
+         forbidden_reason = ?,
+         review_status = ?,
+         last_checked_at = ?,
+         last_review_at = ?,
+         review_action = ?,
+         updated_at = ?
+     WHERE id = ?
+       AND rule_version = ?`,
+    [
+      input.name,
+      input.result.trade_date || null,
+      input.result.close ?? null,
+      input.result.ma20 ?? null,
+      input.result.ma60 ?? null,
+      input.result.ma120 ?? null,
+      input.result.distance_to_ma60 ?? null,
+      input.result.above_ma60_days ?? null,
+      input.result.structure_status || null,
+      input.result.structure_reason || null,
+      input.result.safe_zone_status || null,
+      input.result.safe_zone_reason || null,
+      input.trendPhase?.trend_phase_code || null,
+      input.trendPhase?.trend_phase_reason || null,
+      input.marketRegime,
+      input.entryPermission,
+      input.planProfile.key,
+      input.planProfile.label,
+      decision.final_status,
+      decision.pool_status,
+      input.result.invalidation_line ?? null,
+      decision.reason,
+      decision.review_status === 'rejected' ? decision.reason : null,
+      decision.review_status,
+      now,
+      now,
+      decision.review_action,
+      now,
+      candidate.id,
+      CANDIDATE_RULE_VERSION
+    ]
+  );
+
+  return {
+    synced: true,
+    candidate_id: candidate.id,
+    previous_review_status: candidate.review_status || null,
+    review_status: decision.review_status,
+    review_status_label: getCandidateReviewStatusLabel(decision.review_status),
+    pool_status: decision.pool_status,
+    review_action: decision.review_action,
+    reason: decision.reason
+  };
+}
+
 router.post('/structure-check', async (req: Request, res: Response) => {
   try {
     const db = await getDb();
@@ -1459,13 +2007,7 @@ router.post('/structure-check', async (req: Request, res: Response) => {
       });
     }
 
-    const marketRegimeResult = await db.get(
-      `SELECT market_regime, entry_permission 
-       FROM financial_market_regime 
-       WHERE symbol = '000300' 
-       ORDER BY trade_date DESC LIMIT 1`
-    );
-
+    const marketRegimeResult = await getFreshMarketRegime(db, { source });
     const marketRegime = marketRegimeResult?.market_regime || 'UNKNOWN';
     const entryPermission = marketRegimeResult?.entry_permission || 'OBSERVE_ONLY';
     const nameResult = await db.get(
@@ -1515,9 +2057,11 @@ router.post('/structure-check', async (req: Request, res: Response) => {
     let finalStatus: string;
     let finalReason: string;
 
-    if (entryPermission !== 'ALLOW_STRUCTURE_CHECK') {
-      finalStatus = 'BLOCKED_BY_MARKET';
-      finalReason = '大盘当前不允许进入结构判断，标的信号仅作观察。';
+	    if (entryPermission !== 'ALLOW_STRUCTURE_CHECK') {
+	      finalStatus = 'BLOCKED_BY_MARKET';
+	      finalReason = marketRegimeResult?.stale
+	        ? marketRegimeResult.freshness_reason
+	        : '大盘当前不允许进入结构判断，标的信号仅作观察。';
     } else if (trendAction.action === 'BLOCK') {
       finalStatus = 'WAIT';
       finalReason = trendAction.reason;
@@ -1544,6 +2088,27 @@ router.post('/structure-check', async (req: Request, res: Response) => {
     const status = await getDataStatus(db, symbol);
     const availableSources = status.sources.map((s: any) => s.source);
     const mlPrediction = await getModelPrediction(db, symbol, assetType, 'structure');
+    const candidateStateSync = isEntryMarketGateOpen(entryPermission)
+      ? await syncManualStructureCheckCandidate(db, {
+          candidateId: Number(req.body.candidate_id || req.body.candidateId || 0),
+          symbol,
+          assetType,
+          source,
+          name,
+          planProfile,
+          result,
+          structureScore,
+          trendPhase,
+          marketRegime,
+          entryPermission,
+          finalStatus,
+          finalReason,
+          trendAction: trendAction.action
+        })
+      : {
+          skipped: true,
+          reason: finalReason || '市场总闸未通过，本次只返回结构快照，不同步候选池状态。'
+        };
 
     res.json({
       success: true,
@@ -1555,19 +2120,24 @@ router.post('/structure-check', async (req: Request, res: Response) => {
         plan_profile_label: planProfile.label,
         plan_profile_note: planProfile.note,
         ...result,
-        structure_score: structureScore,
-        market_regime: marketRegime,
-        entry_permission: entryPermission,
-        trend_phase_code: trendPhase?.trend_phase_code || 'UNKNOWN',
+	        structure_score: structureScore,
+	        market_regime: marketRegime,
+	        entry_permission: entryPermission,
+	        market_regime_trade_date: marketRegimeResult?.trade_date || null,
+	        market_regime_target_trade_date: marketRegimeResult?.target_trade_date || null,
+	        market_regime_freshness_status: marketRegimeResult?.freshness_status || 'missing',
+	        market_regime_freshness_reason: marketRegimeResult?.freshness_reason || '暂无市场总闸记录，已按观察处理。',
+	        trend_phase_code: trendPhase?.trend_phase_code || 'UNKNOWN',
         trend_phase_reason: trendPhase?.trend_phase_reason || '暂无走势阶段数据，请先在走势阶段页执行重算。',
         trend_action: trendAction.action,
         trend_action_reason: trendAction.reason,
         opportunity_type: opportunityType,
         final_status: finalStatus,
-        final_reason: finalReason,
-        data_source_used: source,
-        available_sources: availableSources,
-        ml_prediction: mlPrediction
+	        final_reason: finalReason,
+	        data_source_used: source,
+	        available_sources: availableSources,
+	        ml_prediction: mlPrediction,
+	        candidate_state_sync: candidateStateSync
       }
     });
   } catch (error) {
@@ -1607,12 +2177,7 @@ async function buildEntryTriggerSnapshot(db: any, symbol: string, assetType: str
     };
   }
 
-  const marketRegimeResult = await db.get(
-      `SELECT market_regime, entry_permission
-       FROM financial_market_regime
-       WHERE symbol = '000300'
-       ORDER BY trade_date DESC LIMIT 1`
-  );
+  const marketRegimeResult = await getFreshMarketRegime(db, { source });
   const marketRegime = marketRegimeResult?.market_regime || 'UNKNOWN';
   const entryPermission = marketRegimeResult?.entry_permission || 'OBSERVE_ONLY';
   const nameResult = await db.get(
@@ -1662,17 +2227,27 @@ async function buildEntryTriggerSnapshot(db: any, symbol: string, assetType: str
     ma60_slope: structureScore.metrics.ma60_slope,
     amplitude_20: structureScore.metrics.amplitude_20
   });
-  const triggerPlan = calculateEntryTriggerPlan(
-    structure,
-    structureScore,
-    prices,
-    marketRegime,
+	  const triggerPlan = calculateEntryTriggerPlan(
+	    structure,
+	    structureScore,
+	    prices,
+	    marketRegime,
     entryPermission,
     trendPhase?.trend_phase_code || 'UNKNOWN',
-    trendAction.action,
-    planProfile.key
-  );
-  const mlPrediction = await getModelPrediction(db, symbol, assetType, 'entry_trigger');
+	    trendAction.action,
+	    planProfile.key
+	  );
+	  const effectiveTriggerPlan = marketRegimeResult?.stale
+	    ? {
+	        ...triggerPlan,
+	        trigger_reason: marketRegimeResult.freshness_reason,
+	        blocked_reasons: [
+	          marketRegimeResult.freshness_reason,
+	          ...(triggerPlan.blocked_reasons || []).filter((reason: string) => reason !== '市场权限未放行，当前只允许观察或等待修复。')
+	        ]
+	      }
+	    : triggerPlan;
+	  const mlPrediction = await getModelPrediction(db, symbol, assetType, 'entry_trigger');
 
   return {
     symbol,
@@ -1686,10 +2261,14 @@ async function buildEntryTriggerSnapshot(db: any, symbol: string, assetType: str
     close: structure.close,
     ma20: structure.ma20,
     ma60: structure.ma60,
-    invalidation_line: structure.invalidation_line,
-    market_regime: marketRegime,
-    entry_permission: entryPermission,
-    structure_status: structure.structure_status,
+	    invalidation_line: structure.invalidation_line,
+	    market_regime: marketRegime,
+	    entry_permission: entryPermission,
+	    market_regime_trade_date: marketRegimeResult?.trade_date || null,
+	    market_regime_target_trade_date: marketRegimeResult?.target_trade_date || null,
+	    market_regime_freshness_status: marketRegimeResult?.freshness_status || 'missing',
+	    market_regime_freshness_reason: marketRegimeResult?.freshness_reason || '暂无市场总闸记录，已按观察处理。',
+	    structure_status: structure.structure_status,
     safe_zone_status: structure.safe_zone_status,
     structure_score: structureScore,
     trend_phase_code: trendPhase?.trend_phase_code || 'UNKNOWN',
@@ -1697,11 +2276,11 @@ async function buildEntryTriggerSnapshot(db: any, symbol: string, assetType: str
     trend_action: trendAction.action,
     trend_action_reason: trendAction.reason,
     opportunity_type: opportunityType,
-    data_source_used: source,
-    ml_prediction: mlPrediction,
-    ...triggerPlan
-  };
-}
+	    data_source_used: source,
+	    ml_prediction: mlPrediction,
+	    ...effectiveTriggerPlan
+	  };
+	}
 
 router.post('/entry-trigger', async (req: Request, res: Response) => {
   try {
@@ -1715,6 +2294,18 @@ router.post('/entry-trigger', async (req: Request, res: Response) => {
       return res.status(400).json({
         success: false,
         message: 'Invalid symbol or asset_type'
+      });
+    }
+
+    const marketGateBlocker = await getEntryMarketGateBlocker(db, source);
+    if (marketGateBlocker) {
+      return res.status(423).json({
+        success: false,
+        message: marketGateBlocker.message,
+        data: {
+          market_gate: marketGateBlocker.marketGate,
+          downstream_blocked: true
+        }
       });
     }
 
@@ -1749,6 +2340,18 @@ router.post('/entry-trigger-observations', async (req: Request, res: Response) =
       });
     }
 
+    if (!isEntryMarketGateOpen(snapshot.entry_permission)) {
+      return res.status(423).json({
+        success: false,
+        message: `市场总闸未通过，禁止写入入场观察；本轮不修改观察队列：${snapshot.market_regime_freshness_reason || snapshot.trigger_reason || '市场总闸未开放单标的结构判断。'}`,
+        data: {
+          market_regime: snapshot.market_regime || null,
+          entry_permission: snapshot.entry_permission || null,
+          downstream_blocked: true
+        }
+      });
+    }
+
     const now = new Date().toISOString();
     const observationValues = {
       symbol: snapshot.symbol,
@@ -1756,7 +2359,7 @@ router.post('/entry-trigger-observations', async (req: Request, res: Response) =
       assetType: snapshot.asset_type,
       source: snapshot.data_source_used || req.body.source || 'tushare',
       tradeDate: snapshot.trade_date || null,
-      observationStatus: snapshot.action === 'READY_TO_PLAN' ? 'plan_candidate' : 'watching',
+      observationStatus: 'watching',
       entryAction: snapshot.action || '',
       actionLabel: snapshot.action_label || '',
       triggerScore: snapshot.trigger_score || 0,
@@ -1773,7 +2376,7 @@ router.post('/entry-trigger-observations', async (req: Request, res: Response) =
       note,
     };
 
-    const existing = await db.get(
+    let existing = await db.get(
       `SELECT id FROM financial_entry_trigger_observations
        WHERE symbol = ? AND asset_type = ? AND source = ? AND trade_date = ? AND entry_action = ?
        ORDER BY created_at DESC, id DESC
@@ -1786,13 +2389,29 @@ router.post('/entry-trigger-observations', async (req: Request, res: Response) =
         observationValues.entryAction
       ]
     );
+    if (!existing?.id) {
+      existing = await db.get(
+        `SELECT id FROM financial_entry_trigger_observations
+         WHERE symbol = ? AND asset_type = ? AND source = ?
+           AND observation_status IN ('watching', 'plan_candidate', 'confirmed')
+         ORDER BY updated_at DESC, id DESC
+         LIMIT 1`,
+        [
+          observationValues.symbol,
+          observationValues.assetType,
+          observationValues.source
+        ]
+      );
+    }
 
     let observationId = existing?.id;
     if (existing?.id) {
       await db.run(
         `UPDATE financial_entry_trigger_observations
          SET name = ?,
+             trade_date = ?,
              observation_status = ?,
+             entry_action = ?,
              action_label = ?,
              trigger_score = ?,
              trigger_reason = ?,
@@ -1810,7 +2429,9 @@ router.post('/entry-trigger-observations', async (req: Request, res: Response) =
          WHERE id = ?`,
         [
           observationValues.name,
+          observationValues.tradeDate,
           observationValues.observationStatus,
+          observationValues.entryAction,
           observationValues.actionLabel,
           observationValues.triggerScore,
           observationValues.triggerReason,
@@ -1869,6 +2490,17 @@ router.post('/entry-trigger-observations', async (req: Request, res: Response) =
       `SELECT * FROM financial_entry_trigger_observations WHERE id = ?`,
       [observationId]
     );
+    await recordSignalLifecycleCheck(db, {
+      symbol: observationValues.symbol,
+      name: observationValues.name,
+      assetType: observationValues.assetType,
+      source: observationValues.source,
+      observationId: observationId ? Number(observationId) : null,
+      observationStatus: observationValues.observationStatus,
+      candidateReviewStatus: null,
+      scanConclusion: existing?.id ? '入场观察更新' : '入场观察保存',
+      snapshot
+    });
 
     res.json({
       success: true,
@@ -1891,52 +2523,171 @@ router.get('/entry-trigger-observations', async (req: Request, res: Response) =>
     const symbol = String(req.query.symbol || '').trim();
     const assetType = String(req.query.asset_type || '').trim();
     const source = String(req.query.source || '').trim();
+    const keyword = String(req.query.q || '').trim();
     const requestedLimit = Math.min(Number(req.query.limit || 30), 100);
+    const offset = Math.max(Number(req.query.offset || 0), 0);
+    const rawObservationScope = String(req.query.observation_scope || '').trim();
+    const observationScope: EntryObservationScope | '' = ['actionable', 'risk_priority_recheck', 'watching', 'confirmed', 'invalidated', 'returned', 'resolved', 'all'].includes(rawObservationScope)
+      ? rawObservationScope as EntryObservationScope
+      : '';
 
-    const params: any[] = [];
-    let where = 'WHERE 1 = 1';
+    const baseParams: any[] = [];
+    let baseWhere = 'WHERE 1 = 1';
     if (symbol) {
-      where += ' AND symbol = ?';
-      params.push(symbol);
+      baseWhere += ' AND symbol = ?';
+      baseParams.push(symbol);
     }
     if (assetType) {
-      where += ' AND asset_type = ?';
-      params.push(assetType);
+      baseWhere += ' AND asset_type = ?';
+      baseParams.push(assetType);
     }
     if (source) {
-      where += ' AND source = ?';
-      params.push(source);
+      baseWhere += ' AND source = ?';
+      baseParams.push(source);
+    }
+    if (keyword) {
+      baseWhere += ` AND (symbol LIKE ? OR COALESCE(name, '') LIKE ?)`;
+      baseParams.push(`%${keyword}%`, `%${keyword}%`);
     }
     const observationStatus = String(req.query.observation_status || '').trim();
+    const activeScope = String(req.query.status_scope || '').trim() === 'active';
+    const scopedToCurrentQueue = Boolean(observationStatus) || activeScope || Boolean(observationScope);
+    const outerParams: any[] = [];
+    let outerWhere = 'WHERE o.rn = 1';
     if (observationStatus) {
-      where += ' AND observation_status = ?';
-      params.push(observationStatus);
-    } else if (String(req.query.status_scope || '').trim() === 'active') {
-      where += " AND observation_status IN ('watching', 'plan_candidate')";
+      if (observationStatus === 'confirmed') {
+        outerWhere += " AND o.observation_status IN ('confirmed', 'plan_candidate')";
+      } else {
+        outerWhere += ' AND o.observation_status = ?';
+        outerParams.push(observationStatus);
+      }
+    } else if (observationScope) {
+      if (observationScope === 'actionable') {
+        outerWhere += " AND o.observation_status IN ('watching', 'plan_candidate')";
+      } else if (observationScope === 'risk_priority_recheck') {
+        outerWhere += " AND o.observation_status IN ('watching', 'plan_candidate')";
+      } else if (observationScope === 'watching') {
+        outerWhere += " AND o.observation_status = 'watching'";
+      } else if (observationScope === 'confirmed') {
+        outerWhere += " AND o.observation_status IN ('confirmed', 'plan_candidate')";
+      } else if (observationScope === 'invalidated') {
+        outerWhere += " AND o.observation_status = 'invalidated'";
+      } else if (observationScope === 'returned') {
+        outerWhere += " AND o.observation_status = 'returned'";
+      } else if (observationScope === 'resolved') {
+        outerWhere += " AND o.observation_status IN ('confirmed', 'invalidated', 'planned', 'returned')";
+      }
+    } else if (activeScope) {
+      outerWhere += " AND o.observation_status IN ('watching', 'plan_candidate')";
     }
     const excludeExistingPlan = String(req.query.exclude_existing_plan || '').trim() === '1';
     if (excludeExistingPlan) {
-      where += ` AND NOT EXISTS (
+      outerWhere += ` AND NOT EXISTS (
         SELECT 1
         FROM financial_trade_plans p
-        WHERE p.symbol = financial_entry_trigger_observations.symbol
-          AND p.asset_type = financial_entry_trigger_observations.asset_type
-          AND p.source = financial_entry_trigger_observations.source
+        WHERE p.symbol = o.symbol
+          AND p.asset_type = o.asset_type
+          AND p.source = o.source
           AND p.is_deleted = 0
-          AND p.status IN ('draft', 'watching', 'active')
+	          AND p.status IN ('draft', 'watching', 'paper_tracking', 'active')
       )`;
     }
-    const queryLimit = observationStatus === 'confirmed' ? 100 : requestedLimit;
-    params.push(queryLimit);
-
-    let items = await db.all(
-      `SELECT *
-       FROM financial_entry_trigger_observations
-       ${where}
-       ORDER BY updated_at DESC, created_at DESC, id DESC
-      LIMIT ?`,
-      params
+    const shouldPageAfterHydration = observationStatus === 'confirmed'
+      || ['actionable', 'risk_priority_recheck', 'watching'].includes(observationScope);
+    let queryLimit = requestedLimit;
+    const queryOffset = shouldPageAfterHydration ? 0 : offset;
+    const rankedObservationSql = `
+      WITH ranked_observations AS (
+        SELECT
+          financial_entry_trigger_observations.*,
+          ROW_NUMBER() OVER (
+            PARTITION BY symbol, asset_type, source
+            ORDER BY updated_at DESC, id DESC
+          ) AS rn
+        FROM financial_entry_trigger_observations
+        ${baseWhere}
+      )
+    `;
+    const summaryRows = await db.all(
+      `${rankedObservationSql}
+       SELECT o.observation_status, COUNT(*) AS total
+       FROM ranked_observations o
+       WHERE o.rn = 1
+       GROUP BY o.observation_status`,
+      [...baseParams]
     );
+    const summary = {
+      actionable: 0,
+      watching: 0,
+      plan_candidate: 0,
+      confirmed: 0,
+      invalidated: 0,
+      planned: 0,
+      returned: 0,
+      resolved: 0,
+      all: 0
+    };
+    summaryRows.forEach((row: any) => {
+      const statusKey = String(row.observation_status || '');
+      const total = Number(row.total || 0);
+      if (statusKey in summary) {
+        summary[statusKey as keyof typeof summary] += total;
+      }
+      if (statusKey === 'watching' || statusKey === 'plan_candidate') summary.actionable += total;
+      if (['confirmed', 'invalidated', 'planned', 'returned'].includes(statusKey)) summary.resolved += total;
+      summary.all += total;
+    });
+    const activeQueueRows = await db.all(
+      `${rankedObservationSql}
+       SELECT *
+       FROM ranked_observations o
+       WHERE o.rn = 1
+         AND o.observation_status IN ('watching', 'plan_candidate', 'confirmed')`,
+      [...baseParams]
+    );
+    const activeLifecycleMap = await loadLatestSignalLifecycleMap(db, activeQueueRows);
+    const queueSummary = buildObservationQueueSummary(activeQueueRows.map((row: any) => {
+      const snapshot = parseJson(row.snapshot_json, null);
+      const lifecycle = activeLifecycleMap.get(entryObservationKey(row));
+      return buildEntryObservationQueueInfo(row, snapshot, lifecycle);
+    }));
+    const totalRow = scopedToCurrentQueue || excludeExistingPlan
+      ? await db.get(
+          `${rankedObservationSql}
+           SELECT COUNT(*) as total
+           FROM ranked_observations o
+           ${outerWhere}`,
+          [...baseParams, ...outerParams]
+        )
+      : await db.get(
+          `SELECT COUNT(*) as total
+           FROM financial_entry_trigger_observations
+           ${baseWhere}`,
+          [...baseParams]
+        );
+
+    if (shouldPageAfterHydration) {
+      queryLimit = Math.max(Number(totalRow?.total || 0), requestedLimit);
+    }
+
+    let items = scopedToCurrentQueue || excludeExistingPlan
+      ? await db.all(
+          `${rankedObservationSql}
+           SELECT *
+           FROM ranked_observations o
+           ${outerWhere}
+           ORDER BY updated_at DESC, created_at DESC, id DESC
+           LIMIT ? OFFSET ?`,
+          [...baseParams, ...outerParams, queryLimit, queryOffset]
+        )
+      : await db.all(
+          `SELECT *
+           FROM financial_entry_trigger_observations
+           ${baseWhere}
+           ORDER BY updated_at DESC, created_at DESC, id DESC
+           LIMIT ? OFFSET ?`,
+          [...baseParams, requestedLimit, offset]
+        );
     for (const item of items) {
       const existingPlan = await db.get(
         `SELECT id, plan_name, status, total_capital, updated_at
@@ -1945,7 +2696,7 @@ router.get('/entry-trigger-observations', async (req: Request, res: Response) =>
            AND asset_type = ?
            AND source = ?
            AND is_deleted = 0
-           AND status IN ('draft', 'watching', 'active')
+	           AND status IN ('draft', 'watching', 'paper_tracking', 'active')
          ORDER BY updated_at DESC, id DESC
          LIMIT 1`,
         [item.symbol, item.asset_type, item.source]
@@ -1953,8 +2704,11 @@ router.get('/entry-trigger-observations', async (req: Request, res: Response) =>
       item.has_existing_plan = existingPlan ? 1 : 0;
       item.existing_plan = existingPlan || null;
     }
+    const lifecycleByKey = await loadLatestSignalLifecycleMap(db, items);
     items = await Promise.all(items.map(async (item: any) => {
       const snapshot = parseJson(item.snapshot_json, null);
+      const { snapshot_json: _snapshotJson, ...itemWithoutRawSnapshot } = item;
+      const queueInfo = buildEntryObservationQueueInfo(item, snapshot, lifecycleByKey.get(entryObservationKey(item)));
       const close = Number(item.close_price);
       const invalidation = Number(item.invalidation_line);
       const ma60 = Number(item.ma60);
@@ -1981,7 +2735,8 @@ router.get('/entry-trigger-observations', async (req: Request, res: Response) =>
       const planQuality = planValueMetrics.plan_quality;
       const planProfileKey = snapshot?.plan_profile || snapshot?.plan_draft?.plan_profile || item.plan_profile;
       return {
-        ...item,
+        ...itemWithoutRawSnapshot,
+        ...queueInfo,
         opportunity_type: opportunityType,
         max_loss_percent: maxLossPercent,
         target_price: planValueMetrics.target_price,
@@ -2011,7 +2766,17 @@ router.get('/entry-trigger-observations', async (req: Request, res: Response) =>
         trend_priority_rank: getEntryTrendPriority(item.trend_phase_code)
       };
     }));
-    if (observationStatus === 'confirmed') {
+    let responseTotal = Number(totalRow?.total || 0);
+    if (observationScope === 'risk_priority_recheck') {
+      items = items
+        .filter((item: any) => item.observation_queue_bucket === 'risk_priority_recheck')
+        .sort(compareObservationQueueItems);
+      responseTotal = items.length;
+      items = items.slice(offset, offset + requestedLimit);
+    } else if (['actionable', 'watching'].includes(observationScope)) {
+      items = items.sort(compareObservationQueueItems);
+      items = items.slice(offset, offset + requestedLimit);
+    } else if (observationStatus === 'confirmed') {
       items.sort((a: any, b: any) => {
         if (Number(b.plan_quality_score || 0) !== Number(a.plan_quality_score || 0)) {
           return Number(b.plan_quality_score || 0) - Number(a.plan_quality_score || 0);
@@ -2040,12 +2805,30 @@ router.get('/entry-trigger-observations', async (req: Request, res: Response) =>
         seen.add(key);
         return true;
       });
-      items = items.slice(0, requestedLimit);
+      items = items.slice(offset, offset + requestedLimit);
     }
 
     res.json({
       success: true,
-      data: { items }
+      data: {
+        items,
+        total: responseTotal,
+        limit: requestedLimit,
+        offset,
+        observation_scope: observationScope || (activeScope ? 'actionable' : 'raw'),
+        summary: {
+          ...summary,
+          queue_plan_ready: queueSummary.plan_ready,
+          queue_ready_to_plan: queueSummary.ready_to_plan,
+          queue_risk_priority_recheck: queueSummary.risk_priority_recheck,
+          queue_lifecycle_recheck: queueSummary.lifecycle_recheck,
+          queue_risk_hold: queueSummary.risk_hold,
+          queue_wait_pullback: queueSummary.wait_pullback,
+          queue_waiting_trigger: queueSummary.waiting_trigger,
+          queue_should_auto_advance: queueSummary.should_auto_advance
+        },
+        queue_summary: queueSummary
+      }
     });
   } catch (error) {
     res.status(500).json({
@@ -2064,6 +2847,22 @@ router.post('/entry-trigger-observations/secondary-scan', async (req: Request, r
     const symbolFilter = String(req.body.symbol || '').trim();
     const assetTypeFilter = String(req.body.asset_type || '').trim();
     const sourceFilter = String(req.body.source || '').trim();
+    const marketGateBlocker = await getEntryMarketGateBlocker(db, sourceFilter || 'tushare');
+    if (marketGateBlocker) {
+      return res.status(423).json({
+        success: false,
+        message: marketGateBlocker.message,
+        data: {
+          market_gate: marketGateBlocker.marketGate,
+          downstream_blocked: true,
+          checked_count: 0,
+          upgraded_count: 0,
+          invalidated_count: 0,
+          returned_count: 0,
+          results: []
+        }
+      });
+    }
     const targetFilters: string[] = [];
     const targetParams: any[] = [];
     if (symbolFilter) {
@@ -2102,14 +2901,17 @@ router.post('/entry-trigger-observations/secondary-scan', async (req: Request, r
 
     const targets = new Map<string, any>();
     observationRows.forEach((row: any) => {
-      targets.set(`${row.symbol}|${row.asset_type}|${row.source}`, {
+      const key = `${row.symbol}|${row.asset_type}|${row.source}`;
+      const target = targets.get(key) || {
         symbol: row.symbol,
         name: row.name,
         asset_type: row.asset_type,
         source: row.source,
-        observation_ids: [row.id],
+        observation_ids: [],
         candidate_ids: []
-      });
+      };
+      target.observation_ids.push(row.id);
+      targets.set(key, target);
     });
     candidateRows.forEach((row: any) => {
       const key = `${row.symbol}|${row.asset_type}|${row.source}`;
@@ -2129,23 +2931,68 @@ router.post('/entry-trigger-observations/secondary-scan', async (req: Request, r
     for (const target of Array.from(targets.values()).slice(0, limit)) {
       const snapshot = await buildEntryTriggerSnapshot(db, target.symbol, target.asset_type, target.source);
       const trendUnknown = !snapshot.trend_phase_code || snapshot.trend_phase_code === 'UNKNOWN';
-      const invalidated =
-        snapshot.action === 'BLOCKED' ||
-        snapshot.action === 'INVALIDATED' ||
-        snapshot.structure_status === 'STRUCTURE_BROKEN' ||
-        (snapshot.close && snapshot.invalidation_line && snapshot.close < snapshot.invalidation_line);
-      const canUpgrade = snapshot.action === 'READY_TO_PLAN' && !trendUnknown && !invalidated;
-      const candidateDecision = resolveCandidateStatusAfterEntryScan(snapshot, invalidated, canUpgrade);
+      const invalidated = isEntrySnapshotInvalidated(snapshot);
+      const rawCanUpgrade = snapshot.action === 'READY_TO_PLAN' && !trendUnknown && !invalidated;
+      const rawCandidateDecision = resolveCandidateStatusAfterEntryScan(snapshot, invalidated, rawCanUpgrade);
+      const rawReturnedToUpstream = rawCandidateDecision.reviewStatus === 'trend_blocked' || rawCandidateDecision.reviewStatus === 'structure_watch';
+      const provisionalStatus = invalidated ? 'invalidated' : rawReturnedToUpstream ? 'returned' : 'watching';
+      const observationIds = [...target.observation_ids];
+      if (observationIds.length === 0) {
+        const existingRows = await db.all(
+          `SELECT id
+           FROM financial_entry_trigger_observations
+           WHERE symbol = ?
+             AND asset_type = ?
+             AND source = ?
+             AND observation_status IN ('watching', 'plan_candidate', 'confirmed')
+           ORDER BY updated_at DESC, id DESC`,
+          [target.symbol, target.asset_type, target.source]
+        );
+        observationIds.push(...existingRows.map((row: any) => Number(row.id)));
+      }
+      const lifecycle = await recordSignalLifecycleCheck(db, {
+        symbol: target.symbol,
+        name: snapshot.name || target.name,
+        assetType: target.asset_type,
+        source: target.source,
+        observationId: observationIds[0] ? Number(observationIds[0]) : null,
+        observationStatus: provisionalStatus,
+        candidateReviewStatus: rawCandidateDecision.reviewStatus,
+        scanConclusion: rawCandidateDecision.conclusion,
+        snapshot
+      });
+      const canUpgrade = rawCanUpgrade && signalLifecycleAllowsPlan(lifecycle);
+      const candidateDecision = applySignalLifecycleGate(
+        resolveCandidateStatusAfterEntryScan(snapshot, invalidated, canUpgrade),
+        lifecycle,
+        rawCanUpgrade,
+        invalidated
+      );
       const returnedToUpstream = candidateDecision.reviewStatus === 'trend_blocked' || candidateDecision.reviewStatus === 'structure_watch';
       const status = invalidated ? 'invalidated' : canUpgrade ? 'confirmed' : returnedToUpstream ? 'returned' : 'watching';
       const candidateReviewStatus = candidateDecision.reviewStatus;
       const scanConclusion = candidateDecision.conclusion;
-      const observationIds = [...target.observation_ids];
+      const lifecycleHoldingReady = rawCanUpgrade && !canUpgrade && !invalidated && status === 'watching';
+      const observationAction = status === 'returned'
+        ? 'OBSERVE'
+        : status === 'invalidated'
+          ? (snapshot.action === 'BLOCKED' ? 'BLOCKED' : 'INVALIDATED')
+          : lifecycleHoldingReady
+            ? 'OBSERVE'
+          : (snapshot.action || '');
+      const observationActionLabel = status === 'returned'
+        ? '退回单标的判断'
+        : status === 'invalidated'
+          ? '失效/阻断'
+          : lifecycleHoldingReady
+            ? '生命周期观察'
+          : (snapshot.action_label || '');
 
       if (observationIds.length > 0) {
         await db.run(
           `UPDATE financial_entry_trigger_observations
            SET observation_status = ?,
+               trade_date = ?,
                entry_action = ?,
                action_label = ?,
                trigger_score = ?,
@@ -2161,11 +3008,12 @@ router.post('/entry-trigger-observations/secondary-scan', async (req: Request, r
                snapshot_json = ?,
                note = ?,
                updated_at = ?
-           WHERE id IN (${target.observation_ids.map(() => '?').join(',')})`,
+           WHERE id IN (${observationIds.map(() => '?').join(',')})`,
           [
             status,
-            snapshot.action || '',
-            snapshot.action_label || '',
+            snapshot.trade_date || null,
+            observationAction,
+            observationActionLabel,
             snapshot.trigger_score || 0,
             snapshot.trigger_reason || '',
             snapshot.structure_score?.score || null,
@@ -2197,9 +3045,9 @@ router.post('/entry-trigger-observations/secondary-scan', async (req: Request, r
             target.asset_type,
             snapshot.data_source_used || target.source,
             snapshot.trade_date || null,
-            'confirmed',
-            snapshot.action || '',
-            snapshot.action_label || '',
+            status,
+            observationAction,
+            observationActionLabel,
             snapshot.trigger_score || 0,
             snapshot.trigger_reason || '',
             snapshot.structure_score?.score || null,
@@ -2221,23 +3069,41 @@ router.post('/entry-trigger-observations/secondary-scan', async (req: Request, r
 
       if (target.candidate_ids.length > 0) {
         await db.run(
-          `UPDATE financial_candidate_pool
-           SET review_status = ?,
-               pool_status = ?,
-               final_status = ?,
-               last_checked_at = ?,
-               last_review_at = ?,
+	          `UPDATE financial_candidate_pool
+	           SET review_status = ?,
+	               pool_status = ?,
+	               final_status = ?,
+	               trade_date = COALESCE(?, trade_date),
+	               close = COALESCE(?, close),
+	               ma20 = COALESCE(?, ma20),
+	               ma60 = COALESCE(?, ma60),
+	               invalidation_line = COALESCE(?, invalidation_line),
+	               trend_phase_code = COALESCE(NULLIF(?, ''), trend_phase_code),
+	               trend_phase_reason = COALESCE(NULLIF(?, ''), trend_phase_reason),
+	               market_regime = COALESCE(NULLIF(?, ''), market_regime),
+	               entry_permission = COALESCE(NULLIF(?, ''), entry_permission),
+	               last_checked_at = ?,
+	               last_review_at = ?,
                review_action = ?,
                candidate_reason = ?,
                forbidden_reason = CASE WHEN ? = 1 THEN ? ELSE forbidden_reason END,
                updated_at = ?
            WHERE id IN (${target.candidate_ids.map(() => '?').join(',')})`,
           [
-            candidateReviewStatus,
-            candidateDecision.poolStatus,
-            candidateDecision.finalStatus,
-            now,
-            now,
+	            candidateReviewStatus,
+	            candidateDecision.poolStatus,
+	            candidateDecision.finalStatus,
+	            snapshot.trade_date || null,
+	            snapshot.close || null,
+	            snapshot.ma20 || null,
+	            snapshot.ma60 || null,
+	            snapshot.invalidation_line || null,
+	            snapshot.trend_phase_code || '',
+	            snapshot.trend_phase_reason || '',
+	            snapshot.market_regime || '',
+	            snapshot.entry_permission || '',
+	            now,
+	            now,
             candidateDecision.reviewAction,
             snapshot.trigger_reason || scanConclusion,
             invalidated ? 1 : 0,
@@ -2247,6 +3113,18 @@ router.post('/entry-trigger-observations/secondary-scan', async (req: Request, r
           ]
         );
       }
+
+      await recordSignalLifecycleCheck(db, {
+        symbol: target.symbol,
+        name: snapshot.name || target.name,
+        assetType: target.asset_type,
+        source: target.source,
+        observationId: observationIds[0] ? Number(observationIds[0]) : null,
+        observationStatus: status,
+        candidateReviewStatus,
+        scanConclusion,
+        snapshot
+      });
 
       results.push({
         symbol: target.symbol,
@@ -2271,7 +3149,7 @@ router.post('/entry-trigger-observations/secondary-scan', async (req: Request, r
     const summary = {
       checked: results.length,
       upgraded: results.filter(item => item.conclusion === '可升级计划准备').length,
-      waiting: results.filter(item => item.conclusion === '继续等待').length,
+      waiting: results.filter(item => ['继续等待', '复核中继续观察'].includes(item.conclusion) || String(item.conclusion || '').endsWith('仅观察')).length,
       returned: results.filter(item => String(item.conclusion || '').startsWith('退回')).length,
       invalidated: results.filter(item => item.conclusion === '失效淘汰').length
     };
@@ -2307,23 +3185,66 @@ router.post('/entry-trigger-observations/:id/secondary-scan', async (req: Reques
     }
 
     const now = new Date().toISOString();
+    const marketGateBlocker = await getEntryMarketGateBlocker(db, observation.source || 'tushare');
+    if (marketGateBlocker) {
+      return res.status(423).json({
+        success: false,
+        message: marketGateBlocker.message,
+        data: {
+          market_gate: marketGateBlocker.marketGate,
+          downstream_blocked: true
+        }
+      });
+    }
     const snapshot = await buildEntryTriggerSnapshot(db, observation.symbol, observation.asset_type, observation.source);
     const trendUnknown = !snapshot.trend_phase_code || snapshot.trend_phase_code === 'UNKNOWN';
-    const invalidated =
-      snapshot.action === 'BLOCKED' ||
-      snapshot.action === 'INVALIDATED' ||
-      snapshot.structure_status === 'STRUCTURE_BROKEN' ||
-      (snapshot.close && snapshot.invalidation_line && snapshot.close < snapshot.invalidation_line);
-    const canUpgrade = snapshot.action === 'READY_TO_PLAN' && !trendUnknown && !invalidated;
-    const candidateDecision = resolveCandidateStatusAfterEntryScan(snapshot, invalidated, canUpgrade);
+    const invalidated = isEntrySnapshotInvalidated(snapshot);
+    const rawCanUpgrade = snapshot.action === 'READY_TO_PLAN' && !trendUnknown && !invalidated;
+    const rawCandidateDecision = resolveCandidateStatusAfterEntryScan(snapshot, invalidated, rawCanUpgrade);
+    const rawReturnedToUpstream = rawCandidateDecision.reviewStatus === 'trend_blocked' || rawCandidateDecision.reviewStatus === 'structure_watch';
+    const provisionalStatus = invalidated ? 'invalidated' : rawReturnedToUpstream ? 'returned' : 'watching';
+    const lifecycle = await recordSignalLifecycleCheck(db, {
+      symbol: observation.symbol,
+      name: snapshot.name || observation.name,
+      assetType: observation.asset_type,
+      source: observation.source,
+      observationId: id,
+      observationStatus: provisionalStatus,
+      candidateReviewStatus: rawCandidateDecision.reviewStatus,
+      scanConclusion: rawCandidateDecision.conclusion,
+      snapshot
+    });
+    const canUpgrade = rawCanUpgrade && signalLifecycleAllowsPlan(lifecycle);
+    const candidateDecision = applySignalLifecycleGate(
+      resolveCandidateStatusAfterEntryScan(snapshot, invalidated, canUpgrade),
+      lifecycle,
+      rawCanUpgrade,
+      invalidated
+    );
     const returnedToUpstream = candidateDecision.reviewStatus === 'trend_blocked' || candidateDecision.reviewStatus === 'structure_watch';
     const status = invalidated ? 'invalidated' : canUpgrade ? 'confirmed' : returnedToUpstream ? 'returned' : 'watching';
     const candidateReviewStatus = candidateDecision.reviewStatus;
     const conclusion = candidateDecision.conclusion;
+    const lifecycleHoldingReady = rawCanUpgrade && !canUpgrade && !invalidated && status === 'watching';
+    const observationAction = status === 'returned'
+      ? 'OBSERVE'
+      : status === 'invalidated'
+        ? (snapshot.action === 'BLOCKED' ? 'BLOCKED' : 'INVALIDATED')
+        : lifecycleHoldingReady
+          ? 'OBSERVE'
+        : (snapshot.action || '');
+    const observationActionLabel = status === 'returned'
+      ? '退回单标的判断'
+      : status === 'invalidated'
+        ? '失效/阻断'
+        : lifecycleHoldingReady
+          ? '生命周期观察'
+        : (snapshot.action_label || '');
 
     await db.run(
       `UPDATE financial_entry_trigger_observations
        SET observation_status = ?,
+           trade_date = ?,
            entry_action = ?,
            action_label = ?,
            trigger_score = ?,
@@ -2342,8 +3263,9 @@ router.post('/entry-trigger-observations/:id/secondary-scan', async (req: Reques
        WHERE id = ?`,
       [
         status,
-        snapshot.action || '',
-        snapshot.action_label || '',
+        snapshot.trade_date || null,
+        observationAction,
+        observationActionLabel,
         snapshot.trigger_score || 0,
         snapshot.trigger_reason || '',
         snapshot.structure_score?.score || null,
@@ -2362,12 +3284,21 @@ router.post('/entry-trigger-observations/:id/secondary-scan', async (req: Reques
     );
 
     await db.run(
-      `UPDATE financial_candidate_pool
-       SET review_status = ?,
-           pool_status = ?,
-           final_status = ?,
-           last_checked_at = ?,
-           last_review_at = ?,
+	      `UPDATE financial_candidate_pool
+	       SET review_status = ?,
+	           pool_status = ?,
+	           final_status = ?,
+	           trade_date = COALESCE(?, trade_date),
+	           close = COALESCE(?, close),
+	           ma20 = COALESCE(?, ma20),
+	           ma60 = COALESCE(?, ma60),
+	           invalidation_line = COALESCE(?, invalidation_line),
+	           trend_phase_code = COALESCE(NULLIF(?, ''), trend_phase_code),
+	           trend_phase_reason = COALESCE(NULLIF(?, ''), trend_phase_reason),
+	           market_regime = COALESCE(NULLIF(?, ''), market_regime),
+	           entry_permission = COALESCE(NULLIF(?, ''), entry_permission),
+	           last_checked_at = ?,
+	           last_review_at = ?,
            review_action = ?,
            candidate_reason = ?,
            forbidden_reason = CASE WHEN ? = 1 THEN ? ELSE forbidden_reason END,
@@ -2378,11 +3309,20 @@ router.post('/entry-trigger-observations/:id/secondary-scan', async (req: Reques
          AND pool_status = 'active'
          AND review_status IN ('wait_confirmation', 'plan_ready', 'unreviewed', 'structure_ready', 'structure_watch')`,
       [
-        candidateReviewStatus,
-        candidateDecision.poolStatus,
-        candidateDecision.finalStatus,
-        now,
-        now,
+	        candidateReviewStatus,
+	        candidateDecision.poolStatus,
+	        candidateDecision.finalStatus,
+	        snapshot.trade_date || null,
+	        snapshot.close || null,
+	        snapshot.ma20 || null,
+	        snapshot.ma60 || null,
+	        snapshot.invalidation_line || null,
+	        snapshot.trend_phase_code || '',
+	        snapshot.trend_phase_reason || '',
+	        snapshot.market_regime || '',
+	        snapshot.entry_permission || '',
+	        now,
+	        now,
         candidateDecision.reviewAction,
         snapshot.trigger_reason || conclusion,
         invalidated ? 1 : 0,
@@ -2393,6 +3333,18 @@ router.post('/entry-trigger-observations/:id/secondary-scan', async (req: Reques
         observation.source
       ]
     );
+
+    await recordSignalLifecycleCheck(db, {
+      symbol: observation.symbol,
+      name: snapshot.name || observation.name,
+      assetType: observation.asset_type,
+      source: observation.source,
+      observationId: id,
+      observationStatus: status,
+      candidateReviewStatus,
+      scanConclusion: conclusion,
+      snapshot
+    });
 
     const saved = await db.get(
       `SELECT * FROM financial_entry_trigger_observations WHERE id = ?`,
@@ -2412,6 +3364,138 @@ router.post('/entry-trigger-observations/:id/secondary-scan', async (req: Reques
     res.status(500).json({
       success: false,
       message: `单条二次确认失败: ${(error as Error).message}`
+    });
+  }
+});
+
+router.post('/entry-trigger-observations/:id/manual-review', async (req: Request, res: Response) => {
+  try {
+    const db = await getDb();
+    await ensureEntryTriggerObservationSchema(db);
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) {
+      return res.status(400).json({ success: false, message: '无效的观察记录ID' });
+    }
+
+    const action = String(req.body.action || '').trim();
+    const actionMap: Record<string, { label: string; note: string; candidateAction: string }> = {
+      continue_observe: {
+        label: '人工继续观察',
+        note: '保留观察记录，等待后续自动流水线重新确认。',
+        candidateAction: 'entry_trigger_manual_continue_observe'
+      },
+      wait_next_day: {
+        label: '等下一日确认',
+        note: '今天不进计划，下一交易日继续优先复核。',
+        candidateAction: 'entry_trigger_manual_wait_next_day'
+      },
+      return_risk_hold: {
+        label: '人工退回风险观察',
+        note: '生命周期仍有真实翻转，先不占高触发优先位。',
+        candidateAction: 'entry_trigger_manual_risk_hold'
+      }
+    };
+    const actionConfig = actionMap[action];
+    if (!actionConfig) {
+      return res.status(400).json({ success: false, message: '无效的人工复核动作' });
+    }
+
+    const observation = await db.get(
+      `SELECT *
+       FROM financial_entry_trigger_observations
+       WHERE id = ?`,
+      [id]
+    );
+    if (!observation) {
+      return res.status(404).json({ success: false, message: '入场观察记录不存在' });
+    }
+    if (observation.observation_status !== 'watching') {
+      return res.status(409).json({
+        success: false,
+        message: '只有观察中的记录可以做人工复核分流；已确认/归档记录请在对应队列处理。'
+      });
+    }
+
+    const marketGateBlocker = await getEntryMarketGateBlocker(db, observation.source || 'tushare');
+    if (marketGateBlocker) {
+      return res.status(423).json({
+        success: false,
+        message: marketGateBlocker.message,
+        data: {
+          market_gate: marketGateBlocker.marketGate,
+          downstream_blocked: true
+        }
+      });
+    }
+
+    const now = new Date().toISOString();
+    const manualNote = String(req.body.note || '').trim() || actionConfig.note;
+    await db.run(
+      `UPDATE financial_entry_trigger_observations
+       SET observation_status = 'watching',
+           manual_review_action = ?,
+           manual_review_label = ?,
+           manual_review_note = ?,
+           manual_reviewed_at = ?,
+           note = ?,
+           updated_at = ?
+       WHERE id = ?`,
+      [
+        action,
+        actionConfig.label,
+        manualNote,
+        now,
+        `人工复核分流：${actionConfig.label}。${manualNote}`,
+        now,
+        id
+      ]
+    );
+
+    await db.run(
+      `UPDATE financial_candidate_pool
+       SET review_status = 'wait_confirmation',
+           pool_status = 'active',
+           final_status = 'WAIT',
+           review_action = ?,
+           candidate_reason = ?,
+           last_review_at = ?,
+           updated_at = ?
+       WHERE symbol = ?
+         AND asset_type = ?
+         AND source = ?
+         AND pool_status = 'active'
+         AND review_status IN ('wait_confirmation', 'plan_ready', 'structure_ready', 'structure_watch', 'unreviewed')`,
+      [
+        actionConfig.candidateAction,
+        `入场高触发人工复核：${actionConfig.label}。${manualNote}`,
+        now,
+        now,
+        observation.symbol,
+        observation.asset_type,
+        observation.source
+      ]
+    );
+
+    const saved = await db.get(
+      `SELECT *
+       FROM financial_entry_trigger_observations
+       WHERE id = ?`,
+      [id]
+    );
+
+    res.json({
+      success: true,
+      message: `${observation.symbol} 已分流：${actionConfig.label}`,
+      data: {
+        observation: saved,
+        action,
+        label: actionConfig.label
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: `人工复核分流失败: ${(error as Error).message}`
     });
   }
 });

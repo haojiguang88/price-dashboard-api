@@ -35,6 +35,40 @@ MODEL_FEATURES = [
     "trend_uptrend",
     "trend_downtrend",
     "trend_range",
+    "hs300_ret_20d",
+    "hs300_ret_60d",
+    "hs300_ret_120d",
+    "hs300_distance_ma60",
+    "hs300_drawdown_60d",
+    "relative_ret20_hs300",
+    "relative_ret60_hs300",
+    "relative_ret120_hs300",
+    "market_normal",
+    "market_risk",
+    "market_crash",
+    "market_unknown",
+    "breadth_up_ratio",
+    "breadth_down_ratio",
+    "breadth_limit_up_ratio",
+    "breadth_limit_down_ratio",
+    "breadth_above_ma20_ratio",
+    "breadth_above_ma60_ratio",
+    "breadth_above_ma120_ratio",
+    "breadth_amount_ratio_5_20",
+    "industry_known",
+    "industry_ret_5d",
+    "industry_ret_20d",
+    "industry_ret_60d",
+    "industry_amount_ratio_20",
+    "industry_ret20_rank",
+    "industry_relative_ret20_hs300",
+    "asset_vs_industry_ret20",
+    "etf_route_broad_etf",
+    "etf_route_industry_etf",
+    "etf_route_cross_border_etf",
+    "etf_route_bond_cash_etf",
+    "etf_route_commodity_etf",
+    "etf_route_other",
 ]
 
 MODEL_PRIORITY = ["lightgbm_model", "random_forest", "logistic_regression"]
@@ -120,6 +154,23 @@ def latest_feature_row(feature_db_path, domain, symbol, trade_date=None):
         conn.close()
 
 
+def feature_db_latest_trade_date(feature_db_path, domain):
+    conn = connect(feature_db_path)
+    try:
+        row = conn.execute(
+            """
+            SELECT MAX(trade_date) AS latest_trade_date
+            FROM financial_ml_features
+            WHERE asset_type = ?
+              AND trade_date IS NOT NULL
+            """,
+            (domain,),
+        ).fetchone()
+        return row["latest_trade_date"] if row else None
+    finally:
+        conn.close()
+
+
 def model_features(artifact):
     model_json_path = artifact["model_json_file"] if "model_json_file" in artifact.keys() else None
     if model_json_path and Path(model_json_path).exists():
@@ -193,6 +244,12 @@ def main():
         feature_db = artifact["source_feature_db"]
         if not feature_db or not Path(feature_db).exists():
             raise RuntimeError("模型登记里的特征库不存在，不能预测。")
+        latest_feature_trade_date = feature_db_latest_trade_date(feature_db, args.domain)
+        if args.trade_date and (latest_feature_trade_date is None or latest_feature_trade_date < args.trade_date):
+            raise RuntimeError(
+                f"{args.domain} 特征日 {latest_feature_trade_date or '无'}，当前预测口径 {args.trade_date}；"
+                "特征库滞后，已阻止使用旧特征预测。请先补齐模型特征或重新训练。"
+            )
 
         feature_row = latest_feature_row(feature_db, args.domain, args.symbol, args.trade_date)
         model = joblib.load(artifact["model_file"])
@@ -206,6 +263,8 @@ def main():
             "name": feature_row["name"],
             "market": feature_row["market"],
             "tradeDate": feature_row["trade_date"],
+            "asOfTradeDate": args.trade_date,
+            "latestFeatureTradeDate": latest_feature_trade_date,
             "close": feature_row["close"],
             "model": {
                 "modelKey": artifact["model_key"],

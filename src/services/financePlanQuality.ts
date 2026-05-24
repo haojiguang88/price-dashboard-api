@@ -33,7 +33,9 @@ export function buildFinancePlanQuality(plan: any) {
     : ['RECOVERY', 'TREND_TRANSITION'].includes(trendPhase)
       ? structureProfile.targetExtensionPercent * 1.4
       : structureProfile.targetExtensionPercent;
-  const rewardPercent = targetSpacePercent ?? trendRewardEstimate;
+  const rewardIsEstimated = targetSpacePercent === null;
+  const rewardPercent = rewardIsEstimated ? trendRewardEstimate : targetSpacePercent;
+  const rewardSource = rewardIsEstimated ? 'profile_estimate' : 'explicit_target_space';
   const riskReward = riskPercent && riskPercent > 0 ? rewardPercent / riskPercent : null;
   const tightRisk = planProfile.tightRiskPercent;
   const maxRisk = planProfile.maxRiskPercent;
@@ -64,8 +66,12 @@ export function buildFinancePlanQuality(plan: any) {
     {
       key: 'risk_reward',
       label: '盈亏比',
-      score: riskReward === null ? 4 : riskReward >= 3 ? 14 : riskReward >= 2 ? 11 : riskReward >= 1.4 ? 7 : 2,
-      message: riskReward === null ? '缺少盈亏比基础数据。' : riskReward >= 2 ? '盈亏比具备交易意义。' : '盈亏比一般，符合条件也未必值得做。'
+      score: riskReward === null ? 4 : riskReward >= 3 ? (rewardIsEstimated ? 10 : 14) : riskReward >= 2 ? (rewardIsEstimated ? 8 : 11) : riskReward >= 1.4 ? 7 : 2,
+      message: riskReward === null
+        ? '缺少盈亏比基础数据。'
+        : rewardIsEstimated
+          ? '盈亏比来自算法估算目标空间，只能做粗筛，不能当真实上方压力。'
+          : riskReward >= 2 ? '盈亏比具备交易意义。' : '盈亏比一般，符合条件也未必值得做。'
     },
     {
       key: 'clarity',
@@ -76,8 +82,10 @@ export function buildFinancePlanQuality(plan: any) {
     {
       key: 'target_space',
       label: '目标空间',
-      score: rewardPercent >= strongTarget ? 9 : rewardPercent >= okTarget ? 7 : rewardPercent >= minTarget ? 4 : 2,
-      message: targetSpacePercent === null ? `暂未接入明确目标位，按${structureProfile.label}估算目标空间。` : rewardPercent >= okTarget ? '目标空间相对充足。' : '目标空间偏窄，计划吸引力下降。'
+      score: rewardIsEstimated
+        ? Math.min(5, rewardPercent >= okTarget ? 5 : rewardPercent >= minTarget ? 4 : 2)
+        : rewardPercent >= strongTarget ? 9 : rewardPercent >= okTarget ? 7 : rewardPercent >= minTarget ? 4 : 2,
+      message: rewardIsEstimated ? `暂未接入明确目标位，按${structureProfile.label}估算目标空间，质量分不按真实目标满分计算。` : rewardPercent >= okTarget ? '目标空间相对充足。' : '目标空间偏窄，计划吸引力下降。'
     },
     {
       key: 'pressure',
@@ -117,6 +125,9 @@ export function buildFinancePlanQuality(plan: any) {
     reward_percent: rewardPercent,
     target_space_percent: targetSpacePercent,
     pressure_distance_percent: pressureDistancePercent,
+    reward_source: rewardSource,
+    reward_is_estimated: rewardIsEstimated,
+    target_space_confidence: rewardIsEstimated ? 'estimated' : 'explicit',
     industry_strength_score: industryStrengthScore,
     account_risk_status: accountRiskStatus,
     risk_reward: riskReward !== null ? Math.round(riskReward * 100) / 100 : null,

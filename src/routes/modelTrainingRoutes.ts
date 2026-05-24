@@ -2,7 +2,8 @@ import express from 'express';
 import fs from 'fs/promises';
 import path from 'path';
 import { spawn } from 'child_process';
-import getDb from '../config/database';
+import getDb, { getDatabasePath } from '../config/database';
+import { getLatestCoveredTradeDate } from '../utils/financeTradeDate';
 
 const router = express.Router();
 
@@ -52,6 +53,17 @@ const domainLabels: Record<string, string> = {
   football: '足彩'
 };
 
+const COMPARE_MODEL_SPECS = [
+  ['logistic_regression', 'logistic_regression_model.json', 'logistic_regression_metrics.json'],
+  ['random_forest', 'random_forest_model.json', 'random_forest_metrics.json'],
+  ['lightgbm_model', 'lightgbm_model.json', 'lightgbm_metrics.json']
+];
+
+const TARGET_TEXT: Record<string, string> = {
+  label_structure_safe_20d: '结构成立+安全区有效样本',
+  label_ret_20d_gt_5: '未来20日收益>5%'
+};
+
 const trainingRoot = process.env.MODEL_TRAINING_ROOT || '/Volumes/7100/model-training';
 const trainingPython = process.env.MODEL_TRAINING_PYTHON || path.join(trainingRoot, 'venv', 'bin', 'python');
 let modelTrainingBootstrapPromise: Promise<void> | null = null;
@@ -72,6 +84,179 @@ const parseJson = (value: unknown, fallback: any = null) => {
   } catch {
     return fallback;
   }
+};
+
+const numberOrNull = (value: any) => {
+  if (value === null || value === undefined) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+const readJsonFile = async (filePath: string) => {
+  try {
+    const text = await fs.readFile(filePath, 'utf-8');
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+};
+
+const buildCompareRunPayload = async (run: any) => {
+  const outputDir = String(run.output_dir || '');
+  const [labelPayload, splitPayload] = await Promise.all([
+    readJsonFile(path.join(outputDir, 'label_table.json')),
+    readJsonFile(path.join(outputDir, 'split_dataset.json'))
+  ]);
+
+  const models = [];
+  let defaultTestAuc = null;
+  let target = null;
+  for (const [modelKey, modelJsonName, metricsName] of COMPARE_MODEL_SPECS) {
+    const [modelJson, metrics] = await Promise.all([
+      readJsonFile(path.join(outputDir, modelJsonName)),
+      readJsonFile(path.join(outputDir, metricsName))
+    ]);
+    if (!metrics) continue;
+    target = target || modelJson?.target || null;
+    const validationAuc = metrics?.validation?.auc;
+    const testAuc = metrics?.test?.auc;
+    if (modelKey === 'lightgbm_model') {
+      defaultTestAuc = numberOrNull(testAuc);
+    }
+    models.push({
+      modelKey,
+      modelType: modelJson?.model_type || null,
+      target: modelJson?.target || null,
+      validationAuc: numberOrNull(validationAuc),
+      testAuc: numberOrNull(testAuc),
+      sampleLimits: metrics?.sample_limits || null,
+      positiveRate: {
+        train: numberOrNull(metrics?.train?.positive_rate),
+        validation: numberOrNull(metrics?.validation?.positive_rate),
+        test: numberOrNull(metrics?.test?.positive_rate)
+      }
+    });
+  }
+
+  const positiveCounts = labelPayload?.positive_counts || {};
+  const labelRows = labelPayload?.label_rows;
+  const structurePositive = positiveCounts.structure_safe_20d;
+  const oldPositive = positiveCounts.ret_20_gt_5;
+
+  return {
+    runId: run.id,
+    status: run.status,
+    target,
+    targetText: TARGET_TEXT[target || ''] || target || '-',
+    outputDir,
+    sourceRowCount: run.source_row_count,
+    startedAt: run.started_at,
+    finishedAt: run.finished_at,
+    labelRows,
+    structurePositiveRate: labelRows && structurePositive !== undefined ? structurePositive / labelRows : null,
+    oldRet20PositiveRate: labelRows && oldPositive !== undefined ? oldPositive / labelRows : null,
+    rowsBySplit: splitPayload?.rows_by_split || {},
+    models,
+    defaultTestAuc
+  };
+};
+
+const addCompareDeltas = (runs: any[]) => {
+  const ordered = [...runs].reverse();
+  const previousByTarget = new Map<string, any>();
+  for (const run of ordered) {
+    const target = run.target || 'unknown';
+    const previous = previousByTarget.get(target);
+    run.deltaVsPreviousSameTarget = {
+      defaultTestAuc: previous && run.defaultTestAuc !== null && previous.defaultTestAuc !== null
+        ? run.defaultTestAuc - previous.defaultTestAuc
+        : null,
+      sourceRowCount: previous && run.sourceRowCount !== null && previous.sourceRowCount !== null
+        ? run.sourceRowCount - previous.sourceRowCount
+        : null
+    };
+    previousByTarget.set(target, run);
+  }
+  return ordered.reverse();
+};
+
+const getRegisteredModelBundle = async (db: any, domain: string) => {
+  const rows = await db.all(
+    `SELECT model_key, target, model_type, run_id, validation_auc, test_auc,
+            model_file, metrics_file, updated_at
+     FROM model_training_artifacts
+     WHERE domain = ?
+     ORDER BY ${preferredModelOrder}`,
+    [domain]
+  );
+  if (!rows.length) return null;
+  const target = rows[0].target;
+  return {
+    target,
+    targetText: TARGET_TEXT[target || ''] || target || '-',
+    models: rows.map((row: any) => ({
+      modelKey: row.model_key,
+      modelType: row.model_type,
+      target: row.target,
+      runId: row.run_id,
+      validationAuc: numberOrNull(row.validation_auc),
+      testAuc: numberOrNull(row.test_auc),
+      modelFile: row.model_file,
+      metricsFile: row.metrics_file,
+      updatedAt: row.updated_at
+    }))
+  };
+};
+
+const buildCompareRunsFromLocalFiles = async (db: any, domain: string, limit = 8) => {
+  const rows = await db.all(
+    `SELECT id, domain, status, output_dir, source_row_count, started_at, finished_at
+     FROM model_training_runs
+     WHERE domain = ?
+       AND status = 'completed'
+       AND output_dir IS NOT NULL
+       AND output_dir != ''
+     ORDER BY id DESC
+     LIMIT ?`,
+    [domain, Math.max(Math.min(Number(limit) || 8, 50), 1)]
+  );
+
+  const runs = [];
+  const skippedRuns = [];
+  for (const row of rows) {
+    try {
+      await fs.access(row.output_dir);
+      const payload = await buildCompareRunPayload(row);
+      if (payload.models.length) {
+        runs.push(payload);
+      } else {
+        skippedRuns.push({
+          runId: row.id,
+          status: row.status,
+          outputDir: row.output_dir,
+          sourceRowCount: row.source_row_count,
+          finishedAt: row.finished_at,
+          reason: '该 run 目录缺少模型指标文件，可能只执行了后续文档/LLM阶段，不能参与模型版本对比。'
+        });
+      }
+    } catch {
+      skippedRuns.push({
+        runId: row.id,
+        status: row.status,
+        outputDir: row.output_dir,
+        sourceRowCount: row.source_row_count,
+        finishedAt: row.finished_at,
+        reason: '训练目录不存在，不能读取模型指标。'
+      });
+    }
+  }
+
+  return {
+    domain,
+    runs: addCompareDeltas(runs),
+    skippedRuns,
+    registeredModels: await getRegisteredModelBundle(db, domain)
+  };
 };
 
 const getDefaultModel = async (db: any, domain: string, modelKey?: string) => {
@@ -134,9 +319,10 @@ const getConflictType = (probability: number | null | undefined, ruleScore: numb
 const runCandidatePoolScoreWorker = (
   domain: string,
   modelKey: string | undefined,
-  limit: number
-): Promise<Record<string, any>> => new Promise((resolve, reject) => {
-  const dbPath = process.env.DB_PATH || path.join(process.cwd(), 'db', 'price_dashboard_dev.db');
+  limit: number,
+  tradeDate?: string | null
+): Promise<{ scores: Record<string, any>; candidateFeatureRefreshes?: Record<string, any> }> => new Promise((resolve, reject) => {
+  const dbPath = getDatabasePath();
   const scriptPath = path.join(process.cwd(), 'scripts', 'model_training', 'score_candidate_pool.py');
   const args = [
     scriptPath,
@@ -145,6 +331,61 @@ const runCandidatePoolScoreWorker = (
     '--limit', String(limit)
   ];
 
+  if (modelKey) {
+    args.push('--model-key', modelKey);
+  }
+  if (tradeDate) {
+    args.push('--trade-date', tradeDate);
+  }
+
+  const child = spawn(trainingPython, args, {
+    cwd: process.cwd(),
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', chunk => {
+    stdout += chunk.toString();
+  });
+  child.stderr.on('data', chunk => {
+    stderr += chunk.toString();
+  });
+  child.on('error', reject);
+  child.on('close', code => {
+    const lines = stdout.trim().split('\n').filter(Boolean);
+    const text = lines[lines.length - 1] || '';
+    try {
+      const payload = JSON.parse(text || '{}');
+      if (code === 0 && payload.success) {
+        resolve({
+          scores: payload.data?.scores || {},
+          candidateFeatureRefreshes: payload.data?.candidateFeatureRefreshes || {}
+        });
+        return;
+      }
+      reject(new Error(payload.message || stderr || `备选池模型评分脚本退出：${code}`));
+    } catch (error) {
+      reject(new Error(stderr || text || `备选池模型评分输出无法解析：${error instanceof Error ? error.message : String(error)}`));
+    }
+  });
+});
+
+const runModelFeatureRefreshWorker = (
+  domain: string,
+  checkOnly = false,
+  modelKey?: string
+): Promise<any> => new Promise((resolve, reject) => {
+  const dbPath = getDatabasePath();
+  const scriptPath = path.join(process.cwd(), 'scripts', 'model_training', 'refresh_model_features.py');
+  const args = [
+    scriptPath,
+    '--db', dbPath,
+    '--domain', domain
+  ];
+  if (checkOnly) {
+    args.push('--check-only');
+  }
   if (modelKey) {
     args.push('--model-key', modelKey);
   }
@@ -169,18 +410,18 @@ const runCandidatePoolScoreWorker = (
     try {
       const payload = JSON.parse(text || '{}');
       if (code === 0 && payload.success) {
-        resolve(payload.data?.scores || {});
+        resolve(payload.data);
         return;
       }
-      reject(new Error(payload.message || stderr || `备选池模型评分脚本退出：${code}`));
+      reject(new Error(payload.message || stderr || `模型特征刷新脚本退出：${code}`));
     } catch (error) {
-      reject(new Error(stderr || text || `备选池模型评分输出无法解析：${error instanceof Error ? error.message : String(error)}`));
+      reject(new Error(stderr || text || `模型特征刷新输出无法解析：${error instanceof Error ? error.message : String(error)}`));
     }
   });
 });
 
 const startPipelineWorker = (runId: number, domain: string, outputDir: string) => {
-  const dbPath = process.env.DB_PATH || path.join(process.cwd(), 'db', 'price_dashboard_dev.db');
+  const dbPath = getDatabasePath();
   const scriptPath = path.join(process.cwd(), 'scripts', 'model_training', 'run_pipeline.py');
   const child = spawn(trainingPython, [
     scriptPath,
@@ -202,7 +443,7 @@ const runPredictionWorker = (
   modelKey?: string,
   tradeDate?: string
 ): Promise<any> => new Promise((resolve, reject) => {
-  const dbPath = process.env.DB_PATH || path.join(process.cwd(), 'db', 'price_dashboard_dev.db');
+  const dbPath = getDatabasePath();
   const scriptPath = path.join(process.cwd(), 'scripts', 'model_training', 'predict.py');
   const args = [
     scriptPath,
@@ -250,9 +491,10 @@ const runCandidateScanWorker = (
   domain: string,
   modelKey?: string,
   limit?: number,
-  top?: number
+  top?: number,
+  tradeDate?: string | null
 ): Promise<any> => new Promise((resolve, reject) => {
-  const dbPath = process.env.DB_PATH || path.join(process.cwd(), 'db', 'price_dashboard_dev.db');
+  const dbPath = getDatabasePath();
   const scriptPath = path.join(process.cwd(), 'scripts', 'model_training', 'scan_candidates.py');
   const args = [
     scriptPath,
@@ -264,6 +506,9 @@ const runCandidateScanWorker = (
 
   if (modelKey) {
     args.push('--model-key', modelKey);
+  }
+  if (tradeDate) {
+    args.push('--trade-date', tradeDate);
   }
 
   const child = spawn(trainingPython, args, {
@@ -301,7 +546,7 @@ const runReviewDashboardWorker = (
   sampleLimit?: number,
   top?: number
 ): Promise<any> => new Promise((resolve, reject) => {
-  const dbPath = process.env.DB_PATH || path.join(process.cwd(), 'db', 'price_dashboard_dev.db');
+  const dbPath = getDatabasePath();
   const scriptPath = path.join(process.cwd(), 'scripts', 'model_training', 'review_dashboard.py');
   const args = [
     scriptPath,
@@ -348,7 +593,7 @@ const runCompareRunsWorker = (
   domain: string,
   limit?: number
 ): Promise<any> => new Promise((resolve, reject) => {
-  const dbPath = process.env.DB_PATH || path.join(process.cwd(), 'db', 'price_dashboard_dev.db');
+  const dbPath = getDatabasePath();
   const scriptPath = path.join(process.cwd(), 'scripts', 'model_training', 'compare_runs.py');
   const args = [
     scriptPath,
@@ -411,6 +656,30 @@ const ensureModelTrainingTables = async (db: any) => {
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       UNIQUE(domain, item_key)
     )
+  `);
+
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS model_training_run_plan_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      run_id INTEGER NOT NULL,
+      domain TEXT NOT NULL,
+      item_key TEXT NOT NULL,
+      stage TEXT NOT NULL,
+      title TEXT NOT NULL,
+      description TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      completed_at TEXT,
+      note TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(run_id, item_key)
+    )
+  `);
+
+  await db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_model_training_run_plan_items_run
+    ON model_training_run_plan_items(run_id, domain, sort_order);
   `);
 
   await db.exec(`
@@ -505,6 +774,7 @@ const ensureModelTrainingTables = async (db: any) => {
       asset_type TEXT NOT NULL,
       source TEXT NOT NULL,
       trade_date TEXT,
+      as_of_trade_date TEXT,
       model_key TEXT NOT NULL,
       model_run_id INTEGER,
       model_target TEXT,
@@ -525,9 +795,20 @@ const ensureModelTrainingTables = async (db: any) => {
     )
   `);
 
+  const candidateScoreColumns = await db.all(`PRAGMA table_info(model_training_candidate_scores)`);
+  const candidateScoreColumnNames = new Set(candidateScoreColumns.map((column: any) => column.name));
+  if (!candidateScoreColumnNames.has('as_of_trade_date')) {
+    await db.exec(`ALTER TABLE model_training_candidate_scores ADD COLUMN as_of_trade_date TEXT`);
+  }
+
   await db.exec(`
     CREATE INDEX IF NOT EXISTS idx_model_training_candidate_scores_domain
     ON model_training_candidate_scores(domain, updated_at);
+  `);
+
+  await db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_model_training_candidate_scores_active
+    ON model_training_candidate_scores(domain, model_key, model_run_id, updated_at);
   `);
 };
 
@@ -552,6 +833,43 @@ const seedDomainPlan = async (db: any, domain: string) => {
       sortOrder += 1;
     }
   }
+};
+
+const seedRunPlan = async (db: any, runId: number, domain: string, activeItemKey?: string, activeNote?: string) => {
+  const now = new Date().toISOString();
+  let sortOrder = 1;
+
+  for (const stage of planItems) {
+    for (const [itemKey, title, description] of stage.items) {
+      const status = itemKey === activeItemKey ? 'running' : 'pending';
+      const note = itemKey === activeItemKey ? activeNote || null : null;
+      await db.run(
+        `INSERT INTO model_training_run_plan_items (
+          run_id, domain, item_key, stage, title, description, status, sort_order, note, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(run_id, item_key) DO UPDATE SET
+          stage = excluded.stage,
+          title = excluded.title,
+          description = excluded.description,
+          status = excluded.status,
+          sort_order = excluded.sort_order,
+          note = COALESCE(excluded.note, model_training_run_plan_items.note),
+          updated_at = excluded.updated_at`,
+        [runId, domain, itemKey, stage.stage, title, description, status, sortOrder, note, now, now]
+      );
+      sortOrder += 1;
+    }
+  }
+};
+
+const getFirstPlanItem = () => {
+  const firstStage = planItems[0];
+  const firstItem = firstStage?.items?.[0];
+  if (!firstItem) return null;
+  return {
+    item_key: firstItem[0],
+    title: firstItem[1]
+  };
 };
 
 const bootstrapModelTraining = async () => {
@@ -604,15 +922,40 @@ router.get('/plan/:domain', async (req, res) => {
       return res.status(400).json({ success: false, message: '不支持的训练域' });
     }
 
-    const items = await db.all(
-      `SELECT id, domain, item_key, stage, title, description, status, sort_order, completed_at, note, updated_at
-       FROM model_training_plan_items
+    const latestRun = await db.get(
+      `SELECT id, status, started_at
+       FROM model_training_runs
        WHERE domain = ?
-       ORDER BY sort_order ASC`,
+       ORDER BY started_at DESC, id DESC
+       LIMIT 1`,
       [domain]
     );
+    let planScope = 'domain_template';
+    let planRunId: number | null = null;
+    let items = latestRun
+      ? await db.all(
+        `SELECT id, run_id, domain, item_key, stage, title, description, status, sort_order, completed_at, note, updated_at
+         FROM model_training_run_plan_items
+         WHERE run_id = ? AND domain = ?
+         ORDER BY sort_order ASC`,
+        [latestRun.id, domain]
+      )
+      : [];
 
-    res.json({ success: true, data: { domain, domainLabel: domainLabels[domain], items } });
+    if (items.length > 0) {
+      planScope = 'latest_run';
+      planRunId = latestRun.id;
+    } else {
+      items = await db.all(
+        `SELECT id, NULL AS run_id, domain, item_key, stage, title, description, status, sort_order, completed_at, note, updated_at
+         FROM model_training_plan_items
+         WHERE domain = ?
+         ORDER BY sort_order ASC`,
+        [domain]
+      );
+    }
+
+    res.json({ success: true, data: { domain, domainLabel: domainLabels[domain], runId: planRunId, planScope, items } });
   } catch (error) {
     console.error('Error getting model training plan:', error);
     res.status(500).json({ success: false, message: '获取模型训练计划失败' });
@@ -786,12 +1129,21 @@ router.get('/explain/:domain', async (req, res) => {
        LIMIT 10`,
       [domain]
     );
-    const candidateScoreCount = await db.get(
-      `SELECT COUNT(*) AS count
-       FROM model_training_candidate_scores
-       WHERE domain = ?`,
-      [domain]
-    );
+    const candidateScoreCount = activeModel
+      ? await db.get(
+        `SELECT COUNT(*) AS count
+         FROM model_training_candidate_scores
+         WHERE domain = ?
+           AND model_key = ?
+           AND COALESCE(model_run_id, -1) = COALESCE(?, -1)`,
+        [domain, activeModel.model_key, activeModel.run_id ?? null]
+      )
+      : await db.get(
+        `SELECT COUNT(*) AS count
+         FROM model_training_candidate_scores
+         WHERE domain = ?`,
+        [domain]
+      );
     const runCount = await db.get(
       `SELECT COUNT(*) AS count
        FROM model_training_runs
@@ -948,6 +1300,8 @@ router.post('/sync-candidates/:domain', async (req, res) => {
     const { domain } = req.params;
     const limit = typeof req.body?.limit === 'number' ? req.body.limit : 500;
     const requestedModelKey = typeof req.body?.modelKey === 'string' ? req.body.modelKey : undefined;
+    const autoRefreshFeatures = req.body?.autoRefreshFeatures === true;
+    const allowInactiveModel = req.body?.allowInactiveModel === true;
 
     if (!domainLabels[domain]) {
       return res.status(400).json({ success: false, message: '不支持的训练域' });
@@ -958,26 +1312,100 @@ router.post('/sync-candidates/:domain', async (req, res) => {
 
     await fs.access(trainingPython);
     const activeModel = await db.get(
-      `SELECT model_key
+      `SELECT model_key, run_id
        FROM model_training_active_models
        WHERE domain = ?`,
       [domain]
     );
-    const model = await getDefaultModel(db, domain, requestedModelKey || activeModel?.model_key);
+    if (!allowInactiveModel) {
+      if (!activeModel?.model_key) {
+        return res.status(409).json({
+          success: false,
+          message: '候选模型分数同步必须先手动启用模型，避免最新未验收模型直接进入候选池。'
+        });
+      }
+      if (requestedModelKey && requestedModelKey !== activeModel.model_key) {
+        return res.status(409).json({
+          success: false,
+          message: `候选模型分数只能使用当前启用模型 ${activeModel.model_key}；${requestedModelKey} 尚未手动启用。`
+        });
+      }
+    }
+    const modelKeyForScore = allowInactiveModel
+      ? (requestedModelKey || activeModel?.model_key)
+      : activeModel.model_key;
+    const model = await getDefaultModel(db, domain, modelKeyForScore);
     if (!model) {
       return res.status(404).json({ success: false, message: '没有可用模型，先完成模型落库或手动启用模型' });
     }
+    const coveredTradeDate = await getLatestCoveredTradeDate(db, { assetTypes: [domain] });
+    if (!coveredTradeDate) {
+      return res.status(409).json({ success: false, message: '没有覆盖合格的交易日，候选池模型评分已停止。' });
+    }
 
-    const scoreMap = await runCandidatePoolScoreWorker(domain, model.model_key, limit);
+    let featureRefresh: any = null;
+    try {
+      const beforeRefresh = await runModelFeatureRefreshWorker(domain, true, model.model_key);
+      const latestFeatureDate = beforeRefresh?.latestTradeDate || null;
+      const needsRefresh = !latestFeatureDate || latestFeatureDate < coveredTradeDate;
+      featureRefresh = autoRefreshFeatures && needsRefresh
+        ? await runModelFeatureRefreshWorker(domain, false, model.model_key)
+        : beforeRefresh;
+    } catch (error) {
+      featureRefresh = {
+        status: 'check_failed',
+        message: error instanceof Error ? error.message : String(error)
+      };
+    }
+
+    const scorePayload = await runCandidatePoolScoreWorker(domain, model.model_key, limit, coveredTradeDate);
+    const scoreMap = scorePayload.scores || {};
+    const availableScoreCount = Object.values(scoreMap || {}).filter((score: any) => score?.available === true).length;
+    if (availableScoreCount === 0) {
+      const firstReason = Object.values(scoreMap || {}).map((score: any) => score?.reason).find(Boolean);
+      return res.status(409).json({
+        success: false,
+        message: firstReason || '模型当前没有生成任何可用评分，已保留原有候选评分快照。',
+        data: {
+          domain,
+          modelKey: model.model_key,
+          modelRunId: model.run_id,
+          coveredTradeDate,
+          featureRefresh,
+          candidateFeatureRefreshes: scorePayload.candidateFeatureRefreshes || {},
+          scored: 0
+        }
+      });
+    }
+
+    await db.run(
+      `DELETE FROM model_training_candidate_scores
+       WHERE domain = ?
+         AND (
+           model_key != ?
+           OR COALESCE(model_run_id, -1) != COALESCE(?, -1)
+           OR COALESCE(as_of_trade_date, trade_date) != ?
+         )`,
+      [domain, model.model_key, model.run_id ?? null, coveredTradeDate]
+    );
     const candidates = await db.all(
       `SELECT id, symbol, name, asset_type, source, trade_date, priority_score,
               review_status, candidate_reason, risk_note, last_checked_at
        FROM financial_candidate_pool
        WHERE pool_status = 'active'
          AND asset_type = ?
+         AND (trade_date IS NULL OR trade_date <= ?)
        ORDER BY priority_score DESC, last_checked_at DESC
        LIMIT ?`,
-      [domain, limit]
+      [domain, coveredTradeDate, limit]
+    );
+    await db.run(
+      `DELETE FROM model_training_candidate_scores
+       WHERE domain = ?
+         AND model_key = ?
+         AND COALESCE(model_run_id, -1) = COALESCE(?, -1)
+         AND COALESCE(as_of_trade_date, trade_date) = ?`,
+      [domain, model.model_key, model.run_id ?? null, coveredTradeDate]
     );
 
     const now = new Date().toISOString();
@@ -996,15 +1424,16 @@ router.post('/sync-candidates/:domain', async (req, res) => {
 
       await db.run(
         `INSERT INTO model_training_candidate_scores (
-          domain, candidate_id, symbol, name, asset_type, source, trade_date,
+          domain, candidate_id, symbol, name, asset_type, source, trade_date, as_of_trade_date,
           model_key, model_run_id, model_target, probability, model_level_key, model_level_label,
           rule_score, rule_level_key, rule_level_label, conflict_key, conflict_label,
           review_status, candidate_reason, source_json, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(domain, symbol, asset_type, source, model_key) DO UPDATE SET
           candidate_id = excluded.candidate_id,
           name = excluded.name,
           trade_date = excluded.trade_date,
+          as_of_trade_date = excluded.as_of_trade_date,
           model_run_id = excluded.model_run_id,
           model_target = excluded.model_target,
           probability = excluded.probability,
@@ -1027,6 +1456,7 @@ router.post('/sync-candidates/:domain', async (req, res) => {
           candidate.asset_type,
           candidate.source,
           score.tradeDate || candidate.trade_date || null,
+          coveredTradeDate,
           model.model_key,
           model.run_id || null,
           score.target || model.target || null,
@@ -1050,7 +1480,10 @@ router.post('/sync-candidates/:domain', async (req, res) => {
     const rows = await db.all(
       `SELECT *
        FROM model_training_candidate_scores
-       WHERE domain = ? AND model_key = ?
+       WHERE domain = ?
+         AND model_key = ?
+         AND COALESCE(model_run_id, -1) = COALESCE(?, -1)
+         AND COALESCE(as_of_trade_date, trade_date) = ?
        ORDER BY
          CASE conflict_key
            WHEN 'rule_model_aligned' THEN 1
@@ -1062,7 +1495,7 @@ router.post('/sync-candidates/:domain', async (req, res) => {
          probability DESC,
          rule_score DESC
        LIMIT 80`,
-      [domain, model.model_key]
+      [domain, model.model_key, model.run_id ?? null, coveredTradeDate]
     );
 
     res.json({
@@ -1071,6 +1504,9 @@ router.post('/sync-candidates/:domain', async (req, res) => {
         domain,
         modelKey: model.model_key,
         modelRunId: model.run_id,
+        coveredTradeDate,
+        featureRefresh,
+        candidateFeatureRefreshes: scorePayload.candidateFeatureRefreshes || {},
         checked: candidates.length,
         scored,
         items: rows
@@ -1096,19 +1532,84 @@ router.get('/candidate-scores/:domain', async (req, res) => {
       return res.status(400).json({ success: false, message: '不支持的训练域' });
     }
 
-    const rows = await db.all(
-      `SELECT id, domain, candidate_id, symbol, name, asset_type, source, trade_date,
-              model_key, model_run_id, model_target, probability, model_level_key, model_level_label,
-              rule_score, rule_level_key, rule_level_label, conflict_key, conflict_label,
-              review_status, candidate_reason, updated_at
-       FROM model_training_candidate_scores
-       WHERE domain = ?
-       ORDER BY updated_at DESC, probability DESC, rule_score DESC
-       LIMIT ?`,
-      [domain, limit]
+    const activeModel = await db.get(
+      `SELECT model_key, run_id
+       FROM model_training_active_models
+       WHERE domain = ?`,
+      [domain]
     );
+    const coveredTradeDate = domain === 'stock' || domain === 'etf'
+      ? await getLatestCoveredTradeDate(db, { assetTypes: [domain] })
+      : null;
+    const scoreFreshness = activeModel
+      ? await db.get(
+        `SELECT MAX(COALESCE(as_of_trade_date, trade_date)) AS latest_trade_date, COUNT(*) AS rows
+         FROM model_training_candidate_scores
+         WHERE domain = ?
+           AND model_key = ?
+           AND COALESCE(model_run_id, -1) = COALESCE(?, -1)`,
+        [domain, activeModel.model_key, activeModel.run_id ?? null]
+      )
+      : await db.get(
+        `SELECT MAX(COALESCE(as_of_trade_date, trade_date)) AS latest_trade_date, COUNT(*) AS rows
+         FROM model_training_candidate_scores
+         WHERE domain = ?`,
+        [domain]
+      );
+    const latestScoreTradeDate = scoreFreshness?.latest_trade_date || null;
+    const scoresFresh = !coveredTradeDate || latestScoreTradeDate === coveredTradeDate;
+    const freshnessFilter = coveredTradeDate
+      ? scoresFresh
+        ? ' AND COALESCE(as_of_trade_date, trade_date) = ?'
+        : ' AND 1 = 0'
+      : '';
+    const freshnessParams = coveredTradeDate && scoresFresh ? [coveredTradeDate] : [];
 
-    res.json({ success: true, data: { domain, items: rows } });
+    const rows = activeModel
+      ? await db.all(
+        `SELECT id, domain, candidate_id, symbol, name, asset_type, source, trade_date, as_of_trade_date,
+                model_key, model_run_id, model_target, probability, model_level_key, model_level_label,
+                rule_score, rule_level_key, rule_level_label, conflict_key, conflict_label,
+                review_status, candidate_reason, updated_at
+         FROM model_training_candidate_scores
+         WHERE domain = ?
+           AND model_key = ?
+           AND COALESCE(model_run_id, -1) = COALESCE(?, -1)
+           ${freshnessFilter}
+         ORDER BY updated_at DESC, probability DESC, rule_score DESC
+         LIMIT ?`,
+        [domain, activeModel.model_key, activeModel.run_id ?? null, ...freshnessParams, limit]
+      )
+      : await db.all(
+        `SELECT id, domain, candidate_id, symbol, name, asset_type, source, trade_date, as_of_trade_date,
+                model_key, model_run_id, model_target, probability, model_level_key, model_level_label,
+                rule_score, rule_level_key, rule_level_label, conflict_key, conflict_label,
+                review_status, candidate_reason, updated_at
+         FROM model_training_candidate_scores
+         WHERE domain = ?
+           ${freshnessFilter}
+         ORDER BY updated_at DESC, probability DESC, rule_score DESC
+         LIMIT ?`,
+        [domain, ...freshnessParams, limit]
+      );
+
+    res.json({
+      success: true,
+      data: {
+        domain,
+        activeModel: activeModel || null,
+        coveredTradeDate,
+        scoreFreshness: {
+          latest_trade_date: latestScoreTradeDate,
+          rows: Number(scoreFreshness?.rows || 0),
+          status: scoresFresh ? 'fresh' : 'stale',
+          message: scoresFresh
+            ? '候选模型分数与当前覆盖交易日一致。'
+            : `候选模型分数滞后：最新评分日 ${latestScoreTradeDate || '无'}，当前覆盖交易日 ${coveredTradeDate}。`
+        },
+        items: rows
+      }
+    });
   } catch (error) {
     console.error('Error getting candidate model scores:', error);
     res.status(500).json({ success: false, message: '获取候选模型分数失败' });
@@ -1131,12 +1632,30 @@ router.get('/five-stage/:domain', async (req, res) => {
       [domain]
     );
     const defaultModel = await getDefaultModel(db, domain);
-    const candidateScoresRow = await db.get(
-      `SELECT COUNT(*) AS count
-       FROM model_training_candidate_scores
+    const activeModel = await db.get(
+      `SELECT domain, model_key, run_id, target, model_type, validation_auc, test_auc, activated_at, note, updated_at
+       FROM model_training_active_models
        WHERE domain = ?`,
       [domain]
     );
+    const coveredTradeDate = domain === 'stock' || domain === 'etf'
+      ? await getLatestCoveredTradeDate(db, { assetTypes: [domain] })
+      : null;
+    const candidateScoreFreshness = activeModel
+      ? await db.get(
+        `SELECT MAX(COALESCE(as_of_trade_date, trade_date)) AS latest_trade_date, COUNT(*) AS count
+         FROM model_training_candidate_scores
+         WHERE domain = ?
+           AND model_key = ?
+           AND COALESCE(model_run_id, -1) = COALESCE(?, -1)`,
+        [domain, activeModel.model_key, activeModel.run_id ?? null]
+      )
+      : await db.get(
+        `SELECT MAX(COALESCE(as_of_trade_date, trade_date)) AS latest_trade_date, COUNT(*) AS count
+         FROM model_training_candidate_scores
+         WHERE domain = ?`,
+        [domain]
+      );
     const ruleRows = await db.get(
       `SELECT COUNT(*) AS count
        FROM model_training_rule_candidates
@@ -1149,15 +1668,9 @@ router.get('/five-stage/:domain', async (req, res) => {
        WHERE domain = ? AND status = 'completed'`,
       [domain]
     );
-    const activeModel = await db.get(
-      `SELECT domain, model_key, run_id, target, model_type, validation_auc, test_auc, activated_at, note, updated_at
-       FROM model_training_active_models
-       WHERE domain = ?`,
-      [domain]
-    );
-
     const modelsCount = Number(modelsRow?.count || 0);
-    const candidateScoreCount = Number(candidateScoresRow?.count || 0);
+    const candidateScoresFresh = !coveredTradeDate || candidateScoreFreshness?.latest_trade_date === coveredTradeDate;
+    const candidateScoreCount = candidateScoresFresh ? Number(candidateScoreFreshness?.count || 0) : 0;
     const ruleCount = Number(ruleRows?.count || 0);
     const completedRunCount = Number(completedRunsRow?.count || 0);
 
@@ -1174,9 +1687,13 @@ router.get('/five-stage/:domain', async (req, res) => {
         key: 'attach_candidates',
         order: 2,
         title: '当前候选接模型概率',
-        status: candidateScoreCount > 0 ? 'completed' : (modelsCount > 0 ? 'ready' : 'pending'),
-        summary: candidateScoreCount > 0 ? `已同步 ${candidateScoreCount} 条候选模型快照。` : '候选池还没有模型概率快照。',
-        nextAction: candidateScoreCount > 0 ? '对比模型认可、规则残留和冲突项。' : '点击同步候选模型分数。'
+        status: !candidateScoresFresh ? 'ready' : candidateScoreCount > 0 ? 'completed' : (modelsCount > 0 ? 'ready' : 'pending'),
+        summary: !candidateScoresFresh
+          ? `候选模型快照滞后：最新评分日 ${candidateScoreFreshness?.latest_trade_date || '无'}，当前覆盖交易日 ${coveredTradeDate}。`
+          : candidateScoreCount > 0 ? `已同步 ${candidateScoreCount} 条候选模型快照。` : '候选池还没有模型概率快照。',
+        nextAction: !candidateScoresFresh
+          ? '先补齐模型特征或重新同步候选分数，避免旧评分误导。'
+          : candidateScoreCount > 0 ? '对比模型认可、规则残留和冲突项。' : '点击同步候选模型分数。'
       },
       {
         key: 'review_conflicts',
@@ -1214,6 +1731,15 @@ router.get('/five-stage/:domain', async (req, res) => {
           sample_limits: parseJson(defaultModel.sample_limits_json, null)
         } : null,
         activeModel: activeModel || null,
+        coveredTradeDate,
+        candidateScoreFreshness: {
+          latest_trade_date: candidateScoreFreshness?.latest_trade_date || null,
+          rows: Number(candidateScoreFreshness?.count || 0),
+          status: candidateScoresFresh ? 'fresh' : 'stale',
+          message: candidateScoresFresh
+            ? '候选模型分数与当前覆盖交易日一致。'
+            : `候选模型分数滞后：最新评分日 ${candidateScoreFreshness?.latest_trade_date || '无'}，当前覆盖交易日 ${coveredTradeDate}。`
+        },
         stages
       }
     });
@@ -1238,8 +1764,9 @@ router.get('/candidates/:domain', async (req, res) => {
     }
 
     await fs.access(trainingPython);
-    const data = await runCandidateScanWorker(domain, modelKey, limit, top);
-    res.json({ success: true, data });
+    const coveredTradeDate = await getLatestCoveredTradeDate(await getDb(), { assetTypes: [domain] });
+    const data = await runCandidateScanWorker(domain, modelKey, limit, top, coveredTradeDate);
+    res.json({ success: true, data: { ...data, coveredTradeDate } });
   } catch (error) {
     console.error('Error scanning model candidates:', error);
     res.status(500).json({
@@ -1287,8 +1814,8 @@ router.get('/compare-runs/:domain', async (req, res) => {
       return res.status(400).json({ success: false, message: '足彩版本对比还未接入盘口模型' });
     }
 
-    await fs.access(trainingPython);
-    const data = await runCompareRunsWorker(domain, limit);
+    const db = await getDb();
+    const data = await buildCompareRunsFromLocalFiles(db, domain, limit || 8);
     res.json({ success: true, data });
   } catch (error) {
     console.error('Error comparing model training runs:', error);
@@ -1313,8 +1840,12 @@ router.get('/predict/:domain/:symbol', async (req, res) => {
     }
 
     await fs.access(trainingPython);
-    const data = await runPredictionWorker(domain, symbol, modelKey, tradeDate);
-    res.json({ success: true, data });
+    const coveredTradeDate = domain === 'stock' || domain === 'etf'
+      ? await getLatestCoveredTradeDate(await getDb(), { assetTypes: [domain] })
+      : null;
+    const effectiveTradeDate = tradeDate || coveredTradeDate || undefined;
+    const data = await runPredictionWorker(domain, symbol, modelKey, effectiveTradeDate);
+    res.json({ success: true, data: { ...data, coveredTradeDate } });
   } catch (error) {
     console.error('Error running model prediction:', error);
     res.status(500).json({
@@ -1348,35 +1879,9 @@ router.post('/run/:domain', async (req, res) => {
     await fs.access(trainingRoot);
     await fs.access(trainingPython);
 
-    let nextItem = await db.get(
-      `SELECT item_key, title FROM model_training_plan_items
-       WHERE domain = ? AND status != 'completed'
-       ORDER BY sort_order ASC
-       LIMIT 1`,
-      [domain]
-    );
-
+    const nextItem = getFirstPlanItem();
     if (!nextItem) {
-      const resetAt = new Date().toISOString();
-      await db.run(
-        `UPDATE model_training_plan_items
-         SET status = 'pending',
-             note = '新一轮训练已重置计划，等待流水线重新执行。',
-             completed_at = NULL,
-             updated_at = ?
-         WHERE domain = ?`,
-        [resetAt, domain]
-      );
-      nextItem = await db.get(
-        `SELECT item_key, title FROM model_training_plan_items
-         WHERE domain = ?
-         ORDER BY sort_order ASC
-         LIMIT 1`,
-        [domain]
-      );
-      if (!nextItem) {
-        return res.json({ success: true, data: null, message: '训练计划为空，无法启动' });
-      }
+      return res.json({ success: true, data: null, message: '训练计划为空，无法启动' });
     }
 
     const now = new Date().toISOString();
@@ -1426,15 +1931,7 @@ router.post('/run/:domain', async (req, res) => {
       [outputDir, sourceRowCount, now, runId]
     );
 
-    await db.run(
-      `UPDATE model_training_plan_items
-       SET status = 'running',
-           note = ?,
-           completed_at = NULL,
-           updated_at = ?
-       WHERE domain = ? AND item_key = ?`,
-      [`训练运行目录：${outputDir}；源数据行数：${sourceRowCount}`, now, domain, nextItem.item_key]
-    );
+    await seedRunPlan(db, runId, domain, nextItem.item_key, `训练运行目录：${outputDir}；源数据行数：${sourceRowCount}`);
 
     const run = await db.get('SELECT * FROM model_training_runs WHERE id = ?', [runId]);
     startPipelineWorker(runId, domain, outputDir);
@@ -1463,23 +1960,52 @@ router.patch('/plan/:domain/:itemKey', async (req, res) => {
 
     const now = new Date().toISOString();
     const completedAt = status === 'completed' ? now : null;
-    const result = await db.run(
-      `UPDATE model_training_plan_items
-       SET status = ?, note = COALESCE(?, note), completed_at = ?, updated_at = ?
-       WHERE domain = ? AND item_key = ?`,
-      [status, note ?? null, completedAt, now, domain, itemKey]
+    const latestRun = await db.get(
+      `SELECT id
+       FROM model_training_runs
+       WHERE domain = ?
+       ORDER BY started_at DESC, id DESC
+       LIMIT 1`,
+      [domain]
     );
+    let useRunPlan = false;
+    let result = latestRun
+      ? await db.run(
+        `UPDATE model_training_run_plan_items
+         SET status = ?, note = COALESCE(?, note), completed_at = ?, updated_at = ?
+         WHERE run_id = ? AND domain = ? AND item_key = ?`,
+        [status, note ?? null, completedAt, now, latestRun.id, domain, itemKey]
+      )
+      : { changes: 0 };
+
+    if (result.changes) {
+      useRunPlan = true;
+    } else {
+      result = await db.run(
+        `UPDATE model_training_plan_items
+         SET status = ?, note = COALESCE(?, note), completed_at = ?, updated_at = ?
+         WHERE domain = ? AND item_key = ?`,
+        [status, note ?? null, completedAt, now, domain, itemKey]
+      );
+    }
 
     if (!result.changes) {
       return res.status(404).json({ success: false, message: '训练计划项不存在' });
     }
 
-    const item = await db.get(
-      `SELECT id, domain, item_key, stage, title, description, status, sort_order, completed_at, note, updated_at
-       FROM model_training_plan_items
-       WHERE domain = ? AND item_key = ?`,
-      [domain, itemKey]
-    );
+    const item = useRunPlan
+      ? await db.get(
+        `SELECT id, run_id, domain, item_key, stage, title, description, status, sort_order, completed_at, note, updated_at
+         FROM model_training_run_plan_items
+         WHERE run_id = ? AND domain = ? AND item_key = ?`,
+        [latestRun.id, domain, itemKey]
+      )
+      : await db.get(
+        `SELECT id, NULL AS run_id, domain, item_key, stage, title, description, status, sort_order, completed_at, note, updated_at
+         FROM model_training_plan_items
+         WHERE domain = ? AND item_key = ?`,
+        [domain, itemKey]
+      );
     res.json({ success: true, data: item });
   } catch (error) {
     console.error('Error updating model training plan:', error);

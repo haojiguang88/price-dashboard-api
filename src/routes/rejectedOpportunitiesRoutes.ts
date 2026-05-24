@@ -6,6 +6,15 @@ const router = express.Router();
 const VALID_DECISION_STAGES = new Set(['seen', 'risk_checked', 'actively_rejected']);
 const VALID_DECISION_QUALITIES = new Set(['valid', 'needs_review', 'unclear']);
 const VALID_LATER_STATUSES = new Set(['not_tracked', 'trigger_review', 'reviewed']);
+const VALID_REVIEW_CATEGORIES = new Set([
+  'correct_reject',
+  'rule_false_kill',
+  'cognition_gap',
+  'information_gap',
+  'new_variable',
+  'execution_issue',
+  'not_my_money'
+]);
 
 interface RejectedOpportunityInput {
   title?: unknown;
@@ -22,6 +31,8 @@ interface RejectedOpportunityInput {
   riskResult?: unknown;
   rejection_reason?: unknown;
   rejectionReason?: unknown;
+  review_category?: unknown;
+  reviewCategory?: unknown;
   information_snapshot?: unknown;
   informationSnapshot?: unknown;
   risk_rules_snapshot?: unknown;
@@ -51,6 +62,7 @@ const normalizeOpportunity = (body: RejectedOpportunityInput) => {
   const decisionStage = cleanText(body.decision_stage ?? body.decisionStage) || 'actively_rejected';
   const decisionQuality = cleanText(body.decision_quality ?? body.decisionQuality) || 'valid';
   const laterStatus = cleanText(body.later_status ?? body.laterStatus) || 'not_tracked';
+  const reviewCategory = cleanText(body.review_category ?? body.reviewCategory) || 'correct_reject';
 
   return {
     title: cleanText(body.title),
@@ -61,6 +73,7 @@ const normalizeOpportunity = (body: RejectedOpportunityInput) => {
     decisionStage,
     riskResult: cleanText(body.risk_result ?? body.riskResult),
     rejectionReason: cleanText(body.rejection_reason ?? body.rejectionReason),
+    reviewCategory,
     informationSnapshot: cleanText(body.information_snapshot ?? body.informationSnapshot),
     riskRulesSnapshot: cleanText(body.risk_rules_snapshot ?? body.riskRulesSnapshot),
     riskTolerance: cleanText(body.risk_tolerance ?? body.riskTolerance),
@@ -80,6 +93,7 @@ const validateOpportunity = (item: ReturnType<typeof normalizeOpportunity>) => {
   if (!VALID_DECISION_STAGES.has(item.decisionStage)) return '无效的 decision_stage';
   if (!VALID_DECISION_QUALITIES.has(item.decisionQuality)) return '无效的 decision_quality';
   if (!VALID_LATER_STATUSES.has(item.laterStatus)) return '无效的 later_status';
+  if (!VALID_REVIEW_CATEGORIES.has(item.reviewCategory)) return '无效的 review_category';
   return '';
 };
 
@@ -119,7 +133,7 @@ const writeAuditLog = async (
 
 const selectColumns = `
   id, title, track, project_name, related_object, decision_date,
-  decision_stage, risk_result, rejection_reason, information_snapshot,
+  decision_stage, risk_result, rejection_reason, review_category, information_snapshot,
   risk_rules_snapshot, risk_tolerance, execution_consistency,
   decision_quality, later_status, later_summary, review_link, note,
   created_at, updated_at
@@ -128,7 +142,7 @@ const selectColumns = `
 router.get('/rejected-opportunities', async (req, res) => {
   try {
     const db = await getDb();
-    const { q, track, decision_stage, decision_quality, later_status } = req.query;
+    const { q, track, decision_stage, decision_quality, review_category, later_status } = req.query;
     const pageNum = Math.max(parseInt(String(req.query.page || '1'), 10) || 1, 1);
     const pageSize = Math.min(Math.max(parseInt(String(req.query.pageSize || '10'), 10) || 10, 1), 100);
     const offset = (pageNum - 1) * pageSize;
@@ -141,10 +155,10 @@ router.get('/rejected-opportunities', async (req, res) => {
         title LIKE ? OR track LIKE ? OR project_name LIKE ? OR related_object LIKE ?
         OR risk_result LIKE ? OR rejection_reason LIKE ? OR information_snapshot LIKE ?
         OR risk_rules_snapshot LIKE ? OR risk_tolerance LIKE ? OR execution_consistency LIKE ?
-        OR later_summary LIKE ? OR note LIKE ?
+        OR later_summary LIKE ? OR review_category LIKE ? OR note LIKE ?
       )`);
       const keyword = `%${String(q).trim()}%`;
-      params.push(keyword, keyword, keyword, keyword, keyword, keyword, keyword, keyword, keyword, keyword, keyword, keyword);
+      params.push(keyword, keyword, keyword, keyword, keyword, keyword, keyword, keyword, keyword, keyword, keyword, keyword, keyword);
     }
 
     if (track) {
@@ -160,6 +174,11 @@ router.get('/rejected-opportunities', async (req, res) => {
     if (decision_quality) {
       where.push('decision_quality = ?');
       params.push(String(decision_quality));
+    }
+
+    if (review_category) {
+      where.push('review_category = ?');
+      params.push(String(review_category));
     }
 
     if (later_status) {
@@ -228,11 +247,11 @@ router.post('/rejected-opportunities', async (req, res) => {
       `
         INSERT INTO rejected_opportunities (
           title, track, project_name, related_object, decision_date, decision_stage,
-          risk_result, rejection_reason, information_snapshot, risk_rules_snapshot,
+          risk_result, rejection_reason, review_category, information_snapshot, risk_rules_snapshot,
           risk_tolerance, execution_consistency, decision_quality, later_status,
           later_summary, review_link, note, is_deleted, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
       `,
       [
         item.title,
@@ -243,6 +262,7 @@ router.post('/rejected-opportunities', async (req, res) => {
         item.decisionStage,
         item.riskResult,
         item.rejectionReason,
+        item.reviewCategory,
         item.informationSnapshot,
         item.riskRulesSnapshot,
         item.riskTolerance,
@@ -297,6 +317,7 @@ router.put('/rejected-opportunities/:id', async (req, res) => {
             decision_stage = ?,
             risk_result = ?,
             rejection_reason = ?,
+            review_category = ?,
             information_snapshot = ?,
             risk_rules_snapshot = ?,
             risk_tolerance = ?,
@@ -318,6 +339,7 @@ router.put('/rejected-opportunities/:id', async (req, res) => {
         item.decisionStage,
         item.riskResult,
         item.rejectionReason,
+        item.reviewCategory,
         item.informationSnapshot,
         item.riskRulesSnapshot,
         item.riskTolerance,

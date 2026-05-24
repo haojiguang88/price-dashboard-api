@@ -1,7 +1,9 @@
 import express, { Request, Response } from 'express';
 import { spawn } from 'child_process';
+import fs from 'fs';
 import path from 'path';
-import getDb from '../config/database';
+import sqlite3 from 'sqlite3';
+import getDb, { getDatabasePath } from '../config/database';
 import {
   buildIndustryEtfStrengthContext,
   buildIndustryStrengthGateReason,
@@ -13,8 +15,11 @@ import {
 import {
   getFinancePlanProfileConfig,
   getFinanceStructureProfileConfig,
+  isIndustryThemeEtfLike,
   resolveFinancePlanProfile
 } from '../services/financePlanProfile';
+import { getLatestCoveredTradeDate } from '../utils/financeTradeDate';
+import { getFreshMarketRegime } from '../utils/financeMarketRegime';
 
 const router = express.Router();
 
@@ -27,6 +32,10 @@ const STOCK_CIRC_MARKET_CAP_MIN_YUAN = 5_000_000_000;
 const ETF_HARD_BLOCK_TREND_PHASES = new Set(['SURGE', 'REBOUND', 'SLOW_BLEED', 'CRASH_DROP']);
 const STRUCTURE_QUEUE_STATUSES = new Set(['structure_pending', 'structure_watch', 'model_conflict']);
 const STRUCTURE_READY_TREND_PHASES = new Set(['BREAKOUT', 'SLOW_GRIND_UP', 'RECOVERY']);
+const STRUCTURE_HOLD_TREND_PHASES = new Set(['TREND_UP', 'HIGH_BASE', 'SIDEWAYS', 'CONSOLIDATION', 'TREND_TRANSITION', 'UNKNOWN']);
+const MODEL_RECHECK_QUERY_LIMIT = 1000;
+const CANDIDATE_SCORE_CACHE_MS = 60 * 1000;
+const CANDIDATE_MODEL_PRIORITY = ['lightgbm_model', 'random_forest', 'logistic_regression'];
 const STRUCTURE_HARD_REJECT_GATES = new Set([
   'asset_applicability',
   'data_ready',
@@ -39,6 +48,17 @@ const STRUCTURE_HARD_REJECT_GATES = new Set([
 const trainingRoot = process.env.MODEL_TRAINING_ROOT || '/Volumes/7100/model-training';
 const trainingPython = process.env.MODEL_TRAINING_PYTHON || path.join(trainingRoot, 'venv', 'bin', 'python');
 let candidateReviewSchemaReady = false;
+let candidatePoolLightColumnsCache: string[] | null = null;
+
+const candidateScoreCache = new Map<string, {
+  expiresAt: number;
+  data?: Record<string, any>;
+  promise?: Promise<Record<string, any>>;
+}>();
+const candidateModelFreshnessCache = new Map<string, {
+  expiresAt: number;
+  data: CandidateModelFreshness;
+}>();
 
 interface CandidatePriorityResult {
   priority: 'high' | 'medium' | 'low';
@@ -46,6 +66,38 @@ interface CandidatePriorityResult {
   forbidden_reason: string | null;
   downgrade_reason: string | null;
   risk_note: string | null;
+}
+
+interface CandidateModelFreshness {
+  available: boolean;
+  reason: string | null;
+  modelKey: string | null;
+  target: string | null;
+  latestFeatureTradeDate: string | null;
+}
+
+interface StockIndustryStrengthItem {
+  known: boolean;
+  code: string | null;
+  name: string | null;
+  trade_date: string | null;
+  ret_5d: number | null;
+  ret_20d: number | null;
+  ret_60d: number | null;
+  amount_ratio_5_20: number | null;
+  ret20_rank_score: number | null;
+  strength_score: number;
+  strength_status: string;
+  strength_label: string;
+  reason: string;
+  forbidden_reason: string | null;
+  downgrade_reason: string | null;
+}
+
+interface StockIndustryStrengthContext {
+  asOfTradeDate: string | null;
+  memberMap: Map<string, { code: string; name: string | null }>;
+  industryMap: Map<string, any>;
 }
 
 interface DailyPrice {
@@ -133,7 +185,20 @@ interface CandidateGate {
   blocking: boolean;
 }
 
-type OpportunityTypeCode = 'DEFENSIVE' | 'REPAIR' | 'TREND' | 'EMOTIONAL' | 'NOT_APPLICABLE';
+type CandidateFlowTimelineStatus = 'done' | 'active' | 'waiting' | 'blocked' | 'missing';
+
+interface CandidateFlowTimelineStep {
+  key: string;
+  label: string;
+  status: CandidateFlowTimelineStatus;
+  date?: string | null;
+  summary: string;
+  detail: string;
+  metric?: string | null;
+  actionLabel?: string | null;
+}
+
+type OpportunityTypeCode = 'DEFENSIVE' | 'REPAIR' | 'TREND' | 'EMOTIONAL' | 'EARLY_LEADER_WATCH' | 'NOT_APPLICABLE';
 
 interface OpportunityTypeTag {
   code: OpportunityTypeCode;
@@ -171,9 +236,113 @@ const MODEL_RECHECK_HARD_BLOCKING_GATES = new Set([
   'structure_gate',
   'risk_forbidden_gate',
 ]);
+
+const MODEL_RECHECK_SOFT_CONFLICT_GATES = new Set([
+  'market_gate',
+  'safe_zone_gate',
+  'trend_phase_gate',
+  'risk_downgrade_gate',
+  'priority_gate',
+  'etf_group_gate',
+]);
+
+const MODEL_RECHECK_BATCH_DATE_SQL = `substr(COALESCE(NULLIF(updated_at, ''), NULLIF(last_checked_at, '')), 1, 10)`;
+
+const MODEL_RECHECK_SOFT_CONFLICT_SQL = `(
+  COALESCE(review_action, '') = 'model_conflict_manual_required'
+  OR (
+    COALESCE(priority_score, 0) >= 80
+    AND (
+      COALESCE(first_blocking_gate_key, '') IN ('market_gate', 'safe_zone_gate', 'trend_phase_gate', 'risk_downgrade_gate', 'priority_gate', 'etf_group_gate')
+      OR COALESCE(review_action, '') IN ('trend_phase_rejected', 'single_target_watch', 'entry_trigger_back_to_structure', 'entry_trigger_back_to_trend')
+      OR (
+        COALESCE(first_blocking_gate_key, '') = ''
+        AND (
+          COALESCE(candidate_reason, '') LIKE '%走势%'
+          OR COALESCE(candidate_reason, '') LIKE '%安全区%'
+          OR COALESCE(candidate_reason, '') LIKE '%降级%'
+          OR COALESCE(candidate_reason, '') LIKE '%踢出本轮%'
+          OR COALESCE(candidate_reason, '') LIKE '%只观察%'
+          OR COALESCE(candidate_reason, '') LIKE '%等待%'
+          OR COALESCE(forbidden_reason, '') LIKE '%走势%'
+          OR COALESCE(forbidden_reason, '') LIKE '%安全区%'
+          OR COALESCE(forbidden_reason, '') LIKE '%降级%'
+          OR COALESCE(forbidden_reason, '') LIKE '%踢出本轮%'
+          OR COALESCE(forbidden_reason, '') LIKE '%只观察%'
+          OR COALESCE(forbidden_reason, '') LIKE '%等待%'
+          OR COALESCE(downgrade_reason, '') LIKE '%走势%'
+          OR COALESCE(downgrade_reason, '') LIKE '%安全区%'
+          OR COALESCE(downgrade_reason, '') LIKE '%降级%'
+          OR COALESCE(downgrade_reason, '') LIKE '%踢出本轮%'
+          OR COALESCE(downgrade_reason, '') LIKE '%只观察%'
+          OR COALESCE(downgrade_reason, '') LIKE '%等待%'
+          OR COALESCE(risk_note, '') LIKE '%走势%'
+          OR COALESCE(risk_note, '') LIKE '%安全区%'
+          OR COALESCE(risk_note, '') LIKE '%降级%'
+          OR COALESCE(risk_note, '') LIKE '%踢出本轮%'
+          OR COALESCE(risk_note, '') LIKE '%只观察%'
+          OR COALESCE(risk_note, '') LIKE '%等待%'
+        )
+      )
+    )
+  )
+)`;
+const MODEL_RECHECK_NOT_HARD_BLOCKED_SQL = `NOT (
+  COALESCE(first_blocking_gate_key, '') IN ('asset_applicability', 'data_ready', 'special_treatment', 'liquidity_gate', 'market_cap_gate', 'extreme_trade_gate', 'structure_gate', 'risk_forbidden_gate')
+  OR COALESCE(first_blocking_gate_label, '') = 'ST/退市过滤'
+  OR COALESCE(structure_status, '') = 'STRUCTURE_BROKEN'
+  OR COALESCE(NULLIF(forbidden_reason, ''), NULLIF(candidate_reason, ''), NULLIF(risk_note, ''), '') LIKE '%结构失败%'
+  OR COALESCE(NULLIF(forbidden_reason, ''), NULLIF(candidate_reason, ''), NULLIF(risk_note, ''), '') LIKE '%结构破坏%'
+  OR COALESCE(NULLIF(forbidden_reason, ''), NULLIF(candidate_reason, ''), NULLIF(risk_note, ''), '') LIKE '%跌破失效线%'
+  OR COALESCE(NULLIF(forbidden_reason, ''), NULLIF(candidate_reason, ''), NULLIF(risk_note, ''), '') LIKE '%极端交易状态%'
+)`;
+const MODEL_RECHECK_DATA_GAP_SQL = `(
+  (
+    SELECT MAX(p.trade_date)
+    FROM financial_daily_prices p
+    WHERE p.symbol = financial_candidate_pool.symbol
+      AND p.asset_type = financial_candidate_pool.asset_type
+      AND p.source = financial_candidate_pool.source
+  ) < (
+    SELECT MAX(m.trade_date)
+    FROM financial_daily_prices m
+    WHERE m.source = financial_candidate_pool.source
+      AND m.symbol = '000300'
+      AND m.asset_type = 'index'
+  )
+  OR COALESCE(candidate_reason, '') LIKE '%最新日线停留%'
+  OR COALESCE(candidate_reason, '') LIKE '%日线缺口%'
+  OR COALESCE(candidate_reason, '') LIKE '%数据断档%'
+  OR COALESCE(candidate_reason, '') LIKE '%没有同步到市场最新交易日%'
+  OR COALESCE(forbidden_reason, '') LIKE '%最新日线停留%'
+  OR COALESCE(forbidden_reason, '') LIKE '%日线缺口%'
+  OR COALESCE(forbidden_reason, '') LIKE '%数据断档%'
+  OR COALESCE(forbidden_reason, '') LIKE '%没有同步到市场最新交易日%'
+  OR COALESCE(risk_note, '') LIKE '%最新日线停留%'
+  OR COALESCE(risk_note, '') LIKE '%日线缺口%'
+  OR COALESCE(risk_note, '') LIKE '%数据断档%'
+  OR COALESCE(risk_note, '') LIKE '%没有同步到市场最新交易日%'
+)`;
+
+type ModelRecheckScope = 'actionable' | 'data_gap' | 'high_conflict' | 'neutral' | 'all';
+type ModelRecheckBucket = 'data_gap' | 'high_conflict' | 'neutral' | 'archive' | 'hard_blocked' | 'unscored';
+
+function getModelRecheckFirstBlockingGate(item: any) {
+  const parsedGateTrace = parseJson(item?.gate_trace_json, null);
+  const key = String(item?.first_blocking_gate_key || parsedGateTrace?.first_blocking_gate?.key || '').trim();
+  const label = String(item?.first_blocking_gate_label || parsedGateTrace?.first_blocking_gate?.label || '').trim();
+  if (key || label) {
+    return { key, label };
+  }
+  const rebuiltGateTrace = buildStoredGateTrace(item);
+  return {
+    key: String(rebuiltGateTrace?.first_blocking_gate?.key || '').trim(),
+    label: String(rebuiltGateTrace?.first_blocking_gate?.label || '').trim()
+  };
+}
+
 function isHardBlockedFromModelRecheck(item: any) {
-  const firstBlockingGateKey = String(item?.first_blocking_gate_key || '').trim();
-  const firstBlockingGateLabel = String(item?.first_blocking_gate_label || '').trim();
+  const { key: firstBlockingGateKey, label: firstBlockingGateLabel } = getModelRecheckFirstBlockingGate(item);
   const structureStatus = String(item?.structure_status || '').trim();
   const forbiddenReason = String(item?.forbidden_reason || item?.candidate_reason || item?.risk_note || '').trim();
   return MODEL_RECHECK_HARD_BLOCKING_GATES.has(firstBlockingGateKey)
@@ -183,13 +352,133 @@ function isHardBlockedFromModelRecheck(item: any) {
     || isSpecialTreatmentName(item?.name);
 }
 
-function isVisibleModelRecheckItem(item: any) {
+function hasModelRecheckDataGap(item: any) {
+  const localDate = String(item?.local_last_trade_date || '').trim();
+  const marketDate = String(item?.market_latest_trade_date || '').trim();
+  const reason = String(item?.candidate_reason || item?.forbidden_reason || item?.risk_note || '').trim();
+  return Boolean(localDate && marketDate && localDate < marketDate)
+    || /最新日线停留|日线缺口|数据断档|没有同步到市场最新交易日/.test(reason);
+}
+
+function isSoftModelConflictGate(item: any) {
+  const { key: gateKey } = getModelRecheckFirstBlockingGate(item);
+  const reviewAction = String(item?.review_action || '').trim();
+  const reason = String(item?.candidate_reason || item?.forbidden_reason || item?.downgrade_reason || item?.risk_note || '').trim();
+  return MODEL_RECHECK_SOFT_CONFLICT_GATES.has(gateKey)
+    || (!gateKey && /走势|安全区|降级|踢出本轮|只观察|等待/.test(reason))
+    || ['trend_phase_rejected', 'single_target_watch', 'entry_trigger_back_to_structure', 'entry_trigger_back_to_trend'].includes(reviewAction);
+}
+
+function isFinanceMarketGateOpen(marketGate: any) {
+  return marketGate?.entry_permission === 'ALLOW_STRUCTURE_CHECK';
+}
+
+function getFinanceMarketGateBlockReason(marketGate: any) {
+  if (marketGate?.stale) return marketGate.freshness_reason;
+  return marketGate?.entry_reason
+    || marketGate?.result_reason
+    || marketGate?.freshness_reason
+    || '市场总闸未开放单标的结构判断。';
+}
+
+async function getFinanceMarketGateBlocker(db: any, source: string) {
+  const marketGate = await getFreshMarketRegime(db, { source });
+  if (isFinanceMarketGateOpen(marketGate)) return null;
+  return {
+    marketGate,
+    message: `市场总闸未通过，禁止推进备选池/单标的判断；本轮不修改候选池状态：${getFinanceMarketGateBlockReason(marketGate)}`
+  };
+}
+
+function isCandidateReviewStatusFlowAdvancing(status: string) {
+  return [
+    'unreviewed',
+    'drafted',
+    'structure_pending',
+    'structure_watch',
+    'structure_ready',
+    'model_conflict',
+    'wait_confirmation',
+    'plan_ready'
+  ].includes(status);
+}
+
+function isCandidatePoolStatusFlowAdvancing(status: string) {
+  return ['active', 'planned'].includes(status);
+}
+
+function isTrueModelRecheckConflict(item: any) {
+  const reviewAction = String(item?.review_action || '').trim();
+  if (reviewAction === 'auto_model_recheck_settled') return false;
   const probability = Number(item?.ml_probability);
+  if (!item?.ml_available || !Number.isFinite(probability)) return false;
+  if (!hasSupportedModelTarget(item)) return false;
+  if (hasModelRecheckDataGap(item) || isHardBlockedFromModelRecheck(item)) return false;
+  if (!isSoftModelConflictGate(item)) return false;
+
   const structureProfile = getFinanceStructureProfileConfig(resolveCandidateProfile(item).key);
-  return !isHardBlockedFromModelRecheck(item)
-    && item?.ml_available
-    && Number.isFinite(probability)
-    && probability >= structureProfile.modelLowProbability;
+  const strictProbability = Math.max(structureProfile.modelHighProbability + 0.08, 0.70);
+  const priorityScore = Number(item?.priority_score || 0);
+  return probability >= strictProbability && priorityScore >= 80;
+}
+
+function getModelRecheckBucket(item: any): ModelRecheckBucket {
+  const reviewAction = String(item?.review_action || '').trim();
+  if (reviewAction === 'auto_model_recheck_settled') return 'archive';
+  if (isHardBlockedFromModelRecheck(item)) return 'hard_blocked';
+  if (reviewAction === 'model_conflict_manual_required') return 'high_conflict';
+  if (hasModelRecheckDataGap(item)) return 'data_gap';
+  const probability = Number(item?.ml_probability);
+  if (!item?.ml_available || !Number.isFinite(probability)) return 'unscored';
+  if (isTrueModelRecheckConflict(item)) return 'high_conflict';
+  const structureProfile = getFinanceStructureProfileConfig(resolveCandidateProfile(item).key);
+  if (probability >= structureProfile.modelLowProbability) return 'neutral';
+  return 'archive';
+}
+
+function getModelRecheckBatchDate(item: any) {
+  return String(item?.updated_at || item?.last_checked_at || '').slice(0, 10);
+}
+
+function getLatestModelRecheckBatchDate(items: any[]) {
+  return items.reduce((latest, item) => {
+    const date = getModelRecheckBatchDate(item);
+    return date && date > latest ? date : latest;
+  }, '');
+}
+
+function isVisibleModelRecheckItem(item: any, scope: ModelRecheckScope = 'actionable', latestBatchDate = '') {
+  const bucket = getModelRecheckBucket(item);
+  const inLatestBatch = !latestBatchDate || getModelRecheckBatchDate(item) === latestBatchDate;
+  if (scope === 'data_gap') return bucket === 'data_gap';
+  if (scope === 'high_conflict') return bucket === 'high_conflict';
+  if (scope === 'neutral') return bucket === 'neutral';
+  if (scope === 'all') return ['data_gap', 'high_conflict', 'neutral'].includes(bucket);
+  return inLatestBatch && bucket === 'high_conflict';
+}
+
+function buildModelRecheckSummary(items: any[], latestBatchDate = '') {
+  const summary = {
+    actionable: 0,
+    current_batch: 0,
+    data_gap: 0,
+    high_conflict: 0,
+    neutral: 0,
+    all: 0,
+    archive: 0,
+    hard_blocked: 0,
+    unscored: 0
+  };
+  items.forEach((item) => {
+    const bucket = getModelRecheckBucket(item);
+    summary[bucket] += 1;
+    if (getModelRecheckBatchDate(item) === latestBatchDate) {
+      summary.current_batch += 1;
+      if (bucket === 'high_conflict') summary.actionable += 1;
+    }
+    if (bucket === 'data_gap' || bucket === 'high_conflict' || bucket === 'neutral') summary.all += 1;
+  });
+  return summary;
 }
 
 function parseJson(value: unknown, fallback: any = null) {
@@ -199,6 +488,25 @@ function parseJson(value: unknown, fallback: any = null) {
   } catch {
     return fallback;
   }
+}
+
+function quoteSqlIdentifier(value: string) {
+  return `"${String(value).replace(/"/g, '""')}"`;
+}
+
+async function getCandidatePoolLightSelectColumns(db: any, alias = 'financial_candidate_pool') {
+  if (!candidatePoolLightColumnsCache) {
+    const columns = await db.all(`PRAGMA table_info(financial_candidate_pool)`);
+    candidatePoolLightColumnsCache = columns
+      .map((column: any) => String(column.name || '').trim())
+      .filter((name: string) => name && name !== 'gate_trace_json');
+  }
+
+  const prefix = alias ? `${alias}.` : '';
+  const columnNames = candidatePoolLightColumnsCache || [];
+  return columnNames
+    .map((name) => `${prefix}${quoteSqlIdentifier(name)}`)
+    .join(', ');
 }
 
 function makeGate(
@@ -425,28 +733,412 @@ function buildStoredGateTrace(item: any) {
   ], selected, finalReason);
 }
 
-function hydrateCandidateItem(item: any) {
-  const parsedGateTrace = parseJson(item.gate_trace_json, null);
+function hydrateCandidateItem(item: any, options: { includeGateTrace?: boolean } = {}) {
+  const parsedGateTrace = item.gate_trace_json ? parseJson(item.gate_trace_json, null) : null;
   const planProfile = item.plan_profile
     ? getFinancePlanProfileConfig(item.plan_profile)
     : resolveCandidateProfile(item);
+  const { gate_trace_json: _gateTraceJson, ...itemWithoutRawGateTrace } = item;
   const itemWithProfile = {
-    ...item,
+    ...itemWithoutRawGateTrace,
     plan_profile: item.plan_profile || planProfile.key,
     plan_profile_label: item.plan_profile_label || planProfile.label
   };
   const hasCurrentGateShape = parsedGateTrace?.gates && CANDIDATE_GATE_DEFINITIONS.every(definition =>
     parsedGateTrace.gates.some((gate: CandidateGate) => gate.key === definition.key)
   );
-  const gateTrace = hasCurrentGateShape ? parsedGateTrace : buildStoredGateTrace(itemWithProfile);
-  return {
+  const needsGateTrace = Boolean(options.includeGateTrace)
+    || !item.first_blocking_gate_key
+    || !item.first_blocking_gate_label
+    || !item.blocking_gate_labels;
+  const gateTrace = needsGateTrace
+    ? (hasCurrentGateShape ? parsedGateTrace : buildStoredGateTrace(itemWithProfile))
+    : null;
+  const hydrated = {
     ...itemWithProfile,
     opportunity_type: item.opportunity_type || classifyOpportunityType(itemWithProfile),
-    gate_trace: gateTrace,
-    first_blocking_gate_key: item.first_blocking_gate_key || gateTrace.first_blocking_gate?.key || null,
-    first_blocking_gate_label: item.first_blocking_gate_label || gateTrace.first_blocking_gate?.label || null,
-    blocking_gate_labels: item.blocking_gate_labels || gateTrace.blocking_gates?.map((gate: CandidateGate) => gate.label).join('、') || null,
+    first_blocking_gate_key: item.first_blocking_gate_key || gateTrace?.first_blocking_gate?.key || null,
+    first_blocking_gate_label: item.first_blocking_gate_label || gateTrace?.first_blocking_gate?.label || null,
+    blocking_gate_labels: item.blocking_gate_labels || gateTrace?.blocking_gates?.map((gate: CandidateGate) => gate.label).join('、') || null,
   };
+  if (options.includeGateTrace) {
+    return {
+      ...hydrated,
+      gate_trace: gateTrace || buildStoredGateTrace(itemWithProfile)
+    };
+  }
+  return hydrated;
+}
+
+async function getOptionalFlowRow(db: any, sql: string, params: any[] = []) {
+  try {
+    return await db.get(sql, params);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/no such table|no such column/i.test(message)) return null;
+    throw error;
+  }
+}
+
+function buildTimelineStep(input: CandidateFlowTimelineStep): CandidateFlowTimelineStep {
+  return {
+    key: input.key,
+    label: input.label,
+    status: input.status,
+    date: input.date || null,
+    summary: input.summary || '--',
+    detail: input.detail || '--',
+    metric: input.metric || null,
+    actionLabel: input.actionLabel || null
+  };
+}
+
+function getCandidatePoolTimelineStatus(item: any): CandidateFlowTimelineStatus {
+  const poolStatus = String(item.pool_status || '');
+  const reviewStatus = String(item.review_status || '');
+  if (poolStatus === 'expired' || poolStatus === 'ignored' || reviewStatus === 'rejected') return 'blocked';
+  if (poolStatus === 'planned' || reviewStatus === 'plan_ready') return 'done';
+  if (poolStatus === 'active') return 'done';
+  return 'waiting';
+}
+
+function getTrendTimelineStatus(code?: string | null): CandidateFlowTimelineStatus {
+  const value = String(code || '');
+  if (!value || value === 'UNKNOWN') return 'missing';
+  if (['CRASH_DROP', 'SURGE', 'REBOUND', 'SLOW_BLEED'].includes(value)) return 'blocked';
+  if (['BREAKOUT', 'SLOW_GRIND_UP', 'RECOVERY', 'TREND_UP', 'HIGH_BASE'].includes(value)) return 'done';
+  return 'waiting';
+}
+
+function getStructureTimelineStatus(item: any, reviewRow: any): CandidateFlowTimelineStatus {
+  const reviewStatus = String(item.review_status || reviewRow?.review_status || '');
+  if (['rejected', 'ignored'].includes(reviewStatus)) return 'blocked';
+  if (['wait_confirmation', 'plan_ready'].includes(reviewStatus) || reviewRow?.review_status === 'confirmed') return 'done';
+  if (['structure_pending', 'structure_watch', 'structure_ready', 'model_conflict', 'drafted'].includes(reviewStatus)) return 'active';
+  if (item.structure_status === 'STRUCTURE_CONFIRMED' && item.safe_zone_status === 'SAFE_ZONE') return 'done';
+  if (item.structure_status === 'STRUCTURE_BROKEN' || item.safe_zone_status === 'BROKEN_ZONE') return 'blocked';
+  return 'waiting';
+}
+
+function getEntryTriggerTimelineStatus(row: any): CandidateFlowTimelineStatus {
+  if (!row) return 'missing';
+  const status = String(row.observation_status || '');
+  if (['confirmed', 'plan_candidate'].includes(status)) return 'done';
+  if (['watching', 'rechecking'].includes(status)) return 'active';
+  if (['blocked', 'invalidated', 'expired', 'rejected', 'returned', 'upstream_expired'].includes(status)) return 'blocked';
+  return 'waiting';
+}
+
+function getPlanTimelineStatus(row: any): CandidateFlowTimelineStatus {
+  if (!row) return 'missing';
+  const status = String(row.status || '');
+  if (['confirmed', 'active', 'executed', 'completed'].includes(status) || row.is_bought === 1) return 'done';
+  if (['draft', 'pending', 'watching'].includes(status)) return 'active';
+  if (['invalidated', 'cancelled', 'archived', 'deleted'].includes(status) || row.stopped_out === 1) return 'blocked';
+  return 'waiting';
+}
+
+function getOutcomeTimelineStatus(metrics: any): CandidateFlowTimelineStatus {
+  if (!metrics) return 'missing';
+  if (metrics.brokeInvalidation) return 'blocked';
+  if (metrics.ret20 !== null && metrics.ret20 !== undefined) return Number(metrics.ret20) > 0 ? 'done' : 'blocked';
+  if (metrics.ret10 !== null && metrics.ret10 !== undefined) return 'active';
+  return 'waiting';
+}
+
+function getOutcomeLabel(metrics: any): string {
+  if (!metrics) return '等待样本验证';
+  if (metrics.brokeInvalidation) return '跌破失效';
+  if (metrics.ret20 !== null && metrics.ret20 !== undefined) return Number(metrics.ret20) > 0 ? '20日正收益' : '20日负收益';
+  if (metrics.ret10 !== null && metrics.ret10 !== undefined) return Number(metrics.ret10) > 0 ? '10日正收益' : '10日负收益';
+  if (metrics.ret5 !== null && metrics.ret5 !== undefined) return Number(metrics.ret5) > 0 ? '5日正收益' : '5日负收益';
+  return '等待样本验证';
+}
+
+function formatOutcomeMetric(metrics: any): string | null {
+  if (!metrics) return null;
+  const parts = [
+    metrics.ret5 !== null && metrics.ret5 !== undefined ? `5日 ${formatSignedPercent(metrics.ret5)}` : null,
+    metrics.ret10 !== null && metrics.ret10 !== undefined ? `10日 ${formatSignedPercent(metrics.ret10)}` : null,
+    metrics.ret20 !== null && metrics.ret20 !== undefined ? `20日 ${formatSignedPercent(metrics.ret20)}` : null,
+    metrics.maxDrawdown20 !== null && metrics.maxDrawdown20 !== undefined ? `20日最大回撤 ${formatSignedPercent(metrics.maxDrawdown20)}` : null
+  ].filter(Boolean);
+  return parts.length ? parts.join(' / ') : null;
+}
+
+async function getCandidateForwardOutcome(db: any, item: any) {
+  const tradeDate = item.trade_date || item.first_selected_at?.slice(0, 10);
+  if (!item.symbol || !tradeDate) return null;
+  const maxTradeDate = await getLatestCoveredTradeDate(db, { assetTypes: [item.asset_type || 'stock'] });
+  const prices = await db.all(
+    `SELECT trade_date, close, low
+     FROM financial_daily_prices
+     WHERE symbol = ?
+       AND asset_type = ?
+       AND source = ?
+       AND trade_date >= ?
+       AND (? IS NULL OR trade_date <= ?)
+     ORDER BY trade_date ASC
+     LIMIT 26`,
+    [item.symbol, item.asset_type || 'stock', item.source || 'tushare', tradeDate, maxTradeDate || null, maxTradeDate || null]
+  );
+  const entryClose = toNullableNumber(item.close) || toNullableNumber(prices[0]?.close);
+  if (!entryClose || prices.length < 2) {
+    return {
+      latestTradeDate: prices[0]?.trade_date || null,
+      ret5: null,
+      ret10: null,
+      ret20: null,
+      maxDrawdown20: null,
+      brokeInvalidation: false
+    };
+  }
+  const getReturn = (offset: number) => {
+    const close = toNullableNumber(prices[offset]?.close);
+    return close && close > 0 ? Math.round((close / entryClose - 1) * 10000) / 10000 : null;
+  };
+  const window20 = prices.slice(1, 21);
+  const minLow = window20.length
+    ? Math.min(...window20.map((price: any) => toNullableNumber(price.low) || toNullableNumber(price.close) || entryClose))
+    : null;
+  const invalidationLine = toNullableNumber(item.invalidation_line);
+  return {
+    latestTradeDate: prices[prices.length - 1]?.trade_date || null,
+    ret5: getReturn(5),
+    ret10: getReturn(10),
+    ret20: getReturn(20),
+    maxDrawdown20: minLow && minLow > 0 ? Math.round((minLow / entryClose - 1) * 10000) / 10000 : null,
+    brokeInvalidation: Boolean(invalidationLine && window20.some((price: any) => (toNullableNumber(price.low) || toNullableNumber(price.close) || entryClose) < invalidationLine))
+  };
+}
+
+async function buildCandidateFlowTimeline(db: any, item: any): Promise<CandidateFlowTimelineStep[]> {
+  const [trendRow, reviewRow, observationRow, planRow, sampleRow] = await Promise.all([
+    getOptionalFlowRow(
+      db,
+      `SELECT trade_date, trend_phase_code, trend_phase_reason, reason_details, created_at
+       FROM financial_trend_phase_results
+       WHERE symbol = ?
+         AND asset_type = ?
+         AND source = ?
+       ORDER BY trade_date DESC, id DESC
+       LIMIT 1`,
+      [item.symbol, item.asset_type, item.source]
+    ),
+    getOptionalFlowRow(
+      db,
+      `SELECT id, review_status, lane_label, suggested_action_label, draft_json, created_at, updated_at
+       FROM financial_candidate_reviews
+       WHERE candidate_id = ?
+          OR (symbol = ? AND asset_type = ? AND source = ?)
+       ORDER BY updated_at DESC, id DESC
+       LIMIT 1`,
+      [item.id, item.symbol, item.asset_type, item.source]
+    ),
+    getOptionalFlowRow(
+      db,
+      `SELECT id, trade_date, observation_status, entry_action, action_label, trigger_score,
+              trigger_reason, trend_phase_code, close_price, invalidation_line, created_at, updated_at
+       FROM financial_entry_trigger_observations
+       WHERE symbol = ?
+         AND asset_type = ?
+         AND source = ?
+       ORDER BY updated_at DESC, id DESC
+       LIMIT 1`,
+      [item.symbol, item.asset_type, item.source]
+    ),
+    getOptionalFlowRow(
+      db,
+      `SELECT id, plan_name, trade_date, status, trigger_type, trigger_reason, structure_score,
+              trigger_score, close_price, invalidation_line, max_loss_percent, is_bought,
+              stopped_out, perf_5d, perf_10d, perf_20d, created_at, updated_at
+       FROM financial_trade_plans
+       WHERE symbol = ?
+         AND asset_type = ?
+         AND source = ?
+         AND COALESCE(is_deleted, 0) = 0
+       ORDER BY updated_at DESC, id DESC
+       LIMIT 1`,
+      [item.symbol, item.asset_type, item.source]
+    ),
+    getOptionalFlowRow(
+      db,
+      `WITH latest AS (
+         SELECT sample_id, MAX(snapshot_date) AS snapshot_date
+         FROM finance_decision_sample_snapshots
+         GROUP BY sample_id
+       )
+       SELECT s.id, s.stage_key, s.stage_status, s.reason, s.updated_at,
+              ds.snapshot_date, ds.ret_5d, ds.ret_10d, ds.ret_20d,
+              ds.max_drawdown_20d, ds.broke_invalidation, ds.outcome_label
+       FROM finance_decision_samples s
+       LEFT JOIN latest l ON l.sample_id = s.id
+       LEFT JOIN finance_decision_sample_snapshots ds
+         ON ds.sample_id = s.id
+        AND ds.snapshot_date = l.snapshot_date
+       WHERE s.symbol = ?
+         AND s.asset_type = ?
+         AND s.source = ?
+       ORDER BY COALESCE(ds.snapshot_date, s.updated_at) DESC, s.id DESC
+       LIMIT 1`,
+      [item.symbol, item.asset_type, item.source]
+    )
+  ]);
+  const fallbackOutcome = sampleRow?.outcome_label ? null : await getCandidateForwardOutcome(db, item);
+  const sampleMetrics = sampleRow
+    ? {
+        ret5: sampleRow.ret_5d,
+        ret10: sampleRow.ret_10d,
+        ret20: sampleRow.ret_20d,
+        maxDrawdown20: sampleRow.max_drawdown_20d,
+        brokeInvalidation: sampleRow.broke_invalidation === 1
+      }
+    : fallbackOutcome;
+  const trendCode = trendRow?.trend_phase_code || item.trend_phase_code;
+  const reviewDraft = parseJson(reviewRow?.draft_json, {});
+
+  return [
+    buildTimelineStep({
+      key: 'candidate_pool',
+      label: '入池原因',
+      status: getCandidatePoolTimelineStatus(item),
+      date: item.trade_date,
+      summary: item.pool_status === 'active' ? '已进入备选池' : getPoolStatusLabel(item.pool_status),
+      detail: item.candidate_reason || item.first_blocking_gate_label || item.forbidden_reason || item.downgrade_reason || item.risk_note || '已记录入池结果，等待后续流水线推进。',
+      metric: item.priority_score !== null && item.priority_score !== undefined ? `优先分 ${item.priority_score}` : null
+    }),
+    buildTimelineStep({
+      key: 'trend_phase',
+      label: '走势阶段',
+      status: getTrendTimelineStatus(trendCode),
+      date: trendRow?.trade_date || item.trade_date,
+      summary: trendCode ? getTrendPhaseLabel(trendCode) : '未形成走势阶段',
+      detail: trendRow?.trend_phase_reason || trendRow?.reason_details || item.trend_phase_reason || '还没有走势阶段结果，需要等日终走势阶段流水线补算。',
+      metric: trendRow?.created_at || null
+    }),
+    buildTimelineStep({
+      key: 'single_asset_check',
+      label: '结构判断',
+      status: getStructureTimelineStatus(item, reviewRow),
+      date: reviewRow?.updated_at || item.last_review_at || item.last_checked_at,
+      summary: reviewRow?.lane_label || getStructureLabel(item.structure_status),
+      detail: reviewDraft?.summary || item.risk_note || item.candidate_reason || '结构、安全区和风险项已用于当前候选状态。',
+      metric: item.invalidation_line ? `失效线 ${Number(item.invalidation_line).toFixed(3)}` : null,
+      actionLabel: reviewRow?.suggested_action_label || null
+    }),
+    buildTimelineStep({
+      key: 'entry_trigger',
+      label: '入场触发',
+      status: getEntryTriggerTimelineStatus(observationRow),
+      date: observationRow?.updated_at || observationRow?.trade_date || null,
+      summary: observationRow?.action_label || observationRow?.observation_status || '尚未进入触发观察',
+      detail: observationRow?.trigger_reason || '单标的判断通过后，才会进入入场触发观察或计划准备池。',
+      metric: observationRow?.trigger_score !== null && observationRow?.trigger_score !== undefined ? `触发分 ${observationRow.trigger_score}` : null,
+      actionLabel: observationRow?.entry_action || null
+    }),
+    buildTimelineStep({
+      key: 'trade_plan',
+      label: '是否进计划',
+      status: getPlanTimelineStatus(planRow),
+      date: planRow?.updated_at || planRow?.trade_date || null,
+      summary: planRow?.plan_name || (item.review_status === 'plan_ready' ? '已到计划准备口' : '未生成买入计划'),
+      detail: planRow?.trigger_reason || (item.review_status === 'plan_ready' ? '已进入计划准备池，但金融买入计划仍需要人工确认。' : '未到计划准备口，不能绕过触发直接生成买入计划。'),
+      metric: planRow?.max_loss_percent !== null && planRow?.max_loss_percent !== undefined ? `最大损失 ${formatPercent(planRow.max_loss_percent)}` : null,
+      actionLabel: planRow?.status || null
+    }),
+    buildTimelineStep({
+      key: 'posterior_validation',
+      label: '后验结果',
+      status: getOutcomeTimelineStatus(sampleMetrics),
+      date: sampleRow?.snapshot_date || fallbackOutcome?.latestTradeDate || null,
+      summary: sampleRow?.outcome_label || getOutcomeLabel(sampleMetrics),
+      detail: sampleRow?.reason || '后验口径按入池日后的 5/10/20 个交易日和失效线观察，样本不足时继续等待。',
+      metric: formatOutcomeMetric(sampleMetrics),
+      actionLabel: sampleRow?.stage_key || null
+    })
+  ];
+}
+
+function compactTextForList(value: unknown, maxBytes = 180) {
+  if (value === undefined || value === null) return value;
+  const text = String(value);
+  if (Buffer.byteLength(text, 'utf8') <= maxBytes) return text;
+  let clipped = text;
+  while (clipped.length > 0 && Buffer.byteLength(`${clipped}...`, 'utf8') > maxBytes) {
+    clipped = clipped.slice(0, Math.max(0, clipped.length - 8));
+  }
+  return `${clipped.trimEnd()}...`;
+}
+
+function stripEmptyCompactFields(payload: Record<string, any>) {
+  return Object.fromEntries(
+    Object.entries(payload).filter(([, value]) => value !== undefined && value !== null && value !== '')
+  );
+}
+
+function compactOpportunityTypeForList(value: any) {
+  if (!value) return value;
+  return stripEmptyCompactFields({
+    code: value.code,
+    label: value.label,
+    tone: value.tone,
+    reason: compactTextForList(value.reason, 90)
+  });
+}
+
+function compactCandidatePoolListItem(item: any) {
+  return stripEmptyCompactFields({
+    id: item.id,
+    symbol: item.symbol,
+    name: item.name,
+    asset_type: item.asset_type,
+    source: item.source,
+    trade_date: item.trade_date,
+    close: item.close,
+    ma60: item.ma60,
+    distance_to_ma60: item.distance_to_ma60,
+    above_ma60_days: item.above_ma60_days,
+    structure_status: item.structure_status,
+    safe_zone_status: item.safe_zone_status,
+    trend_phase_code: item.trend_phase_code,
+    entry_permission: item.entry_permission,
+    pool_status: item.pool_status,
+    priority: item.priority,
+    priority_score: item.priority_score,
+    forbidden_reason: compactTextForList(item.forbidden_reason, 160),
+    downgrade_reason: compactTextForList(item.downgrade_reason, 140),
+    risk_note: compactTextForList(item.risk_note, 140),
+    invalidation_line: item.invalidation_line,
+    candidate_reason: compactTextForList(item.candidate_reason, 180),
+    last_checked_at: item.last_checked_at,
+    ml_available: item.ml_available,
+    ml_probability: item.ml_probability,
+    ml_target: item.ml_target,
+    ml_score_reason: compactTextForList(item.ml_score_reason, 120),
+    review_status: item.review_status,
+    last_review_at: item.last_review_at,
+    universe_type: item.universe_type,
+    plan_profile: item.plan_profile,
+    plan_profile_label: item.plan_profile_label,
+    opportunity_type: compactOpportunityTypeForList(item.opportunity_type)
+  });
+}
+
+function compactModelRecheckListItem(item: any) {
+  return stripEmptyCompactFields({
+    ...compactCandidatePoolListItem(item),
+    first_blocking_gate_key: item.first_blocking_gate_key,
+    first_blocking_gate_label: item.first_blocking_gate_label,
+    blocking_gate_labels: item.blocking_gate_labels,
+    updated_at: item.updated_at,
+    local_last_trade_date: item.local_last_trade_date,
+    local_price_updated_at: item.local_price_updated_at,
+    local_last_fetch_at: item.local_last_fetch_at,
+    local_last_fetch_message: compactTextForList(item.local_last_fetch_message, 220),
+    market_latest_trade_date: item.market_latest_trade_date,
+    model_recheck_bucket: item.model_recheck_bucket,
+    model_recheck_data_gap: item.model_recheck_data_gap
+  });
 }
 
 async function ensureCandidateReviewSchema(db: any) {
@@ -702,14 +1394,9 @@ async function calculateStockTradeQualification(
   source: string,
   prices: DailyPrice[]
 ): Promise<StockTradeQualification> {
-  const latestMarket = await db.get(
-    `SELECT MAX(trade_date) AS trade_date
-     FROM financial_daily_prices
-     WHERE symbol = '000300' AND asset_type = 'index' AND source = ?`,
-    [source]
-  );
+  const latestMarketTradeDate = await getLatestCoveredTradeDate(db, { source, assetTypes: ['index'] });
   const marketCapSnapshot = await getStockMarketCapSnapshot(db, symbol, source);
-  const dataFreshness = calculateStockDataFreshnessGate(prices, latestMarket?.trade_date || null);
+  const dataFreshness = calculateStockDataFreshnessGate(prices, latestMarketTradeDate || null);
   const liquidity = calculateStockLiquidityGate(prices, source);
   const marketCap = calculateStockMarketCapGate(marketCapSnapshot);
   const extremeTrade = calculateStockExtremeTradeGate(prices, symbol);
@@ -747,17 +1434,215 @@ function getEtfGateReason(
   return null;
 }
 
-function runCandidateScoreWorker(limit: number, poolStatus: 'active' | 'expired' | 'all' = 'active'): Promise<Record<string, any>> {
+function getFeatureDbLatestTradeDate(featureDbPath: string, domain: string): Promise<string | null> {
   return new Promise((resolve, reject) => {
-    const dbPath = process.env.DB_PATH || path.join(process.cwd(), 'db', 'price_dashboard_dev.db');
+    const featureDb = new sqlite3.Database(featureDbPath, sqlite3.OPEN_READONLY, (openError) => {
+      if (openError) {
+        reject(openError);
+        return;
+      }
+      featureDb.get(
+        `SELECT MAX(trade_date) AS latest_trade_date
+         FROM financial_ml_features
+         WHERE asset_type = ?
+           AND trade_date IS NOT NULL`,
+        [domain],
+        (queryError, row: any) => {
+          featureDb.close();
+          if (queryError) {
+            reject(queryError);
+            return;
+          }
+          resolve(row?.latest_trade_date ? String(row.latest_trade_date) : null);
+        }
+      );
+    });
+  });
+}
+
+function buildStaleFeatureReason(domain: string, latestTradeDate: string | null, asOfTradeDate: string | null | undefined) {
+  if (!latestTradeDate) {
+    return `${domain} 模型特征库没有可用交易日，请先重新生成训练特征。`;
+  }
+  return `模型特征库滞后：${domain} 特征日 ${latestTradeDate}，当前评分口径 ${asOfTradeDate || '--'}；请先刷新训练特征/重新训练后再评分。`;
+}
+
+async function getCandidateModelFreshness(
+  db: any,
+  domain: string,
+  asOfTradeDate?: string | null
+): Promise<CandidateModelFreshness> {
+  const cacheKey = `${domain}|${asOfTradeDate || 'latest'}`;
+  const cached = candidateModelFreshnessCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.data;
+  }
+
+  const artifacts = await db.all(
+    `SELECT domain, model_key, target, model_file, source_feature_db
+     FROM model_training_artifacts
+     WHERE domain = ?`,
+    [domain]
+  );
+  const artifact = CANDIDATE_MODEL_PRIORITY
+    .map(modelKey => artifacts.find((row: any) => row.model_key === modelKey && row.model_file && fs.existsSync(row.model_file)))
+    .find(Boolean);
+
+  let data: CandidateModelFreshness;
+  if (!artifact) {
+    data = {
+      available: false,
+      reason: `未找到 ${domain} 可用模型文件，请先完成模型与结果落库。`,
+      modelKey: null,
+      target: null,
+      latestFeatureTradeDate: null
+    };
+  } else if (!artifact.source_feature_db || !fs.existsSync(artifact.source_feature_db)) {
+    data = {
+      available: false,
+      reason: '模型登记里的特征库不存在，不能预测。',
+      modelKey: artifact.model_key || null,
+      target: artifact.target || null,
+      latestFeatureTradeDate: null
+    };
+  } else {
+    const latestFeatureTradeDate = await getFeatureDbLatestTradeDate(artifact.source_feature_db, domain);
+    const stale = Boolean(asOfTradeDate && (!latestFeatureTradeDate || latestFeatureTradeDate < asOfTradeDate));
+    data = {
+      available: !stale,
+      reason: stale ? buildStaleFeatureReason(domain, latestFeatureTradeDate, asOfTradeDate) : null,
+      modelKey: artifact.model_key || null,
+      target: artifact.target || null,
+      latestFeatureTradeDate
+    };
+  }
+
+  candidateModelFreshnessCache.set(cacheKey, {
+    expiresAt: Date.now() + CANDIDATE_SCORE_CACHE_MS,
+    data
+  });
+  return data;
+}
+
+function buildUnavailableCandidateScoreMap(
+  items: any[],
+  freshnessByDomain: Map<string, CandidateModelFreshness>
+) {
+  return items.reduce((scores: Record<string, any>, item: any) => {
+    const freshness = freshnessByDomain.get(item.asset_type);
+    scores[`${item.symbol}|${item.asset_type}|${item.source}`] = {
+      available: false,
+      modelKey: freshness?.modelKey || null,
+      target: freshness?.target || null,
+      tradeDate: freshness?.latestFeatureTradeDate || null,
+      reason: freshness?.reason || '该资产类型暂未接入模型'
+    };
+    return scores;
+  }, {});
+}
+
+function getCandidateScoreKey(item: any) {
+  return `${item.symbol}|${item.asset_type}|${item.source}`;
+}
+
+function toPersistedCandidateScore(row: any, asOfTradeDate?: string | null) {
+  const probability = Number(row.probability);
+  const scoreTradeDate = row.as_of_trade_date || row.trade_date || null;
+  const current = !asOfTradeDate || scoreTradeDate === asOfTradeDate;
+  return {
+    available: current && Number.isFinite(probability),
+    probability: Number.isFinite(probability) ? probability : null,
+    modelKey: row.model_key || null,
+    target: row.model_target || null,
+    tradeDate: scoreTradeDate,
+    reason: current
+      ? row.conflict_label || null
+      : `候选模型分数滞后：评分日 ${scoreTradeDate || '--'}，当前覆盖交易日 ${asOfTradeDate || '--'}。`
+  };
+}
+
+async function loadPersistedCandidateScoreMap(
+  db: any,
+  items: any[],
+  asOfTradeDate?: string | null
+): Promise<Record<string, any>> {
+  if (!items.length) return {};
+  const domains = Array.from(new Set(
+    items.map(item => item.asset_type).filter(domain => CANDIDATE_POOL_ASSET_TYPES.includes(domain))
+  ));
+  const symbols = Array.from(new Set(items.map(item => item.symbol).filter(Boolean)));
+  if (!domains.length || !symbols.length) return {};
+
+  const domainPlaceholders = domains.map(() => '?').join(', ');
+  const symbolPlaceholders = symbols.map(() => '?').join(', ');
+  const rows = await db.all(
+    `WITH ranked_scores AS (
+       SELECT s.*,
+              ROW_NUMBER() OVER (
+                PARTITION BY s.domain, s.symbol, s.asset_type, s.source
+                ORDER BY
+                  CASE WHEN COALESCE(s.as_of_trade_date, s.trade_date) = ? THEN 0 ELSE 1 END,
+                  COALESCE(s.as_of_trade_date, s.trade_date) DESC,
+                  s.updated_at DESC,
+                  s.id DESC
+              ) AS rn
+       FROM model_training_candidate_scores s
+       WHERE s.domain IN (${domainPlaceholders})
+         AND s.symbol IN (${symbolPlaceholders})
+         AND s.asset_type IN ('stock', 'etf')
+         AND (? IS NULL OR COALESCE(s.as_of_trade_date, s.trade_date) <= ?)
+     )
+     SELECT *
+     FROM ranked_scores
+     WHERE rn = 1`,
+    [asOfTradeDate || '', ...domains, ...symbols, asOfTradeDate || null, asOfTradeDate || null]
+  );
+
+  const itemKeys = new Set(items.map(getCandidateScoreKey));
+  return rows.reduce((scores: Record<string, any>, row: any) => {
+    const key = getCandidateScoreKey(row);
+    if (itemKeys.has(key)) {
+      scores[key] = toPersistedCandidateScore(row, asOfTradeDate);
+    }
+    return scores;
+  }, {});
+}
+
+function hasCurrentPersistedScores(items: any[], scoreMap: Record<string, any>, asOfTradeDate?: string | null) {
+  return items.every(item => {
+    const score = scoreMap[getCandidateScoreKey(item)];
+    if (!score || score.available !== true || typeof score.probability !== 'number') return false;
+    return !asOfTradeDate || score.tradeDate === asOfTradeDate;
+  });
+}
+
+function runCandidateScoreWorker(
+  limit: number,
+  poolStatus: 'active' | 'expired' | 'all' = 'active',
+  tradeDate?: string | null,
+  domain?: string | null,
+  symbol?: string | null
+): Promise<Record<string, any>> {
+  return new Promise((resolve, reject) => {
+    const dbPath = getDatabasePath();
     const scriptPath = path.join(process.cwd(), 'scripts', 'model_training', 'score_candidate_pool.py');
-    const child = spawn(trainingPython, [
+    const args = [
       scriptPath,
       '--db', dbPath,
       '--rule-version', CANDIDATE_RULE_VERSION,
       '--pool-status', poolStatus,
       '--limit', String(limit)
-    ], {
+    ];
+    if (tradeDate) {
+      args.push('--trade-date', tradeDate);
+    }
+    if (domain && CANDIDATE_POOL_ASSET_TYPES.includes(domain)) {
+      args.push('--domain', domain);
+    }
+    if (symbol) {
+      args.push('--symbol', symbol);
+    }
+    const child = spawn(trainingPython, args, {
       cwd: process.cwd(),
       stdio: ['ignore', 'pipe', 'pipe']
     });
@@ -785,6 +1670,41 @@ function runCandidateScoreWorker(limit: number, poolStatus: 'active' | 'expired'
       }
     });
   });
+}
+
+async function runCachedCandidateScoreWorker(
+  limit: number,
+  poolStatus: 'active' | 'expired' | 'all' = 'active',
+  tradeDate?: string | null,
+  domain?: string | null,
+  symbol?: string | null
+) {
+  const cacheKey = `${poolStatus}|${limit}|${tradeDate || 'latest'}|${domain || 'all'}|${symbol || 'all'}`;
+  const cached = candidateScoreCache.get(cacheKey);
+  if (cached?.data && cached.expiresAt > Date.now()) {
+    return cached.data;
+  }
+  if (cached?.promise) {
+    return cached.promise;
+  }
+  const promise = runCandidateScoreWorker(limit, poolStatus, tradeDate, domain, symbol);
+  candidateScoreCache.set(cacheKey, {
+    expiresAt: 0,
+    promise
+  });
+  try {
+    const data = await promise;
+    candidateScoreCache.set(cacheKey, {
+      expiresAt: Date.now() + CANDIDATE_SCORE_CACHE_MS,
+      data
+    });
+    return data;
+  } catch (error) {
+    if (candidateScoreCache.get(cacheKey)?.promise === promise) {
+      candidateScoreCache.delete(cacheKey);
+    }
+    throw error;
+  }
 }
 
 function calculateStructure(prices: DailyPrice[], planProfileKey?: string | null) {
@@ -981,7 +1901,8 @@ function calculateCandidatePriority(
   marketEntryPermission?: string,
   trendPhaseCode?: string,
   riskProfile?: RecentRiskProfile,
-  planProfileKey?: string | null
+  planProfileKey?: string | null,
+  marketDowngradeReasons: string[] = []
 ): CandidatePriorityResult {
   const profile = getFinanceStructureProfileConfig(planProfileKey);
   const forbiddenReasons: string[] = [];
@@ -992,6 +1913,10 @@ function calculateCandidatePriority(
     forbiddenReasons.push('市场环境未开放单标的判断');
   } else {
     score += 20;
+    if (marketDowngradeReasons.length > 0) {
+      score -= Math.min(15, marketDowngradeReasons.length * 5);
+      downgradeReasons.push(`组合总闸观察/降权：${marketDowngradeReasons.join('；')}`);
+    }
   }
 
   if (structure.structure_status === 'STRUCTURE_CONFIRMED') {
@@ -1112,6 +2037,26 @@ function getTrendPhaseLabel(code?: string): string {
   }
 }
 
+function getStructureLabel(value?: string): string {
+  switch (value) {
+    case 'STRUCTURE_CONFIRMED': return '结构成立';
+    case 'STRUCTURE_WATCH': return '结构观察';
+    case 'STRUCTURE_BROKEN': return '结构破坏';
+    case 'INSUFFICIENT_DATA': return '数据不足';
+    default: return value || '--';
+  }
+}
+
+function getPoolStatusLabel(value?: string): string {
+  switch (value) {
+    case 'active': return '备选中';
+    case 'ignored': return '已忽略';
+    case 'planned': return '已进入计划';
+    case 'expired': return '已失效';
+    default: return value || '--';
+  }
+}
+
 function toNullableNumber(value: unknown): number | null {
   const numberValue = Number(value);
   return Number.isFinite(numberValue) ? numberValue : null;
@@ -1170,6 +2115,20 @@ function classifyOpportunityType(input: any): OpportunityTypeTag {
       label: '趋势型',
       tone: 'good',
       reason: '结构较强，可优先进入计划跟踪，仍需失效线和仓位控制。'
+    };
+  }
+
+  if (
+    !structureConfirmed &&
+    distanceComfortable &&
+    aboveMa60Days >= 1 &&
+    ['BREAKOUT', 'SLOW_GRIND_UP', 'TREND_UP', 'RECOVERY'].includes(trendPhaseCode)
+  ) {
+    return {
+      code: 'EARLY_LEADER_WATCH',
+      label: '早期主线观察',
+      tone: 'warn',
+      reason: '走势已有早期主线信号，但MA60结构或安全区尚未完全确认，只进入观察层，不生成买入计划。'
     };
   }
 
@@ -1251,7 +2210,8 @@ async function evaluateEtfIndustryGate(
       source: industryCandidate.source || source
     },
     prices,
-    strengthContext.benchmarkReturns
+    strengthContext.benchmarkReturns,
+    { asOfTradeDate: strengthContext.asOfTradeDate }
   );
 
   return {
@@ -1268,6 +2228,205 @@ function splitUniverseTypes(value?: string | null): string[] {
     .filter(Boolean);
 }
 
+function roundValue(value: number | null | undefined, digits = 4) {
+  if (value === null || value === undefined || !Number.isFinite(Number(value))) return null;
+  const factor = 10 ** digits;
+  return Math.round(Number(value) * factor) / factor;
+}
+
+async function buildStockIndustryStrengthContext(
+  db: any,
+  options: { asOfTradeDate?: string | null } = {}
+): Promise<StockIndustryStrengthContext> {
+  const asOfTradeDate = options.asOfTradeDate
+    || await getLatestCoveredTradeDate(db, { source: 'tushare', assetTypes: ['stock', 'index'] });
+  const memberRows = await db.all(
+    `SELECT symbol, l1_code, l1_name, l2_code, l2_name
+     FROM financial_sw_industry_members
+     WHERE symbol IS NOT NULL
+       AND symbol <> ''
+       AND (
+         COALESCE(is_new, 'Y') = 'Y'
+         OR out_date IS NULL
+         OR out_date = ''
+         OR out_date >= COALESCE(?, out_date)
+       )
+     ORDER BY CASE COALESCE(is_new, 'Y') WHEN 'Y' THEN 0 ELSE 1 END, id DESC`,
+    [asOfTradeDate]
+  );
+  const memberMap = new Map<string, { code: string; name: string | null }>();
+  for (const row of memberRows) {
+    const code = row.l2_code || row.l1_code;
+    if (!row.symbol || !code || memberMap.has(row.symbol)) continue;
+    memberMap.set(String(row.symbol), {
+      code: String(code),
+      name: row.l2_name || row.l1_name || null
+    });
+  }
+
+  const industryRows = await db.all(
+    `WITH metrics AS (
+       SELECT index_code, name, trade_date, close, amount,
+              close / NULLIF(LAG(close, 5) OVER industry_window, 0) - 1 AS ret_5d,
+              close / NULLIF(LAG(close, 20) OVER industry_window, 0) - 1 AS ret_20d,
+              close / NULLIF(LAG(close, 60) OVER industry_window, 0) - 1 AS ret_60d,
+              AVG(amount) OVER amount5_window / NULLIF(AVG(amount) OVER amount20_window, 0) - 1 AS amount_ratio_5_20
+       FROM financial_sw_industry_daily
+       WHERE trade_date <= COALESCE(?, trade_date)
+         AND close IS NOT NULL
+         AND close > 0
+       WINDOW
+         industry_window AS (PARTITION BY index_code ORDER BY trade_date),
+         amount5_window AS (PARTITION BY index_code ORDER BY trade_date ROWS BETWEEN 4 PRECEDING AND CURRENT ROW),
+         amount20_window AS (PARTITION BY index_code ORDER BY trade_date ROWS BETWEEN 19 PRECEDING AND CURRENT ROW)
+     ),
+     latest AS (
+       SELECT *
+       FROM metrics
+       WHERE trade_date = (SELECT MAX(trade_date) FROM metrics)
+         AND ret_20d IS NOT NULL
+     ),
+     ranked AS (
+       SELECT latest.*,
+              RANK() OVER (ORDER BY ret_20d DESC) AS ret20_rank,
+              COUNT(*) OVER () AS industry_count
+       FROM latest
+     )
+     SELECT *,
+            CASE
+              WHEN industry_count > 1 THEN 1.0 - ((ret20_rank - 1.0) / NULLIF(industry_count - 1.0, 0))
+              ELSE 0.5
+            END AS ret20_rank_score
+     FROM ranked`,
+    [asOfTradeDate]
+  );
+  const industryMap = new Map<string, any>();
+  for (const row of industryRows) {
+    if (row.index_code) industryMap.set(String(row.index_code), row);
+  }
+
+  return { asOfTradeDate, memberMap, industryMap };
+}
+
+function evaluateStockIndustryStrength(symbol: string, context?: StockIndustryStrengthContext): StockIndustryStrengthItem {
+  const member = context?.memberMap.get(symbol);
+  if (!member) {
+    return {
+      known: false,
+      code: null,
+      name: null,
+      trade_date: context?.asOfTradeDate || null,
+      ret_5d: null,
+      ret_20d: null,
+      ret_60d: null,
+      amount_ratio_5_20: null,
+      ret20_rank_score: null,
+      strength_score: 50,
+      strength_status: 'UNKNOWN',
+      strength_label: '行业未知',
+      reason: '未匹配到申万行业，行业强弱不参与硬拦截。',
+      forbidden_reason: null,
+      downgrade_reason: '行业归属未知，优先级按中性偏谨慎处理'
+    };
+  }
+  const row = context?.industryMap.get(member.code);
+  if (!row) {
+    return {
+      known: false,
+      code: member.code,
+      name: member.name,
+      trade_date: context?.asOfTradeDate || null,
+      ret_5d: null,
+      ret_20d: null,
+      ret_60d: null,
+      amount_ratio_5_20: null,
+      ret20_rank_score: null,
+      strength_score: 50,
+      strength_status: 'NO_DATA',
+      strength_label: '行业数据不足',
+      reason: `${member.name || member.code} 行业日线不足，行业强弱不参与硬拦截。`,
+      forbidden_reason: null,
+      downgrade_reason: '行业强弱数据不足，优先级按中性偏谨慎处理'
+    };
+  }
+
+  const ret20 = Number(row.ret_20d);
+  const ret60 = Number(row.ret_60d);
+  const amountRatio = Number(row.amount_ratio_5_20);
+  const rankScore = Number(row.ret20_rank_score);
+  let score = 45;
+  const reasons: string[] = [];
+  if (Number.isFinite(rankScore)) {
+    score += rankScore >= 0.8 ? 30 : rankScore >= 0.6 ? 22 : rankScore >= 0.4 ? 12 : rankScore >= 0.2 ? 2 : -8;
+    reasons.push(`20日行业排名 ${(rankScore * 100).toFixed(0)}分位`);
+  }
+  if (Number.isFinite(ret20)) {
+    if (ret20 >= 0.06) score += 12;
+    else if (ret20 >= 0.02) score += 7;
+    else if (ret20 <= -0.06) score -= 12;
+    else if (ret20 <= -0.03) score -= 7;
+    reasons.push(`20日涨跌 ${(ret20 * 100).toFixed(1)}%`);
+  }
+  if (Number.isFinite(ret60)) {
+    if (ret60 >= 0.08) score += 8;
+    else if (ret60 <= -0.08) score -= 8;
+  }
+  if (Number.isFinite(amountRatio)) {
+    if (amountRatio >= 0.2) score += 5;
+    else if (amountRatio <= -0.25) score -= 5;
+    reasons.push(`量能变化 ${(amountRatio * 100).toFixed(1)}%`);
+  }
+  const boundedScore = Math.max(0, Math.min(100, Math.round(score)));
+  const forbidden = (Number.isFinite(rankScore) && rankScore < 0.2 && Number.isFinite(ret20) && ret20 <= -0.05)
+    || (Number.isFinite(ret60) && ret60 <= -0.12 && Number.isFinite(ret20) && ret20 <= -0.03);
+  const weak = !forbidden && (
+    (Number.isFinite(rankScore) && rankScore < 0.35)
+    || (Number.isFinite(ret20) && ret20 <= -0.03)
+  );
+  const strong = boundedScore >= 75 || (Number.isFinite(rankScore) && rankScore >= 0.75 && Number.isFinite(ret20) && ret20 > 0);
+  const status = forbidden ? 'WEAK_BLOCK' : strong ? 'STRONG' : weak ? 'WEAK_DOWNGRADE' : 'NEUTRAL';
+  const label = forbidden ? '行业弱势拦截' : strong ? '行业强势' : weak ? '行业偏弱' : '行业中性';
+  const reason = `${member.name || member.code}：${reasons.join('；') || '行业强弱中性。'}`;
+
+  return {
+    known: true,
+    code: member.code,
+    name: member.name,
+    trade_date: row.trade_date || context?.asOfTradeDate || null,
+    ret_5d: roundValue(row.ret_5d),
+    ret_20d: roundValue(row.ret_20d),
+    ret_60d: roundValue(row.ret_60d),
+    amount_ratio_5_20: roundValue(row.amount_ratio_5_20),
+    ret20_rank_score: roundValue(row.ret20_rank_score),
+    strength_score: boundedScore,
+    strength_status: status,
+    strength_label: label,
+    reason,
+    forbidden_reason: forbidden ? `${reason}，行业处于弱势末端，不进入个股备选池。` : null,
+    downgrade_reason: weak ? `${reason}，行业偏弱，本轮只降权观察。` : null
+  };
+}
+
+function adjustPriorityWithStockIndustry(
+  priorityResult: CandidatePriorityResult,
+  industry: StockIndustryStrengthItem | null
+): CandidatePriorityResult {
+  if (!industry) return priorityResult;
+  let score = priorityResult.priority_score;
+  if (industry.strength_status === 'STRONG') score += 6;
+  if (industry.strength_status === 'WEAK_DOWNGRADE') score -= 10;
+  if (industry.strength_status === 'WEAK_BLOCK') score = Math.min(score, 55);
+  if (industry.strength_status === 'UNKNOWN' || industry.strength_status === 'NO_DATA') score -= 3;
+  const boundedScore = Math.max(0, Math.min(100, Math.round(score)));
+  return {
+    ...priorityResult,
+    priority_score: boundedScore,
+    priority: boundedScore >= 80 ? 'high' : boundedScore >= 60 ? 'medium' : 'low',
+    forbidden_reason: joinReasonParts(priorityResult.forbidden_reason, industry.forbidden_reason),
+    downgrade_reason: joinReasonParts(priorityResult.downgrade_reason, industry.downgrade_reason)
+  };
+}
+
 function classifyEtfStrategyRoute(
   symbol: string,
   name: string | null | undefined,
@@ -1276,7 +2435,7 @@ function classifyEtfStrategyRoute(
 ): EtfStrategyRoute {
   const text = `${name || ''} ${symbol}`;
   const typeSet = new Set(splitUniverseTypes(universeTypes));
-  const isFocusOrIndustry = typeSet.has('industry_etf') || Boolean(context?.candidateMap.has(symbol));
+  const isFocusOrIndustry = typeSet.has('industry_etf') || isIndustryThemeEtfLike({ name, symbol }) || Boolean(context?.candidateMap.has(symbol));
   const makeRoute = (
     key: EtfRouteKey,
     label: string,
@@ -1361,6 +2520,159 @@ function classifyEtfStrategyRoute(
       ? `ETF分组为 ${universeTypes}，当前未识别为宽基、行业主题、商品、跨境、债券/货币或特殊基金；只展示结构结果，暂不进入交易池。`
       : 'ETF分类未识别，只展示结构结果，暂不进入交易池。'
   );
+}
+
+function classifyEtfExposureGroup(input: { symbol?: string | null; name?: string | null; universe_type?: string | null; plan_profile?: string | null }) {
+  const text = `${input.name || ''} ${input.symbol || ''}`;
+  const normalized = text.replace(/\s+/g, '');
+  const broadRules: Array<[RegExp, string, string]> = [
+    [/沪深300|HS300/i, 'broad:hs300', '沪深300敞口'],
+    [/中证A?500|A500/i, 'broad:a500', '中证A500敞口'],
+    [/中证A?50|A50/i, 'broad:a50', '中证A50敞口'],
+    [/上证50/i, 'broad:sse50', '上证50敞口'],
+    [/中证500(?!0)|500增强/i, 'broad:zz500', '中证500敞口'],
+    [/中证1000|1000增强/i, 'broad:zz1000', '中证1000敞口'],
+    [/中证2000|2000增强/i, 'broad:zz2000', '中证2000敞口'],
+    [/创业板50|创业板ETF|创业板/i, 'style:chinext', '创业板敞口'],
+    [/科创50|科创100|科创/i, 'style:star', '科创敞口'],
+    [/MSCIA股|MSCI中国A股|MSCI中国ETF|MSCI/i, 'broad:msci_a', 'MSCI A股敞口'],
+    [/红利|高股息|股息|质量/i, 'factor:dividend_quality', '红利/质量/高股息敞口']
+  ];
+  const industryRules: Array<[RegExp, string, string]> = [
+    [/半导体|芯片|集成电路/i, 'industry:semiconductor', '半导体敞口'],
+    [/人工智能|AI|云计算|算力|软件|信创|数据/i, 'industry:ai_cloud', 'AI/云计算敞口'],
+    [/证券|券商|金融科技/i, 'industry:brokerage', '证券金融敞口'],
+    [/银行|保险/i, 'industry:bank_insurance', '银行保险敞口'],
+    [/医疗|医药|创新药|生物/i, 'industry:healthcare', '医疗医药敞口'],
+    [/新能源车|新能源汽车|锂电|电池/i, 'industry:nev_battery', '新能源车/电池敞口'],
+    [/光伏|太阳能/i, 'industry:solar', '光伏敞口'],
+    [/电力|绿色电力|公用事业/i, 'industry:power', '电力敞口'],
+    [/高端装备|装备|机械|机器人/i, 'industry:equipment_robot', '高端装备/机器人敞口'],
+    [/环保|碳中和/i, 'industry:environment', '环保敞口'],
+    [/消费|食品饮料|白酒|酒ETF/i, 'industry:consumer', '消费敞口'],
+    [/传媒|游戏/i, 'industry:media_game', '传媒游戏敞口'],
+    [/军工|国防/i, 'industry:defense', '军工敞口'],
+    [/有色|稀土|煤炭|钢铁|化工/i, 'industry:resources', '资源周期敞口'],
+    [/地产|房地产|基建|建材/i, 'industry:property_infra', '地产基建敞口']
+  ];
+  for (const [pattern, key, label] of [...broadRules, ...industryRules]) {
+    if (pattern.test(normalized)) return { key, label, dedupe: true };
+  }
+  if (String(input.plan_profile || '').includes('etf_broad')) {
+    return { key: `broad:other:${input.symbol || normalized}`, label: '其它宽基敞口', dedupe: false };
+  }
+  if (String(input.plan_profile || '').includes('etf_industry')) {
+    return { key: `industry:other:${input.symbol || normalized}`, label: '其它行业主题敞口', dedupe: false };
+  }
+  return { key: `unique:${input.symbol || normalized}`, label: '未归类ETF敞口', dedupe: false };
+}
+
+async function dedupeActiveEtfExposureCandidates(
+  db: any,
+  options: { source: string; minTradeDate?: string | null }
+) {
+  const params: any[] = [options.source, CANDIDATE_RULE_VERSION];
+  const minDateClause = options.minTradeDate ? 'AND c.trade_date >= ?' : '';
+  if (options.minTradeDate) params.push(options.minTradeDate);
+  const rows = await db.all(
+    `SELECT c.id, c.symbol, c.name, c.trade_date, c.priority_score, c.final_status,
+            c.distance_to_ma60, c.plan_profile,
+            (
+              SELECT GROUP_CONCAT(DISTINCT u.universe_type)
+              FROM financial_asset_universe u
+              WHERE u.symbol = c.symbol
+                AND u.asset_type = c.asset_type
+                AND u.source = c.source
+            ) AS universe_type,
+            (
+              SELECT AVG(p.amount)
+              FROM financial_daily_prices p
+              WHERE p.symbol = c.symbol
+                AND p.asset_type = c.asset_type
+                AND p.source = c.source
+                AND p.trade_date <= c.trade_date
+                AND p.trade_date >= date(c.trade_date, '-45 days')
+            ) AS avg_amount20
+     FROM financial_candidate_pool c
+     WHERE c.pool_status = 'active'
+       AND c.asset_type = 'etf'
+       AND c.source = ?
+       AND c.rule_version = ?
+       ${minDateClause}`,
+    params
+  );
+
+  const groups = new Map<string, any[]>();
+  const groupMeta = new Map<string, { label: string; dedupe: boolean }>();
+  for (const row of rows) {
+    const group = classifyEtfExposureGroup({
+      symbol: row.symbol,
+      name: row.name,
+      universe_type: row.universe_type,
+      plan_profile: row.plan_profile
+    });
+    groupMeta.set(group.key, { label: group.label, dedupe: group.dedupe });
+    if (!groups.has(group.key)) groups.set(group.key, []);
+    groups.get(group.key)?.push(row);
+  }
+
+  const expiredIds: number[] = [];
+  const dedupedGroups: any[] = [];
+  for (const [key, items] of groups.entries()) {
+    const meta = groupMeta.get(key);
+    if (!meta?.dedupe || items.length <= 1) continue;
+    const sorted = [...items].sort((a, b) => {
+      const readyDiff = (b.final_status === 'READY_FOR_PLAN' ? 1 : 0) - (a.final_status === 'READY_FOR_PLAN' ? 1 : 0);
+      if (readyDiff) return readyDiff;
+      const priorityDiff = Number(b.priority_score || 0) - Number(a.priority_score || 0);
+      if (priorityDiff) return priorityDiff;
+      const amountDiff = Number(b.avg_amount20 || 0) - Number(a.avg_amount20 || 0);
+      if (amountDiff) return amountDiff;
+      const distanceDiff = Math.abs(Number(a.distance_to_ma60 || 0)) - Math.abs(Number(b.distance_to_ma60 || 0));
+      if (distanceDiff) return distanceDiff;
+      return String(a.symbol || '').localeCompare(String(b.symbol || ''));
+    });
+    const keeper = sorted[0];
+    const duplicates = sorted.slice(1);
+    expiredIds.push(...duplicates.map(item => Number(item.id)).filter(Boolean));
+    dedupedGroups.push({
+      key,
+      label: meta.label,
+      kept: { id: keeper.id, symbol: keeper.symbol, name: keeper.name },
+      expired_count: duplicates.length,
+      expired_symbols: duplicates.map(item => item.symbol)
+    });
+  }
+
+  if (expiredIds.length > 0) {
+    const now = new Date().toISOString();
+    const placeholders = expiredIds.map(() => '?').join(',');
+    await db.run(
+      `UPDATE financial_candidate_pool
+       SET pool_status = 'expired',
+           final_status = 'REJECTED',
+           review_status = 'rejected',
+           review_action = CASE
+             WHEN COALESCE(review_action, '') = '' THEN 'etf_exposure_duplicate_expired'
+             ELSE review_action
+           END,
+           candidate_reason = '同类ETF敞口重复，本轮只保留同组优先分/流动性更好的代表。',
+           forbidden_reason = '同类ETF敞口重复，避免候选池暴露集中和重复计划。',
+           first_blocking_gate_key = 'etf_exposure_dedup_gate',
+           first_blocking_gate_label = '同类ETF敞口重复',
+           blocking_gate_labels = '同类ETF敞口重复',
+           last_checked_at = ?,
+           last_review_at = ?,
+           updated_at = ?
+       WHERE id IN (${placeholders})`,
+      [now, now, now, ...expiredIds]
+    );
+  }
+
+  return {
+    expired_count: expiredIds.length,
+    groups: dedupedGroups
+  };
 }
 
 async function evaluateEtfPreGate(
@@ -1471,7 +2783,7 @@ function getSuggestedReviewAction(item: any): { key: string; label: string; tone
     return { key: 'IGNORE_OR_RESCAN', label: '先忽略或等下次扫描', tone: 'danger' };
   }
   if (modelKey === 'accept' && riskKey === 'clean' && item.trend_phase_code && item.trend_phase_code !== 'UNKNOWN') {
-    return { key: 'PREPARE_PLAN', label: '可进入买入计划准备', tone: 'success' };
+    return { key: 'REVIEW_PLAN_CANDIDATE', label: '建议人工复核计划条件', tone: 'success' };
   }
   if (modelKey === 'accept') {
     return { key: 'WAIT_CONFIRMATION', label: '等待二次确认', tone: 'warning' };
@@ -1528,7 +2840,7 @@ function resolveStructureQueueDecision(evaluation: any): {
     return {
       review_status: 'wait_confirmation',
       pool_status: 'active',
-      final_status: 'READY_FOR_PLAN',
+      final_status: 'WAIT',
       review_action: 'single_target_passed_to_entry',
       reason: reason || '单标的判断通过，已推进入场触发。'
     };
@@ -1782,7 +3094,8 @@ async function evaluateCandidate(
   symbol: string,
   assetType: string,
   source: string,
-  industryStrengthContext?: IndustryEtfStrengthContext
+  industryStrengthContext?: IndustryEtfStrengthContext,
+  stockIndustryStrengthContext?: StockIndustryStrengthContext
 ) {
   if (!CANDIDATE_POOL_ASSET_TYPES.includes(assetType)) {
     const reason = '备选池只允许 A股个股 和 ETF，指数只作为市场总闸/宽基参照，不进入备选池。';
@@ -1875,6 +3188,9 @@ async function evaluateCandidate(
   const stockTradeQualification = assetType === 'stock'
     ? await calculateStockTradeQualification(db, symbol, source, prices)
     : null;
+  const stockIndustryStrength = assetType === 'stock'
+    ? evaluateStockIndustryStrength(symbol, stockIndustryStrengthContext)
+    : null;
 
   const structure = calculateStructure(prices, planProfile.key);
   const riskProfile = calculateRecentRiskProfile(prices, structure, assetType, planProfile.key);
@@ -1886,20 +3202,22 @@ async function evaluateCandidate(
     [symbol, assetType, source, TREND_PHASE_VERSION]
   );
 
-  const marketRegime = await db.get(
-    `SELECT market_regime, entry_permission
-     FROM financial_market_regime
-     WHERE symbol = '000300'
-     ORDER BY trade_date DESC LIMIT 1`
-  );
+  const marketRegime = await getFreshMarketRegime(db, { source });
+  const marketDowngradeReasons = Array.isArray(marketRegime?.composite_gate?.downgrade_reasons)
+    ? marketRegime.composite_gate.downgrade_reasons
+    : [];
 
-  const priorityResult = calculateCandidatePriority(
+  const basePriorityResult = calculateCandidatePriority(
     structure,
     marketRegime?.entry_permission || 'OBSERVE_ONLY',
     trendPhase?.trend_phase_code,
     riskProfile,
-    planProfile.key
+    planProfile.key,
+    marketDowngradeReasons
   );
+  const priorityResult = assetType === 'stock'
+    ? adjustPriorityWithStockIndustry(basePriorityResult, stockIndustryStrength)
+    : basePriorityResult;
   const opportunityType = classifyOpportunityType({
     asset_type: assetType,
     plan_profile: planProfile.key,
@@ -1928,12 +3246,25 @@ async function evaluateCandidate(
     (marketRegime?.entry_permission || 'OBSERVE_ONLY') === 'ALLOW_STRUCTURE_CHECK' &&
     !priorityResult.forbidden_reason &&
     !stockTradeQualification?.forbidden_reason &&
+    !stockIndustryStrength?.forbidden_reason &&
+    !etfPreGateReason &&
+    !etfGateReason;
+  const earlyMainlineWatch =
+    !selected &&
+    opportunityType.code === 'EARLY_LEADER_WATCH' &&
+    (marketRegime?.entry_permission || 'OBSERVE_ONLY') === 'ALLOW_STRUCTURE_CHECK' &&
+    !stockTradeQualification?.forbidden_reason &&
+    !stockIndustryStrength?.forbidden_reason &&
+    !priorityResult.forbidden_reason &&
     !etfPreGateReason &&
     !etfGateReason;
 
+  const marketFreshnessReason = marketRegime?.stale ? marketRegime.freshness_reason : null;
   const candidateReason = selected
     ? buildCandidateReason(structure.structure_reason, structure.safe_zone_reason, trendPhase?.trend_phase_code)
-    : stockTradeQualification?.forbidden_reason || priorityResult.forbidden_reason || etfPreGateReason || etfGateReason || '未同时满足安全区、结构成立和市场允许进入判断。';
+    : earlyMainlineWatch
+      ? `${opportunityType.label}：${opportunityType.reason}；${structure.structure_reason}；${structure.safe_zone_reason}`
+    : marketFreshnessReason || stockTradeQualification?.forbidden_reason || stockIndustryStrength?.forbidden_reason || priorityResult.forbidden_reason || etfPreGateReason || etfGateReason || '未同时满足安全区、结构成立和市场允许进入判断。';
   const etfGateNote = etfPreGate?.note || null;
   const stockTradeNote = assetType === 'stock' ? stockTradeQualification?.note || null : null;
   const fullCandidateReason = joinReasonParts(etfGateNote, stockTradeNote, candidateReason) || candidateReason;
@@ -1973,12 +3304,33 @@ async function evaluateCandidate(
           !stockTradeQualification?.extreme_trade.passed
         )
       : makeGate('extreme_trade_gate', 'not_applicable', 'ETF暂不走个股极端交易状态硬门槛。'),
-    makeGate(
-      'market_gate',
-      (marketRegime?.entry_permission || 'OBSERVE_ONLY') === 'ALLOW_STRUCTURE_CHECK' ? 'passed' : 'failed',
-      (marketRegime?.entry_permission || 'OBSERVE_ONLY') === 'ALLOW_STRUCTURE_CHECK'
-        ? '市场总闸允许进入结构判断。'
-        : '市场总闸未开放单标的结构判断。',
+    assetType === 'stock'
+      ? makeGate(
+          'stock_industry_gate',
+          stockIndustryStrength?.forbidden_reason
+            ? 'failed'
+            : stockIndustryStrength?.downgrade_reason
+              ? 'passed'
+              : stockIndustryStrength?.known
+                ? 'passed'
+                : 'not_applicable',
+          stockIndustryStrength?.forbidden_reason
+            || stockIndustryStrength?.downgrade_reason
+            || stockIndustryStrength?.reason
+            || '行业强弱未计算。',
+          Boolean(stockIndustryStrength?.forbidden_reason)
+        )
+      : makeGate('stock_industry_gate', 'not_applicable', 'ETF不走个股申万行业强弱门槛。'),
+	    makeGate(
+	      'market_gate',
+	      (marketRegime?.entry_permission || 'OBSERVE_ONLY') === 'ALLOW_STRUCTURE_CHECK' ? 'passed' : 'failed',
+	      marketRegime?.stale
+	        ? marketRegime.freshness_reason
+	        : (marketRegime?.entry_permission || 'OBSERVE_ONLY') === 'ALLOW_STRUCTURE_CHECK'
+	        ? marketDowngradeReasons.length > 0
+            ? `市场总闸允许进入结构判断，但组合条件进入观察/降权：${marketDowngradeReasons.join('；')}`
+            : '市场总闸允许进入结构判断。'
+	        : '市场总闸未开放单标的结构判断。',
       (marketRegime?.entry_permission || 'OBSERVE_ONLY') !== 'ALLOW_STRUCTURE_CHECK'
     ),
     makeGate(
@@ -2056,6 +3408,7 @@ async function evaluateCandidate(
 
   return {
     selected,
+    watch_only: earlyMainlineWatch,
     symbol,
     asset_type: assetType,
     source,
@@ -2067,7 +3420,7 @@ async function evaluateCandidate(
     forbidden_reason: stockTradeQualification?.forbidden_reason || priorityResult.forbidden_reason || etfPreGateReason || etfGateReason,
     downgrade_reason: etfGateReason ? priorityResult.downgrade_reason : priorityResult.downgrade_reason,
     risk_note: joinReasonParts(priorityResult.risk_note, stockTradeNote) || priorityResult.risk_note,
-    industry_strength: etfPreGate?.strength || null,
+    industry_strength: etfPreGate?.strength || stockIndustryStrength || null,
     etf_strategy_route: etfRoute,
     plan_profile: planProfile.key,
     plan_profile_label: planProfile.label,
@@ -2079,6 +3432,75 @@ async function evaluateCandidate(
     first_blocking_gate_label: gateTrace.first_blocking_gate_label,
     blocking_gate_labels: gateTrace.blocking_gate_labels
   };
+}
+
+function getCandidateScanSeedStatus(trendPhase: any) {
+  const trendCode = String(trendPhase?.trend_phase_code || '').trim();
+  if (STRUCTURE_READY_TREND_PHASES.has(trendCode)) {
+    return {
+      reviewStatus: 'structure_pending',
+      reviewAction: 'candidate_scan_trend_ready'
+    };
+  }
+  if (trendCode && (STRUCTURE_HOLD_TREND_PHASES.has(trendCode) || ETF_HARD_BLOCK_TREND_PHASES.has(trendCode))) {
+    return {
+      reviewStatus: 'trend_blocked',
+      reviewAction: 'candidate_scan_trend_hold'
+    };
+  }
+  return {
+    reviewStatus: 'unreviewed',
+    reviewAction: null
+  };
+}
+
+async function seedCandidateFlowStatusFromTrend(db: any, evaluation: any, now: string) {
+  const seed = getCandidateScanSeedStatus(evaluation.trend_phase);
+  if (seed.reviewStatus === 'unreviewed') return;
+
+  await db.run(
+    `UPDATE financial_candidate_pool
+     SET review_status = CASE
+           WHEN COALESCE(review_status, 'unreviewed') = 'plan_ready' THEN review_status
+           WHEN ? = 'structure_pending'
+             AND COALESCE(review_status, 'unreviewed') IN ('wait_confirmation', 'structure_watch', 'model_conflict')
+             THEN review_status
+           ELSE ?
+         END,
+         final_status = CASE
+           WHEN COALESCE(review_status, 'unreviewed') = 'plan_ready' THEN final_status
+           ELSE 'WAIT'
+         END,
+         review_action = CASE
+           WHEN COALESCE(review_status, 'unreviewed') = 'plan_ready' THEN review_action
+           WHEN ? = 'structure_pending'
+             AND COALESCE(review_status, 'unreviewed') IN ('wait_confirmation', 'structure_watch', 'model_conflict')
+             THEN review_action
+           ELSE ?
+         END,
+         last_review_at = CASE
+           WHEN COALESCE(review_status, 'unreviewed') = 'plan_ready' THEN last_review_at
+           ELSE COALESCE(last_review_at, ?)
+         END,
+         updated_at = ?
+     WHERE symbol = ?
+       AND asset_type = ?
+       AND source = ?
+       AND rule_version = ?
+       AND pool_status = 'active'`,
+    [
+      seed.reviewStatus,
+      seed.reviewStatus,
+      seed.reviewStatus,
+      seed.reviewAction,
+      now,
+      now,
+      evaluation.symbol,
+      evaluation.asset_type,
+      evaluation.source,
+      CANDIDATE_RULE_VERSION
+    ]
+  );
 }
 
 async function upsertCandidate(db: any, evaluation: any, name = '') {
@@ -2118,7 +3540,10 @@ async function upsertCandidate(db: any, evaluation: any, name = '') {
       entry_permission = excluded.entry_permission,
       plan_profile = excluded.plan_profile,
       plan_profile_label = excluded.plan_profile_label,
-      final_status = excluded.final_status,
+      final_status = CASE
+        WHEN COALESCE(financial_candidate_pool.review_status, 'unreviewed') = 'plan_ready' THEN financial_candidate_pool.final_status
+        ELSE excluded.final_status
+      END,
       pool_status = 'active',
       priority = excluded.priority,
       priority_score = excluded.priority_score,
@@ -2155,7 +3580,7 @@ async function upsertCandidate(db: any, evaluation: any, name = '') {
       marketRegime?.entry_permission || 'OBSERVE_ONLY',
       evaluation.plan_profile || null,
       evaluation.plan_profile_label || null,
-      'READY_FOR_PLAN',
+      'WAIT',
       'active',
       evaluation.priority,
       evaluation.priority_score,
@@ -2173,6 +3598,61 @@ async function upsertCandidate(db: any, evaluation: any, name = '') {
       now,
       now,
       now
+    ]
+  );
+
+  await seedCandidateFlowStatusFromTrend(db, evaluation, now);
+
+  if (!evaluation.watch_only) {
+    await db.run(
+      `UPDATE financial_candidate_pool
+       SET review_status = 'unreviewed',
+           review_action = CASE
+             WHEN COALESCE(review_action, '') IN ('', 'rejected', 'excluded_recheck') THEN 'reactivated_by_candidate_scan'
+             ELSE review_action
+           END,
+           updated_at = ?
+       WHERE symbol = ?
+         AND asset_type = ?
+         AND source = ?
+         AND rule_version = ?
+         AND COALESCE(review_status, 'unreviewed') = 'rejected'
+         AND pool_status = 'active'`,
+      [
+        now,
+        evaluation.symbol,
+        evaluation.asset_type,
+        evaluation.source,
+        CANDIDATE_RULE_VERSION
+      ]
+    );
+  }
+}
+
+async function markCandidateAsWatchOnly(db: any, evaluation: any) {
+  const now = new Date().toISOString();
+  await db.run(
+    `UPDATE financial_candidate_pool
+     SET final_status = 'WAIT',
+         review_status = 'structure_watch',
+         review_action = 'early_mainline_watch',
+         candidate_reason = ?,
+         downgrade_reason = COALESCE(NULLIF(downgrade_reason, ''), ?),
+         last_checked_at = ?,
+         updated_at = ?
+     WHERE symbol = ?
+       AND asset_type = ?
+       AND source = ?
+       AND rule_version = ?`,
+    [
+      evaluation.candidate_reason || '早期主线观察，只进入观察层，不生成买入计划。',
+      evaluation.candidate_reason || '早期主线观察，只进入观察层，不生成买入计划。',
+      now,
+      now,
+      evaluation.symbol,
+      evaluation.asset_type,
+      evaluation.source,
+      CANDIDATE_RULE_VERSION
     ]
   );
 }
@@ -2273,12 +3753,30 @@ router.get('/candidate-pool', async (req: Request, res: Response) => {
     const assetType = req.query.asset_type as string | undefined;
     const reviewStatus = req.query.review_status as string | undefined;
     const reviewQueue = req.query.review_queue as string | undefined;
+    const rawReviewScope = String(req.query.review_scope || 'actionable');
+    const reviewScope: ModelRecheckScope = ['actionable', 'data_gap', 'high_conflict', 'neutral', 'all'].includes(rawReviewScope)
+      ? rawReviewScope as ModelRecheckScope
+      : 'actionable';
     const excludeEntryObservation = req.query.exclude_entry_observation === '1' || req.query.exclude_entry_observation === 'true';
     const limit = Math.min(parseInt(req.query.limit as string) || 100, 500);
+    const offset = Math.max(parseInt(req.query.offset as string) || 0, 0);
     const queryLimit = reviewQueue === 'model_recheck'
-      ? Math.min(Math.max(limit * 10, 200), 500)
+      ? reviewScope === 'data_gap'
+        ? limit
+        : reviewScope === 'actionable'
+        ? Math.min(MODEL_RECHECK_QUERY_LIMIT, Math.max(limit + offset, 200))
+        : MODEL_RECHECK_QUERY_LIMIT
       : limit;
+    const queryOffset = reviewQueue === 'model_recheck'
+      ? reviewScope === 'data_gap' ? offset : 0
+      : offset;
     const includeModel = req.query.include_model === '1' || req.query.include_model === 'true' || reviewQueue === 'model_recheck';
+    const keyword = String(req.query.q || '').trim();
+    const coveredTradeDate = await getLatestCoveredTradeDate(db, {
+      assetTypes: assetType && CANDIDATE_POOL_ASSET_TYPES.includes(assetType)
+        ? [assetType]
+        : CANDIDATE_POOL_ASSET_TYPES
+    });
 
     const params: any[] = [CANDIDATE_RULE_VERSION];
     let where = 'WHERE rule_version = ?';
@@ -2293,6 +3791,16 @@ router.get('/candidate-pool', async (req: Request, res: Response) => {
       params.push(assetType);
     } else {
       where += ` AND asset_type IN ('stock', 'etf')`;
+    }
+
+    if (keyword) {
+      where += ` AND (symbol LIKE ? OR COALESCE(name, '') LIKE ?)`;
+      params.push(`%${keyword}%`, `%${keyword}%`);
+    }
+
+    if (coveredTradeDate) {
+      where += ' AND (trade_date IS NULL OR trade_date <= ?)';
+      params.push(coveredTradeDate);
     }
 
     if (reviewStatus) {
@@ -2313,73 +3821,172 @@ router.get('/candidate-pool', async (req: Request, res: Response) => {
     if (excludeEntryObservation) {
       where += ` AND NOT EXISTS (
         SELECT 1
-        FROM financial_entry_trigger_observations o
-        WHERE o.symbol = financial_candidate_pool.symbol
-          AND o.asset_type = financial_candidate_pool.asset_type
-          AND o.source = financial_candidate_pool.source
-          AND o.observation_status IN ('watching', 'plan_candidate', 'confirmed')
+        FROM (
+          SELECT o.observation_status
+          FROM financial_entry_trigger_observations o
+          WHERE o.symbol = financial_candidate_pool.symbol
+            AND o.asset_type = financial_candidate_pool.asset_type
+            AND o.source = financial_candidate_pool.source
+          ORDER BY o.updated_at DESC, o.id DESC
+          LIMIT 1
+        ) latest_observation
+        WHERE latest_observation.observation_status IN ('watching', 'plan_candidate', 'confirmed')
       )`;
     }
 
-    params.push(queryLimit);
+    let modelRecheckLatestBatchDate = '';
+    let modelRecheckSqlTotalRow: any = null;
+    if (reviewQueue === 'model_recheck') {
+      const latestBatchRow = await db.get(
+        `SELECT MAX(${MODEL_RECHECK_BATCH_DATE_SQL}) AS latest_batch_date
+         FROM financial_candidate_pool
+         ${where}`,
+        [...params]
+      );
+      modelRecheckLatestBatchDate = String(latestBatchRow?.latest_batch_date || '');
+
+      if (reviewScope === 'actionable') {
+        if (modelRecheckLatestBatchDate) {
+          where += ` AND ${MODEL_RECHECK_BATCH_DATE_SQL} = ?`;
+          params.push(modelRecheckLatestBatchDate);
+        }
+        where += ` AND COALESCE(review_action, '') <> 'auto_model_recheck_settled'
+          AND ${MODEL_RECHECK_NOT_HARD_BLOCKED_SQL}
+          AND ${MODEL_RECHECK_SOFT_CONFLICT_SQL}`;
+      } else if (reviewScope === 'data_gap') {
+        where += ` AND COALESCE(review_action, '') <> 'auto_model_recheck_settled'
+          AND ${MODEL_RECHECK_NOT_HARD_BLOCKED_SQL}
+          AND ${MODEL_RECHECK_DATA_GAP_SQL}`;
+      } else {
+        where += ` AND COALESCE(review_action, '') <> 'auto_model_recheck_settled'
+          AND ${MODEL_RECHECK_NOT_HARD_BLOCKED_SQL}
+          AND (${MODEL_RECHECK_DATA_GAP_SQL} OR ${MODEL_RECHECK_SOFT_CONFLICT_SQL})`;
+      }
+
+      if (reviewScope === 'data_gap') {
+        modelRecheckSqlTotalRow = await db.get(
+          `SELECT COUNT(*) as total
+           FROM financial_candidate_pool
+           ${where}`,
+          [...params]
+        );
+      }
+    }
+
+    const totalRow = reviewQueue === 'model_recheck'
+      ? null
+      : await db.get(
+          `SELECT COUNT(*) as total
+           FROM financial_candidate_pool
+           ${where}`,
+          [...params]
+        );
+
+    params.push(queryLimit, queryOffset);
+    const candidatePageColumns = await getCandidatePoolLightSelectColumns(db);
 
     let items = await db.all(
-      `SELECT financial_candidate_pool.*,
-              (
-                SELECT GROUP_CONCAT(DISTINCT u.universe_type)
-                FROM financial_asset_universe u
-                WHERE u.symbol = financial_candidate_pool.symbol
-                  AND u.asset_type = financial_candidate_pool.asset_type
-                  AND u.source = financial_candidate_pool.source
-              ) AS universe_type,
-              (
-                SELECT MAX(p.trade_date)
-                FROM financial_daily_prices p
-                WHERE p.symbol = financial_candidate_pool.symbol
-                  AND p.asset_type = financial_candidate_pool.asset_type
-                  AND p.source = financial_candidate_pool.source
-              ) AS local_last_trade_date,
-              (
-                SELECT MAX(p.updated_at)
-                FROM financial_daily_prices p
-                WHERE p.symbol = financial_candidate_pool.symbol
-                  AND p.asset_type = financial_candidate_pool.asset_type
-                  AND p.source = financial_candidate_pool.source
-              ) AS local_price_updated_at,
-              (
-                SELECT MAX(u.last_fetch_at)
-                FROM financial_asset_universe u
-                WHERE u.symbol = financial_candidate_pool.symbol
-                  AND u.asset_type = financial_candidate_pool.asset_type
-                  AND u.source = financial_candidate_pool.source
-              ) AS local_last_fetch_at,
-              (
-                SELECT GROUP_CONCAT(DISTINCT u.last_fetch_message)
-                FROM financial_asset_universe u
-                WHERE u.symbol = financial_candidate_pool.symbol
-                  AND u.asset_type = financial_candidate_pool.asset_type
-                  AND u.source = financial_candidate_pool.source
-                  AND u.last_fetch_message IS NOT NULL
-              ) AS local_last_fetch_message,
-              (
-                SELECT MAX(m.trade_date)
-                FROM financial_daily_prices m
-                WHERE m.symbol = '000300'
-                  AND m.asset_type = 'index'
-                  AND m.source = financial_candidate_pool.source
-              ) AS market_latest_trade_date
-       FROM financial_candidate_pool
-       ${where}
-       ORDER BY priority_score DESC, last_checked_at DESC, trade_date DESC
-       LIMIT ?`,
+      `WITH candidate_page AS (
+         SELECT ${candidatePageColumns}
+         FROM financial_candidate_pool
+         ${where}
+         ORDER BY priority_score DESC, last_checked_at DESC, trade_date DESC
+         LIMIT ? OFFSET ?
+       ),
+       universe_stats AS (
+         SELECT cp.symbol,
+                cp.asset_type,
+                cp.source,
+                GROUP_CONCAT(DISTINCT u.universe_type) AS universe_type,
+                MAX(u.last_fetch_at) AS local_last_fetch_at,
+                GROUP_CONCAT(DISTINCT u.last_fetch_message) AS local_last_fetch_message
+         FROM candidate_page cp
+         LEFT JOIN financial_asset_universe u
+           ON u.symbol = cp.symbol
+          AND u.asset_type = cp.asset_type
+          AND u.source = cp.source
+         GROUP BY cp.symbol, cp.asset_type, cp.source
+       ),
+       daily_stats AS (
+         SELECT cp.symbol,
+                cp.asset_type,
+                cp.source,
+                MAX(p.trade_date) AS local_last_trade_date,
+                MAX(p.updated_at) AS local_price_updated_at
+         FROM candidate_page cp
+         LEFT JOIN financial_daily_prices p
+           ON p.symbol = cp.symbol
+          AND p.asset_type = cp.asset_type
+          AND p.source = cp.source
+         GROUP BY cp.symbol, cp.asset_type, cp.source
+       ),
+       market_stats AS (
+         SELECT cp.source,
+                MAX(m.trade_date) AS market_latest_trade_date
+         FROM (SELECT DISTINCT source FROM candidate_page) cp
+         LEFT JOIN financial_daily_prices m
+           ON m.source = cp.source
+          AND m.symbol = '000300'
+          AND m.asset_type = 'index'
+         GROUP BY cp.source
+       )
+       SELECT cp.*,
+              universe_stats.universe_type,
+              daily_stats.local_last_trade_date,
+              daily_stats.local_price_updated_at,
+              universe_stats.local_last_fetch_at,
+              universe_stats.local_last_fetch_message,
+              market_stats.market_latest_trade_date
+       FROM candidate_page cp
+       LEFT JOIN universe_stats
+         ON universe_stats.symbol = cp.symbol
+        AND universe_stats.asset_type = cp.asset_type
+        AND universe_stats.source = cp.source
+       LEFT JOIN daily_stats
+         ON daily_stats.symbol = cp.symbol
+        AND daily_stats.asset_type = cp.asset_type
+        AND daily_stats.source = cp.source
+       LEFT JOIN market_stats
+         ON market_stats.source = cp.source
+       ORDER BY cp.priority_score DESC, cp.last_checked_at DESC, cp.trade_date DESC`,
       params
     );
 
-    if (includeModel && ['active', 'expired', 'all'].includes(status)) {
+    const shouldAttachModelScores = includeModel
+      && ['active', 'expired', 'all'].includes(status)
+      && !(reviewQueue === 'model_recheck' && reviewScope === 'data_gap');
+
+    if (shouldAttachModelScores && items.length > 0) {
       try {
-        const scoreMap = await runCandidateScoreWorker(queryLimit, status === 'all' ? 'all' : status as 'active' | 'expired');
+        const scoreLimit = reviewQueue === 'model_recheck'
+          ? queryLimit
+          : Math.min(offset + limit, 500);
+        const scoreDomain = assetType && CANDIDATE_POOL_ASSET_TYPES.includes(assetType) ? assetType : null;
+        const modelDomains = Array.from(new Set(
+          (scoreDomain ? [scoreDomain] : items.map((item: any) => item.asset_type))
+            .filter((domain: string) => CANDIDATE_POOL_ASSET_TYPES.includes(domain))
+        ));
+        const freshnessEntries = await Promise.all(
+          modelDomains.map(async domain => [domain, await getCandidateModelFreshness(db, domain, coveredTradeDate)] as const)
+        );
+        const freshnessByDomain = new Map(freshnessEntries);
+        const allRequestedModelsUnavailable = modelDomains.length > 0
+          && modelDomains.every(domain => freshnessByDomain.get(domain)?.available === false);
+        const persistedScoreMap = allRequestedModelsUnavailable
+          ? {}
+          : await loadPersistedCandidateScoreMap(db, items, coveredTradeDate);
+        const scoreMap = allRequestedModelsUnavailable
+          ? buildUnavailableCandidateScoreMap(items, freshnessByDomain)
+          : hasCurrentPersistedScores(items, persistedScoreMap, coveredTradeDate)
+          ? persistedScoreMap
+          : await runCachedCandidateScoreWorker(
+              scoreLimit,
+              status === 'all' ? 'all' : status as 'active' | 'expired',
+              coveredTradeDate,
+              scoreDomain
+            );
         items = items.map((item: any) => {
-          const score = scoreMap[`${item.symbol}|${item.asset_type}|${item.source}`];
+          const score = scoreMap[getCandidateScoreKey(item)];
           return {
             ...item,
             ml_available: score?.available === true ? 1 : 0,
@@ -2401,12 +4008,52 @@ router.get('/candidate-pool', async (req: Request, res: Response) => {
     }
 
     if (reviewQueue === 'model_recheck') {
-      items = items.filter(isVisibleModelRecheckItem).slice(0, limit);
+      const latestBatchDate = modelRecheckLatestBatchDate || getLatestModelRecheckBatchDate(items);
+      const summary = buildModelRecheckSummary(items, latestBatchDate);
+      const visibleItems = items.filter((item: any) => isVisibleModelRecheckItem(item, reviewScope, latestBatchDate));
+      const filteredTotal = reviewScope === 'data_gap'
+        ? Number(modelRecheckSqlTotalRow?.total || visibleItems.length)
+        : visibleItems.length;
+      if (reviewScope === 'data_gap') {
+        summary.data_gap = filteredTotal;
+        summary.all = Math.max(summary.all, filteredTotal);
+      }
+      items = reviewScope === 'data_gap'
+        ? visibleItems
+        : visibleItems.slice(offset, offset + limit);
+      items = items.map((item: any) => ({
+        ...hydrateCandidateItem(item),
+        model_recheck_bucket: getModelRecheckBucket(item),
+        model_recheck_data_gap: hasModelRecheckDataGap(item) ? 1 : 0
+      })).map((item: any) => compactModelRecheckListItem(item));
+
+      return res.json({
+        success: true,
+        data: {
+          items,
+          total: filteredTotal,
+          limit,
+          offset,
+          covered_trade_date: coveredTradeDate,
+          review_scope: reviewScope,
+          latest_batch_date: latestBatchDate,
+          summary
+        }
+      });
     }
 
-    items = items.map(hydrateCandidateItem);
+    items = items.map((item: any) => compactCandidatePoolListItem(hydrateCandidateItem(item)));
 
-    res.json({ success: true, data: { items } });
+    res.json({
+      success: true,
+      data: {
+        items,
+        total: Number(totalRow?.total || 0),
+        limit,
+        offset,
+        covered_trade_date: coveredTradeDate
+      }
+    });
   } catch (error) {
     res.status(500).json({
       success: false,
@@ -2430,6 +4077,18 @@ router.post('/candidate-pool/evaluate-one', async (req: Request, res: Response) 
       });
     }
 
+    const marketGateBlocker = await getFinanceMarketGateBlocker(db, source);
+    if (marketGateBlocker) {
+      return res.status(423).json({
+        success: false,
+        message: marketGateBlocker.message,
+        data: {
+          market_gate: marketGateBlocker.marketGate,
+          downstream_blocked: true
+        }
+      });
+    }
+
     const previousCandidate = await db.get(
       `SELECT id, pool_status, review_status
        FROM financial_candidate_pool
@@ -2444,25 +4103,42 @@ router.post('/candidate-pool/evaluate-one', async (req: Request, res: Response) 
     const industryStrengthContext = assetType === 'etf'
       ? await buildIndustryEtfStrengthContext(db, { scope: 'focus', benchmarkSymbol: '000300' })
       : undefined;
-    const evaluation = await evaluateCandidate(db, symbol, assetType, source, industryStrengthContext);
+    const stockIndustryStrengthContext = assetType === 'stock'
+      ? await buildStockIndustryStrengthContext(db)
+      : undefined;
+    const evaluation: any = await evaluateCandidate(db, symbol, assetType, source, industryStrengthContext, stockIndustryStrengthContext);
     const hardBlockedFromModelRecheck = isHardBlockedFromModelRecheck(evaluation);
+    const scanSeed = getCandidateScanSeedStatus(evaluation.trend_phase);
 
-    if (evaluation.selected) {
+    if (evaluation.selected || evaluation.watch_only) {
       await upsertCandidate(db, evaluation);
+      if (evaluation.watch_only) {
+        await markCandidateAsWatchOnly(db, evaluation);
+      }
       if (previousCandidate?.pool_status === 'expired') {
         const now = new Date().toISOString();
         await db.run(
           `UPDATE financial_candidate_pool
-           SET review_status = 'unreviewed',
+           SET review_status = ?,
+               final_status = 'WAIT',
                last_review_id = NULL,
                last_review_at = ?,
-               review_action = 'reentered_from_excluded_recheck',
+               review_action = ?,
                updated_at = ?
            WHERE symbol = ?
              AND asset_type = ?
              AND source = ?
              AND rule_version = ?`,
-          [now, now, symbol, assetType, source, CANDIDATE_RULE_VERSION]
+          [
+            evaluation.watch_only ? 'structure_watch' : scanSeed.reviewStatus,
+            now,
+            evaluation.watch_only ? 'early_mainline_watch' : (scanSeed.reviewAction || 'reentered_from_excluded_recheck'),
+            now,
+            symbol,
+            assetType,
+            source,
+            CANDIDATE_RULE_VERSION
+          ]
         );
       }
     } else {
@@ -2476,10 +4152,25 @@ router.post('/candidate-pool/evaluate-one', async (req: Request, res: Response) 
         previous_pool_status: previousCandidate?.pool_status || null,
         next_location: evaluation.selected
           ? {
-              key: 'candidate_pool',
-              label: `${assetType === 'etf' ? 'ETF备选池' : '个股备选池'} / 待生成复盘`,
+              key: scanSeed.reviewStatus === 'structure_pending'
+                ? 'structure_queue'
+                : scanSeed.reviewStatus === 'trend_blocked'
+                  ? 'trend_phase'
+                  : 'candidate_pool',
+              label: scanSeed.reviewStatus === 'structure_pending'
+                ? '单标的判断 / 待判断'
+                : scanSeed.reviewStatus === 'trend_blocked'
+                  ? '走势阶段 / 留队观察'
+                  : `${assetType === 'etf' ? 'ETF备选池' : '个股备选池'} / 待走势补算`,
               status: 'active',
-              review_status: 'unreviewed'
+              review_status: scanSeed.reviewStatus
+            }
+          : evaluation.watch_only
+          ? {
+              key: 'candidate_pool',
+              label: `${assetType === 'etf' ? 'ETF备选池' : '个股备选池'} / 早期主线观察`,
+              status: 'active',
+              review_status: 'structure_watch'
             }
           : {
               key: hardBlockedFromModelRecheck ? 'hard_blocked' : 'excluded_review',
@@ -2549,8 +4240,9 @@ router.get('/candidate-pool/structure-queue', async (req: Request, res: Response
       countParams
     );
 
+    const candidateColumns = await getCandidatePoolLightSelectColumns(db, 'c');
     const rows = await db.all(
-      `SELECT c.*,
+      `SELECT ${candidateColumns},
               t.trend_phase_code AS latest_trend_phase_code,
               t.trend_phase_reason AS latest_trend_phase_reason,
               (
@@ -2647,10 +4339,25 @@ router.post('/candidate-pool/structure-queue/:id/recheck', async (req: Request, 
       return res.status(400).json({ success: false, message: '该资产类型不进入单标的判断队列' });
     }
 
+    const marketGateBlocker = await getFinanceMarketGateBlocker(db, candidate.source || 'tushare');
+    if (marketGateBlocker) {
+      return res.status(423).json({
+        success: false,
+        message: marketGateBlocker.message,
+        data: {
+          market_gate: marketGateBlocker.marketGate,
+          downstream_blocked: true
+        }
+      });
+    }
+
     const industryStrengthContext = candidate.asset_type === 'etf'
       ? await buildIndustryEtfStrengthContext(db, { scope: 'focus', benchmarkSymbol: '000300' })
       : undefined;
-    const evaluation = await evaluateCandidate(db, candidate.symbol, candidate.asset_type, candidate.source, industryStrengthContext);
+    const stockIndustryStrengthContext = candidate.asset_type === 'stock'
+      ? await buildStockIndustryStrengthContext(db)
+      : undefined;
+    const evaluation = await evaluateCandidate(db, candidate.symbol, candidate.asset_type, candidate.source, industryStrengthContext, stockIndustryStrengthContext);
     const decision = await applyStructureQueueDecision(db, id, evaluation, candidate.name || '');
     const item = await fetchStructureQueueItem(db, id);
 
@@ -2683,6 +4390,7 @@ router.post('/candidate-pool/scan-universe', async (req: Request, res: Response)
     const universeType = req.body.universe_type || 'all';
     const assetType = req.body.asset_type as string | undefined;
     const source = req.body.source || 'tushare';
+    const minTradeDate = String(req.body.min_trade_date || req.body.minTradeDate || '').trim();
     const requestedLimit = req.body.limit === undefined || req.body.limit === null || req.body.limit === ''
       ? null
       : Number(req.body.limit);
@@ -2695,6 +4403,61 @@ router.post('/candidate-pool/scan-universe', async (req: Request, res: Response)
         success: false,
         message: 'invalid asset_type; candidate pool only supports stock or etf'
       });
+    }
+
+    const marketGateBlocker = await getFinanceMarketGateBlocker(db, source);
+    if (marketGateBlocker) {
+      return res.status(423).json({
+        success: false,
+        message: marketGateBlocker.message,
+        data: {
+          market_gate: marketGateBlocker.marketGate,
+          downstream_blocked: true,
+          checked_count: 0,
+          selected_count: 0,
+          result_count: 0,
+          results: []
+        }
+      });
+    }
+
+    const latestCoveredTradeDate = await getLatestCoveredTradeDate(db, {
+      source,
+      assetTypes: assetType ? [assetType, 'index'] : ['stock', 'etf', 'index']
+    });
+    const effectiveMinTradeDate = minTradeDate || latestCoveredTradeDate || '';
+    let staleExpiredCount = 0;
+
+    if (effectiveMinTradeDate && !limit && universeType === 'all') {
+      const now = new Date().toISOString();
+      const staleAssetClause = assetType ? `asset_type = ?` : `asset_type IN ('stock', 'etf')`;
+      const staleParams = assetType
+        ? [effectiveMinTradeDate, effectiveMinTradeDate, now, now, now, source, assetType, effectiveMinTradeDate]
+        : [effectiveMinTradeDate, effectiveMinTradeDate, now, now, now, source, effectiveMinTradeDate];
+      const staleResult = await db.run(
+        `UPDATE financial_candidate_pool
+         SET pool_status = 'expired',
+             final_status = 'REJECTED',
+             review_status = 'rejected',
+             review_action = CASE
+               WHEN COALESCE(review_action, '') = '' THEN 'stale_trade_date_expired'
+               ELSE review_action
+             END,
+             candidate_reason = '行情覆盖日已到 ' || ? || '，本候选仍停留在旧交易日，先沉淀过期，等待本轮扫描重新带回。',
+             forbidden_reason = '行情覆盖日已到 ' || ? || '，本候选仍停留在旧交易日，禁止继续占用 active 队列。',
+             first_blocking_gate_key = 'data_freshness_gate',
+             first_blocking_gate_label = '行情日滞后',
+             blocking_gate_labels = '行情日滞后',
+             last_checked_at = ?,
+             last_review_at = ?,
+             updated_at = ?
+         WHERE pool_status = 'active'
+           AND source = ?
+           AND ${staleAssetClause}
+           AND COALESCE(trade_date, '') < ?`,
+        staleParams
+      );
+      staleExpiredCount = Number(staleResult?.changes || 0);
     }
 
     const params: any[] = [source];
@@ -2710,6 +4473,10 @@ router.post('/candidate-pool/scan-universe', async (req: Request, res: Response)
     if (universeType !== 'all') {
       where += ' AND universe_type = ?';
       params.push(universeType);
+    }
+    if (effectiveMinTradeDate) {
+      where += ` AND COALESCE(last_trade_date, '') >= ?`;
+      params.push(effectiveMinTradeDate);
     }
 
     const rawCountResult = await db.get(
@@ -2780,16 +4547,22 @@ router.post('/candidate-pool/scan-universe', async (req: Request, res: Response)
     const industryStrengthContext = (!assetType || assetType === 'etf')
       ? await buildIndustryEtfStrengthContext(db, { scope: 'focus', benchmarkSymbol: '000300' })
       : undefined;
+    const stockIndustryStrengthContext = (!assetType || assetType === 'stock')
+      ? await buildStockIndustryStrengthContext(db, { asOfTradeDate: effectiveMinTradeDate || null })
+      : undefined;
     const results = [];
     const evaluations: any[] = [];
     let selectedCount = 0;
 
     for (const asset of assets) {
-      const evaluation: any = await evaluateCandidate(db, asset.symbol, asset.asset_type, asset.source, industryStrengthContext);
+      const evaluation: any = await evaluateCandidate(db, asset.symbol, asset.asset_type, asset.source, industryStrengthContext, stockIndustryStrengthContext);
       evaluations.push(evaluation);
 
-      if (evaluation.selected) {
+      if (evaluation.selected || evaluation.watch_only) {
         await upsertCandidate(db, evaluation, asset.name || '');
+        if (evaluation.watch_only) {
+          await markCandidateAsWatchOnly(db, evaluation);
+        }
         selectedCount++;
       } else {
         const now = new Date().toISOString();
@@ -2834,6 +4607,7 @@ router.post('/candidate-pool/scan-universe', async (req: Request, res: Response)
         asset_type: asset.asset_type,
         universe_type: asset.universe_type,
         selected: evaluation.selected,
+        watch_only: Boolean(evaluation.watch_only),
         industry_strength: evaluation.industry_strength || null,
         reason: evaluation.candidate_reason || evaluation.reason,
         gate_trace: evaluation.gate_trace || null,
@@ -2844,12 +4618,20 @@ router.post('/candidate-pool/scan-universe', async (req: Request, res: Response)
       });
     }
 
+    const exposureDedupe = (!limit && universeType === 'all' && (!assetType || assetType === 'etf'))
+      ? await dedupeActiveEtfExposureCandidates(db, { source, minTradeDate: effectiveMinTradeDate || null })
+      : { expired_count: 0, groups: [] };
+    const selectedAfterDedupe = Math.max(0, selectedCount - Number(exposureDedupe.expired_count || 0));
+
     const rawCount = rawCountResult?.total || assets.length;
     const dedupedTotal = dedupedCountResult?.total || assets.length;
     const duplicateCount = Math.max(0, rawCount - dedupedTotal);
     const uncheckedCount = Math.max(0, dedupedTotal - assets.length);
 
-    const scanScopeText = limit ? `限制检查 ${limit} 个` : '全量检查';
+    const scanScopeText = [
+      limit ? `限制检查 ${limit} 个` : '全量检查',
+      effectiveMinTradeDate ? `最新交易日不早于 ${effectiveMinTradeDate}` : ''
+    ].filter(Boolean).join('，');
     const responseResults = results.length <= 500
       ? results
       : [
@@ -2858,12 +4640,12 @@ router.post('/candidate-pool/scan-universe', async (req: Request, res: Response)
         ];
 
     const selectedMessage = assetType === 'etf'
-      ? `${selectedCount} 个进入权益主升ETF池`
-      : `${selectedCount} 个进入备选池`;
+      ? `${selectedAfterDedupe} 个进入权益主升ETF池`
+      : `${selectedAfterDedupe} 个进入备选池`;
 
     res.json({
       success: true,
-      message: `扫描完成：${scanScopeText}，实际检查 ${assets.length} 个${assetType ? ` ${assetType}` : ''}唯一资产，${selectedMessage}（匹配分组 ${rawCount} 条，去重后 ${dedupedTotal} 个，重复 ${duplicateCount} 条，未检查 ${uncheckedCount} 个）`,
+      message: `扫描完成：${scanScopeText}，实际检查 ${assets.length} 个${assetType ? ` ${assetType}` : ''}唯一资产，${selectedMessage}${staleExpiredCount ? `，沉淀旧交易日 active ${staleExpiredCount} 个` : ''}${exposureDedupe.expired_count ? `，ETF同类敞口去重 ${exposureDedupe.expired_count} 个` : ''}（匹配分组 ${rawCount} 条，去重后 ${dedupedTotal} 个，重复 ${duplicateCount} 条，未检查 ${uncheckedCount} 个）`,
       data: {
         checked_count: assets.length,
         raw_count: rawCount,
@@ -2871,7 +4653,11 @@ router.post('/candidate-pool/scan-universe', async (req: Request, res: Response)
         deduped_total: dedupedTotal,
         duplicate_count: duplicateCount,
         unchecked_count: uncheckedCount,
+        min_trade_date: effectiveMinTradeDate || null,
+        stale_expired_count: staleExpiredCount,
         selected_count: selectedCount,
+        selected_after_exposure_dedupe: selectedAfterDedupe,
+        etf_exposure_dedupe: exposureDedupe,
         result_count: results.length,
         returned_result_count: responseResults.length,
         gate_summary: buildGateSummary(evaluations),
@@ -2882,6 +4668,45 @@ router.post('/candidate-pool/scan-universe', async (req: Request, res: Response)
     res.status(500).json({
       success: false,
       message: `扫描资产库失败: ${(error as Error).message}`
+    });
+  }
+});
+
+router.get('/candidate-pool/:id', async (req: Request, res: Response) => {
+  try {
+    const db = await getDb();
+    await ensureCandidateReviewSchema(db);
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) {
+      return res.status(400).json({ success: false, message: '无效的备选池ID' });
+    }
+
+    const item = await db.get(
+      `SELECT *
+       FROM financial_candidate_pool
+       WHERE id = ?
+         AND rule_version = ?
+       LIMIT 1`,
+      [id, CANDIDATE_RULE_VERSION]
+    );
+
+    if (!item) {
+      return res.status(404).json({ success: false, message: '备选池标的不存在' });
+    }
+
+    res.json({
+      success: true,
+      data: {
+        item: {
+          ...hydrateCandidateItem(item, { includeGateTrace: true }),
+          flow_timeline: await buildCandidateFlowTimeline(db, item)
+        }
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: `获取备选池详情失败: ${(error as Error).message}`
     });
   }
 });
@@ -2903,6 +4728,18 @@ router.get('/candidate-pool/:id/review-draft', async (req: Request, res: Respons
       return res.status(404).json({ success: false, message: '备选池标的不存在' });
     }
 
+    const marketGateBlocker = await getFinanceMarketGateBlocker(db, item.source || 'tushare');
+    if (marketGateBlocker) {
+      return res.status(423).json({
+        success: false,
+        message: marketGateBlocker.message,
+        data: {
+          market_gate: marketGateBlocker.marketGate,
+          downstream_blocked: true
+        }
+      });
+    }
+
     let enrichedItem = {
       ...item,
       ml_available: 0,
@@ -2914,7 +4751,10 @@ router.get('/candidate-pool/:id/review-draft', async (req: Request, res: Respons
     };
 
     try {
-      const scoreMap = await runCandidateScoreWorker(500);
+      const coveredTradeDate = CANDIDATE_POOL_ASSET_TYPES.includes(item.asset_type)
+        ? await getLatestCoveredTradeDate(db, { assetTypes: [item.asset_type] })
+        : null;
+      const scoreMap = await runCandidateScoreWorker(1, 'all', coveredTradeDate, item.asset_type, item.symbol);
       const score = scoreMap[`${item.symbol}|${item.asset_type}|${item.source}`];
       enrichedItem = {
         ...enrichedItem,
@@ -2969,7 +4809,7 @@ router.get('/candidate-pool/:id/review-draft', async (req: Request, res: Respons
            review_action = ?,
            updated_at = ?
        WHERE id = ?`,
-      [reviewId, now, draft.suggested_action.key, now, id]
+      [reviewId, now, 'model_review_draft_created', now, id]
     );
 
     draft.review_id = reviewId || null;
@@ -2979,7 +4819,7 @@ router.get('/candidate-pool/:id/review-draft', async (req: Request, res: Respons
       review_status: 'drafted',
       last_review_id: reviewId || null,
       last_review_at: now,
-      review_action: draft.suggested_action.key
+      review_action: 'model_review_draft_created'
     };
 
     res.json({
@@ -3017,6 +4857,25 @@ router.patch('/candidate-pool/:id/review-status', async (req: Request, res: Resp
       return res.status(400).json({ success: false, message: '无效的复盘状态' });
     }
 
+    const item = await db.get(`SELECT source, last_review_id FROM financial_candidate_pool WHERE id = ?`, [id]);
+    if (!item) {
+      return res.status(404).json({ success: false, message: '候选标的不存在' });
+    }
+
+    if (isCandidateReviewStatusFlowAdvancing(status)) {
+      const marketGateBlocker = await getFinanceMarketGateBlocker(db, item.source || 'tushare');
+      if (marketGateBlocker) {
+        return res.status(423).json({
+          success: false,
+          message: marketGateBlocker.message,
+          data: {
+            market_gate: marketGateBlocker.marketGate,
+            downstream_blocked: true
+          }
+        });
+      }
+    }
+
     const now = new Date().toISOString();
     await db.run(
       `UPDATE financial_candidate_pool
@@ -3025,7 +4884,6 @@ router.patch('/candidate-pool/:id/review-status', async (req: Request, res: Resp
       [status, now, id]
     );
 
-    const item = await db.get(`SELECT last_review_id FROM financial_candidate_pool WHERE id = ?`, [id]);
     if (item?.last_review_id) {
       await db.run(
         `UPDATE financial_candidate_reviews
@@ -3061,11 +4919,47 @@ router.patch('/candidate-pool/:id/status', async (req: Request, res: Response) =
       return res.status(400).json({ success: false, message: '无效的备选池状态' });
     }
 
+    const item = await db.get(`SELECT source FROM financial_candidate_pool WHERE id = ?`, [id]);
+    if (!item) {
+      return res.status(404).json({ success: false, message: '候选标的不存在' });
+    }
+
+    if (isCandidatePoolStatusFlowAdvancing(status)) {
+      const marketGateBlocker = await getFinanceMarketGateBlocker(db, item.source || 'tushare');
+      if (marketGateBlocker) {
+        return res.status(423).json({
+          success: false,
+          message: marketGateBlocker.message,
+          data: {
+            market_gate: marketGateBlocker.marketGate,
+            downstream_blocked: true
+          }
+        });
+      }
+    }
+
+    const now = new Date().toISOString();
     await db.run(
       `UPDATE financial_candidate_pool
-       SET pool_status = ?, updated_at = ?
+       SET pool_status = ?,
+           final_status = CASE
+             WHEN ? IN ('expired', 'ignored') THEN 'REJECTED'
+             WHEN ? = 'planned' THEN 'READY_FOR_PLAN'
+             WHEN ? = 'active' AND COALESCE(review_status, '') = 'plan_ready' THEN 'READY_FOR_PLAN'
+             WHEN ? = 'active' THEN 'WAIT'
+             ELSE final_status
+           END,
+           review_status = CASE
+             WHEN ? IN ('expired', 'ignored') THEN 'rejected'
+             ELSE review_status
+           END,
+           review_action = CASE
+             WHEN ? IN ('expired', 'ignored') THEN 'manual_status_update'
+             ELSE review_action
+           END,
+           updated_at = ?
        WHERE id = ?`,
-      [status, new Date().toISOString(), id]
+      [status, status, status, status, status, status, status, now, id]
     );
 
     res.json({ success: true, message: '备选池状态已更新' });

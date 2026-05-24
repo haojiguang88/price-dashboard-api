@@ -11,15 +11,21 @@ const getPriceRecords = async (db: any, period: number | 'all', filters: {
 }) => {
   let query = `
     SELECT 
-      id, 
-      date, 
-      category AS category_name, 
-      object_name, 
-      COALESCE(variant, '') AS variant_name, 
-      price, 
-      created_at
-    FROM price_records
+      pr.id, 
+      pr.date, 
+      pr.category AS category_name, 
+      pr.object_name, 
+      COALESCE(pr.variant, '') AS variant_name, 
+      pr.price, 
+      pr.created_at
+    FROM price_records pr
+    LEFT JOIN categories c ON c.name = pr.category
+    LEFT JOIN objects o ON o.category_id = c.id AND o.name = pr.object_name
+    LEFT JOIN variants v ON v.object_id = o.id AND v.name = COALESCE(pr.variant, '') AND COALESCE(pr.variant, '') <> ''
     WHERE 1=1
+      AND COALESCE(c.is_archived, 0) = 0
+      AND COALESCE(o.is_archived, 0) = 0
+      AND (COALESCE(pr.variant, '') = '' OR COALESCE(v.is_archived, 0) = 0)
   `;
   const params: any[] = [];
 
@@ -28,29 +34,29 @@ const getPriceRecords = async (db: any, period: number | 'all', filters: {
     const startDate = new Date();
     startDate.setDate(startDate.getDate() - period);
     const startDateStr = startDate.toISOString().slice(0, 10);
-    query += ' AND date >= ?';
+    query += ' AND pr.date >= ?';
     params.push(startDateStr);
   }
 
   // 品类筛选
   if (filters.category_name) {
-    query += ' AND category = ?';
+    query += ' AND pr.category = ?';
     params.push(filters.category_name);
   }
 
   // 对象筛选
   if (filters.object_name) {
-    query += ' AND object_name = ?';
+    query += ' AND pr.object_name = ?';
     params.push(filters.object_name);
   }
 
   // 变体筛选
   if (filters.variant_name) {
-    query += ' AND variant = ?';
+    query += ' AND pr.variant = ?';
     params.push(filters.variant_name);
   }
 
-  query += ' ORDER BY category ASC, object_name ASC, COALESCE(variant, \'\') ASC, date ASC, created_at ASC, id ASC';
+  query += ' ORDER BY pr.category ASC, pr.object_name ASC, COALESCE(pr.variant, \'\') ASC, pr.date ASC, pr.created_at ASC, pr.id ASC';
 
   const records = await db.all(query, params);
   
@@ -402,6 +408,13 @@ const calculatePriceDifferences = (prices: number[], dates: string[]) => {
     return {
       last_change_amount: 0,
       last_change_rate: 0,
+      max_adjacent_change_amount: 0,
+      max_adjacent_change_rate: 0,
+      max_adjacent_change_direction: '持平',
+      max_adjacent_change_from_date: null,
+      max_adjacent_change_to_date: null,
+      max_adjacent_change_from_price: null,
+      max_adjacent_change_to_price: null,
       max_single_rise_amount: 0,
       max_single_rise_rate: 0,
       max_single_drop_amount: 0,
@@ -413,7 +426,14 @@ const calculatePriceDifferences = (prices: number[], dates: string[]) => {
     };
   }
   
-  const changes: { amount: number; rate: number }[] = [];
+  const changes: {
+    amount: number;
+    rate: number;
+    fromDate: string;
+    toDate: string;
+    fromPrice: number;
+    toPrice: number;
+  }[] = [];
   let riseCount = 0;
   let dropCount = 0;
   let flatCount = 0;
@@ -422,7 +442,14 @@ const calculatePriceDifferences = (prices: number[], dates: string[]) => {
     const changeAmount = prices[i] - prices[i - 1];
     const changeRate = prices[i - 1] > 0 ? (changeAmount / prices[i - 1]) * 100 : 0;
     
-    changes.push({ amount: changeAmount, rate: changeRate });
+    changes.push({
+      amount: changeAmount,
+      rate: changeRate,
+      fromDate: dates[i - 1],
+      toDate: dates[i],
+      fromPrice: prices[i - 1],
+      toPrice: prices[i]
+    });
     
     if (changeAmount > 0) {
       riseCount++;
@@ -444,6 +471,10 @@ const calculatePriceDifferences = (prices: number[], dates: string[]) => {
   const maxSingleDrop = negativeChanges.length > 0 
     ? negativeChanges.reduce((min, c) => c.amount < min.amount ? c : min, negativeChanges[0]) 
     : { amount: 0, rate: 0 };
+
+  const maxAdjacentChange = changes.reduce((max, c) => (
+    Math.abs(c.amount) > Math.abs(max.amount) ? c : max
+  ), changes[0]);
   
   const avgChangeAmount = changes.length > 0 
     ? changes.reduce((sum, c) => sum + c.amount, 0) / changes.length 
@@ -452,6 +483,13 @@ const calculatePriceDifferences = (prices: number[], dates: string[]) => {
   return {
     last_change_amount: lastChange.amount,
     last_change_rate: lastChange.rate,
+    max_adjacent_change_amount: Math.abs(maxAdjacentChange.amount),
+    max_adjacent_change_rate: Math.abs(maxAdjacentChange.rate),
+    max_adjacent_change_direction: maxAdjacentChange.amount > 0 ? '上涨' : maxAdjacentChange.amount < 0 ? '下跌' : '持平',
+    max_adjacent_change_from_date: maxAdjacentChange.fromDate,
+    max_adjacent_change_to_date: maxAdjacentChange.toDate,
+    max_adjacent_change_from_price: maxAdjacentChange.fromPrice,
+    max_adjacent_change_to_price: maxAdjacentChange.toPrice,
     max_single_rise_amount: maxSingleRise.amount,
     max_single_rise_rate: maxSingleRise.rate,
     max_single_drop_amount: maxSingleDrop.amount,
@@ -589,6 +627,13 @@ router.get('/', async (req, res) => {
           // 相邻价格差分析
           last_change_amount: 0,
           last_change_rate: 0,
+          max_adjacent_change_amount: 0,
+          max_adjacent_change_rate: 0,
+          max_adjacent_change_direction: '持平',
+          max_adjacent_change_from_date: null,
+          max_adjacent_change_to_date: null,
+          max_adjacent_change_from_price: null,
+          max_adjacent_change_to_price: null,
           max_single_rise_amount: 0,
           max_single_rise_rate: 0,
           max_single_drop_amount: 0,
@@ -775,6 +820,13 @@ router.get('/', async (req, res) => {
         // 相邻价格差分析
         last_change_amount: priceDifferences.last_change_amount,
         last_change_rate: parseFloat(priceDifferences.last_change_rate.toFixed(2)),
+        max_adjacent_change_amount: parseFloat(priceDifferences.max_adjacent_change_amount.toFixed(2)),
+        max_adjacent_change_rate: parseFloat(priceDifferences.max_adjacent_change_rate.toFixed(2)),
+        max_adjacent_change_direction: priceDifferences.max_adjacent_change_direction,
+        max_adjacent_change_from_date: priceDifferences.max_adjacent_change_from_date,
+        max_adjacent_change_to_date: priceDifferences.max_adjacent_change_to_date,
+        max_adjacent_change_from_price: priceDifferences.max_adjacent_change_from_price,
+        max_adjacent_change_to_price: priceDifferences.max_adjacent_change_to_price,
         max_single_rise_amount: priceDifferences.max_single_rise_amount,
         max_single_rise_rate: parseFloat(priceDifferences.max_single_rise_rate.toFixed(2)),
         max_single_drop_amount: priceDifferences.max_single_drop_amount,

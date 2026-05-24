@@ -3,7 +3,7 @@ const path = require('path');
 const sqlite3 = require('sqlite3').verbose();
 
 // 数据库路径（使用开发环境数据库）
-const dbPath = process.env.DB_PATH || path.join(process.cwd(), 'db', 'price_dashboard_dev.db');
+const dbPath = process.env.DB_PATH || '/Volumes/7100/price-dashboard-data/db/price_dashboard_dev.db';
 
 // 备份文件路径
 const backupFilePath = path.join(process.cwd(), 'positions_backup.json');

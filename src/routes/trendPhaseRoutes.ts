@@ -1,6 +1,7 @@
 import express, { Request, Response } from 'express';
 import getDb from '../config/database';
 import { resolveFinancePlanProfile } from '../services/financePlanProfile';
+import { getFreshMarketRegime } from '../utils/financeMarketRegime';
 
 const router = express.Router();
 
@@ -9,6 +10,18 @@ const READY_TREND_PHASE_CODES = new Set(['BREAKOUT', 'SLOW_GRIND_UP', 'RECOVERY'
 const REJECT_TREND_PHASE_CODES = new Set(['CRASH_DROP', 'SLOW_BLEED', 'SURGE', 'REBOUND']);
 const READY_TREND_PHASE_SQL = `'BREAKOUT', 'SLOW_GRIND_UP', 'RECOVERY'`;
 const REJECT_TREND_PHASE_SQL = `'CRASH_DROP', 'SLOW_BLEED', 'SURGE', 'REBOUND'`;
+
+function isTrendMarketGateOpen(marketGate: any) {
+  return marketGate?.entry_permission === 'ALLOW_STRUCTURE_CHECK';
+}
+
+function getTrendMarketGateBlockReason(marketGate: any) {
+  if (marketGate?.stale) return marketGate.freshness_reason;
+  return marketGate?.entry_reason
+    || marketGate?.result_reason
+    || marketGate?.freshness_reason
+    || '市场总闸未开放走势阶段重算。';
+}
 
 function getTrendQueueStatus(code?: string | null, reviewStatus?: string | null) {
   const trendCode = code || 'UNKNOWN';
@@ -248,6 +261,16 @@ function logUpdate(message: string, symbol?: string) {
   console.log(`${timestamp} [UPDATE] ${prefix} ${message}`);
 }
 
+function isDebugEnabled(value?: string) {
+  return ['1', 'true', 'yes', 'on'].includes(String(value || '').toLowerCase());
+}
+
+function debugTrendLog(message: string) {
+  if (isDebugEnabled(process.env.DEBUG_TREND_PHASE)) {
+    console.log(message);
+  }
+}
+
 function calculateMA(prices: DailyPrice[], days: number, index: number): number | null {
   if (index < days - 1) return null;
   const slice = prices.slice(index - days + 1, index + 1);
@@ -371,10 +394,10 @@ function calculateTrendPhase(prices: DailyPrice[], index: number, assetType: str
   
   const unmetConditions: string[] = [];
   
-  console.log(`[趋势阶段判定] 开始 - 日期: ${prices[index].trade_date}, 索引: ${index}`);
+  debugTrendLog(`[趋势阶段判定] 开始 - 日期: ${prices[index].trade_date}, 索引: ${index}`);
   
   if (ma60 === null) {
-    console.log(`[趋势阶段判定] 数据不足：MA60无法计算，当前索引=${index}，需要至少60个交易日数据`);
+    debugTrendLog(`[趋势阶段判定] 数据不足：MA60无法计算，当前索引=${index}，需要至少60个交易日数据`);
     return { 
       code: 'UNKNOWN', 
       reason: '状态未确认：当前数据未能满足足够的趋势阶段判定条件，等待市场确认。',
@@ -384,7 +407,7 @@ function calculateTrendPhase(prices: DailyPrice[], index: number, assetType: str
   }
   
   if (close <= 0) {
-    console.log(`[趋势阶段判定] 数据验证失败：收盘价无效 (close=${close})`);
+    debugTrendLog(`[趋势阶段判定] 数据验证失败：收盘价无效 (close=${close})`);
     return { 
       code: 'UNKNOWN', 
       reason: '状态未确认：数据验证失败。',
@@ -405,7 +428,7 @@ function calculateTrendPhase(prices: DailyPrice[], index: number, assetType: str
   
   const down_day_ratio = countDownDays(prices, index) / 20;
   
-  console.log(`[趋势阶段判定] 基础指标计算完成 - profile: ${th.label}, close: ${close.toFixed(2)}, ma60: ${ma60.toFixed(2)}, bias60: ${(bias60 * 100).toFixed(2)}%, ret5: ${ret5 !== null ? (ret5 * 100).toFixed(2) : 'null'}%, ret20: ${ret20 !== null ? (ret20 * 100).toFixed(2) : 'null'}%, range20: ${(range20 * 100).toFixed(2)}%, max_drawdown20: ${(max_drawdown20 * 100).toFixed(2)}%, cross60_10: ${cross60_10}, ma60_slope_abs_5d: ${(ma60_slope_abs_5d * 100).toFixed(3)}%`);
+  debugTrendLog(`[趋势阶段判定] 基础指标计算完成 - profile: ${th.label}, close: ${close.toFixed(2)}, ma60: ${ma60.toFixed(2)}, bias60: ${(bias60 * 100).toFixed(2)}%, ret5: ${ret5 !== null ? (ret5 * 100).toFixed(2) : 'null'}%, ret20: ${ret20 !== null ? (ret20 * 100).toFixed(2) : 'null'}%, range20: ${(range20 * 100).toFixed(2)}%, max_drawdown20: ${(max_drawdown20 * 100).toFixed(2)}%, cross60_10: ${cross60_10}, ma60_slope_abs_5d: ${(ma60_slope_abs_5d * 100).toFixed(3)}%`);
   
   if ((ret5 !== null && ret5 <= th.CRASH_5D) || 
       (ret20 !== null && ret20 <= th.CRASH_20D)) {
@@ -415,7 +438,7 @@ function calculateTrendPhase(prices: DailyPrice[], index: number, assetType: str
     const details = ret5 !== null && ret5 <= th.CRASH_5D 
       ? `5日回撤=${(ret5 * 100).toFixed(1)}% ≤ ${(th.CRASH_5D * 100).toFixed(1)}%（${th.label}阈值）` 
       : `20日回撤=${(ret20! * 100).toFixed(1)}% ≤ ${(th.CRASH_20D * 100).toFixed(1)}%（${th.label}阈值）`;
-    console.log(`[趋势阶段判定] 命中暴跌阶段 - ${details}`);
+    debugTrendLog(`[趋势阶段判定] 命中暴跌阶段 - ${details}`);
     return { 
       code: 'CRASH_DROP', 
       reason: `暴跌：${evidence}，触发暴跌阈值。`,
@@ -437,7 +460,7 @@ function calculateTrendPhase(prices: DailyPrice[], index: number, assetType: str
     const details = ret5 !== null && ret5 >= th.SURGE_5D 
       ? `5日涨幅=${(ret5 * 100).toFixed(1)}% ≥ ${(th.SURGE_5D * 100).toFixed(1)}%（${th.label}阈值）` 
       : `单日涨幅=${(ret1! * 100).toFixed(1)}% ≥ ${(th.SURGE_1D * 100).toFixed(1)}%（${th.label}阈值）`;
-    console.log(`[趋势阶段判定] 命中急涨阶段 - ${details}`);
+    debugTrendLog(`[趋势阶段判定] 命中急涨阶段 - ${details}`);
     return { 
       code: 'SURGE', 
       reason: `急涨：${evidence}，触发急涨阈值。`,
@@ -456,7 +479,7 @@ function calculateTrendPhase(prices: DailyPrice[], index: number, assetType: str
   const belowMa60OrDown = close < ma60 || (ma60_prev5 !== null && ma60 < ma60_prev5);
   
   if (hasCrashDrop && hasReboundRet && belowMa60OrDown) {
-    console.log(`[趋势阶段判定] 命中反抽阶段 - 近期暴跌=${hasCrashDrop}, 5日涨幅=${(ret5! * 100).toFixed(1)}% ≥ 4%, 收盘价在MA60下方或MA60下行=${belowMa60OrDown}`);
+    debugTrendLog(`[趋势阶段判定] 命中反抽阶段 - 近期暴跌=${hasCrashDrop}, 5日涨幅=${(ret5! * 100).toFixed(1)}% ≥ 4%, 收盘价在MA60下方或MA60下行=${belowMa60OrDown}`);
     return { 
       code: 'REBOUND', 
       reason: `反抽：近期出现暴跌后，5日涨幅${(ret5! * 100).toFixed(1)}%，但仍在MA60下方或MA60继续下行。`,
@@ -473,7 +496,7 @@ function calculateTrendPhase(prices: DailyPrice[], index: number, assetType: str
   const ma20Upward = ma20_slope_5d !== null && ma20_slope_5d >= -0.003;
   
   if (hasBaseLike && breakout_condition && close > ma60 && ma20 !== null && close >= ma20 && ma20Upward) {
-    console.log(`[趋势阶段判定] 命中突破阶段 - 前期收敛整理=${hasBaseLike}, 突破前20日高点=${breakout_condition}, 收盘价>MA60=${close > ma60}, MA20不下行=${ma20Upward}`);
+    debugTrendLog(`[趋势阶段判定] 命中突破阶段 - 前期收敛整理=${hasBaseLike}, 突破前20日高点=${breakout_condition}, 收盘价>MA60=${close > ma60}, MA20不下行=${ma20Upward}`);
     return { 
       code: 'BREAKOUT', 
       reason: `突破：前期收敛整理后，收盘价突破前20日高点${(th.BREAKOUT_MARGIN * 100).toFixed(1)}%，并站上MA20/MA60。`,
@@ -489,7 +512,7 @@ function calculateTrendPhase(prices: DailyPrice[], index: number, assetType: str
   }
   
   if (close > ma60 && bias60 >= th.HIGH_BASE_BIAS60 && range20 <= th.SIDEWAYS_RANGE20_WIDE && ret20 !== null && ret20 >= -th.SIDEWAYS_RET20_ABS) {
-    console.log(`[趋势阶段判定] 命中高位横盘阶段 - 收盘价>MA60=${close > ma60}, bias60=${(bias60 * 100).toFixed(1)}%, 20日振幅=${(range20 * 100).toFixed(1)}%`);
+    debugTrendLog(`[趋势阶段判定] 命中高位横盘阶段 - 收盘价>MA60=${close > ma60}, bias60=${(bias60 * 100).toFixed(1)}%, 20日振幅=${(range20 * 100).toFixed(1)}%`);
     return { 
       code: 'HIGH_BASE', 
       reason: `高位横盘：价格在MA60上方${(bias60 * 100).toFixed(1)}%，20日波动收敛但未继续加速。`,
@@ -509,7 +532,7 @@ function calculateTrendPhase(prices: DailyPrice[], index: number, assetType: str
   const slowUpControlled = max_drawdown20 <= th.SLOW_UP_MAX_DRAWDOWN20 && range20 <= th.SLOW_UP_MAX_RANGE20;
   
   if (hasSlowUpRet && closeAboveMa60 && ma60Upward && slowUpControlled) {
-    console.log(`[趋势阶段判定] 命中慢涨阶段 - 20日涨幅=${(ret20! * 100).toFixed(1)}%, 收盘价≥MA60=${closeAboveMa60}, MA60上行=${ma60Upward}, 回撤和波动可控=${slowUpControlled}`);
+    debugTrendLog(`[趋势阶段判定] 命中慢涨阶段 - 20日涨幅=${(ret20! * 100).toFixed(1)}%, 收盘价≥MA60=${closeAboveMa60}, MA60上行=${ma60Upward}, 回撤和波动可控=${slowUpControlled}`);
     return { 
       code: 'SLOW_GRIND_UP', 
       reason: `慢涨：20日涨幅${(ret20! * 100).toFixed(1)}%，收盘价站上MA60，MA60上行，且回撤和波动未过热。`,
@@ -527,7 +550,7 @@ function calculateTrendPhase(prices: DailyPrice[], index: number, assetType: str
     max_drawdown20 <= th.SLOW_UP_MAX_DRAWDOWN20 * 1.8 &&
     range20 <= th.SLOW_UP_MAX_RANGE20 * 1.6;
   if (hasSlowUpRet && closeAboveMa60 && ma60Upward && trendUpVolatilityOk) {
-    console.log(`[趋势阶段判定] 命中趋势上行阶段 - 20日涨幅=${(ret20! * 100).toFixed(1)}%, 收盘价≥MA60=${closeAboveMa60}, MA60上行=${ma60Upward}, 波动高于慢涨但未失控=${trendUpVolatilityOk}`);
+    debugTrendLog(`[趋势阶段判定] 命中趋势上行阶段 - 20日涨幅=${(ret20! * 100).toFixed(1)}%, 收盘价≥MA60=${closeAboveMa60}, MA60上行=${ma60Upward}, 波动高于慢涨但未失控=${trendUpVolatilityOk}`);
     return {
       code: 'TREND_UP',
       reason: `趋势上行：20日涨幅${(ret20! * 100).toFixed(1)}%，收盘价站上MA60且MA60上行；但20日回撤或振幅高于慢涨标准，按趋势上行观察。`,
@@ -544,7 +567,7 @@ function calculateTrendPhase(prices: DailyPrice[], index: number, assetType: str
   const hasHighDownRatio = down_day_ratio >= th.BLEED_DOWN_DAY_RATIO;
   
   if (hasBleedRet && hasHighDownRatio) {
-    console.log(`[趋势阶段判定] 命中阴跌阶段 - 20日回撤=${(ret20! * 100).toFixed(1)}% ≤ -5%, 下跌天数占比=${(down_day_ratio * 100).toFixed(0)}% ≥ 55%`);
+    debugTrendLog(`[趋势阶段判定] 命中阴跌阶段 - 20日回撤=${(ret20! * 100).toFixed(1)}% ≤ -5%, 下跌天数占比=${(down_day_ratio * 100).toFixed(0)}% ≥ 55%`);
     return { 
       code: 'SLOW_BLEED', 
       reason: `阴跌：20日回撤${(ret20! * 100).toFixed(1)}%，下跌天数占比${(down_day_ratio * 100).toFixed(0)}%，呈持续下跌态势。`,
@@ -561,7 +584,7 @@ function calculateTrendPhase(prices: DailyPrice[], index: number, assetType: str
   const recoveryRetOk = ret20 !== null && ret20 > th.BLEED_20D && ret20 < th.SLOW_UP_20D;
   
   if (biasInRange && slopeFlat && recoveryRetOk) {
-    console.log(`[趋势阶段判定] 命中修复阶段 - bias60=${(bias60 * 100).toFixed(1)}%, MA60斜率=${(ma60_slope_abs_5d * 100).toFixed(2)}%, ret20=${ret20 !== null ? (ret20 * 100).toFixed(1) : 'null'}%`);
+    debugTrendLog(`[趋势阶段判定] 命中修复阶段 - bias60=${(bias60 * 100).toFixed(1)}%, MA60斜率=${(ma60_slope_abs_5d * 100).toFixed(2)}%, ret20=${ret20 !== null ? (ret20 * 100).toFixed(1) : 'null'}%`);
     return { 
       code: 'RECOVERY', 
       reason: `修复：价格回到MA60附近，MA60趋于平缓，短期跌势缓和但尚未形成慢涨。`,
@@ -579,7 +602,7 @@ function calculateTrendPhase(prices: DailyPrice[], index: number, assetType: str
   const biasSidewaysOk = Math.abs(bias60) <= th.SIDEWAYS_BIAS60_ABS;
   
   if (ret20InRange && rangeInLimit && biasSidewaysOk) {
-    console.log(`[趋势阶段判定] 命中横盘震荡阶段 - 20日振幅=${(range20 * 100).toFixed(1)}%, 20日收益=${ret20 !== null ? (ret20 * 100).toFixed(1) : 'null'}%, bias60=${(bias60 * 100).toFixed(1)}%`);
+    debugTrendLog(`[趋势阶段判定] 命中横盘震荡阶段 - 20日振幅=${(range20 * 100).toFixed(1)}%, 20日收益=${ret20 !== null ? (ret20 * 100).toFixed(1) : 'null'}%, bias60=${(bias60 * 100).toFixed(1)}%`);
     return { 
       code: 'SIDEWAYS', 
       reason: `横盘震荡：20日收益和振幅都处于收敛区间，价格没有明显单边方向。`,
@@ -604,7 +627,7 @@ function calculateTrendPhase(prices: DailyPrice[], index: number, assetType: str
                      !hitSlowGrindUp && !hitHighBase && !hitSideways && !hitRecovery;
   
   if (trendTransA) {
-    console.log(`[趋势阶段判定] 命中趋势转换中阶段(上涨动能衰减) - close>=MA60=${close >= ma60}, bias60=${(bias60 * 100).toFixed(1)}%(0~10%), ret20=${(ret20! * 100).toFixed(1)}%(-2%~5%)`);
+    debugTrendLog(`[趋势阶段判定] 命中趋势转换中阶段(上涨动能衰减) - close>=MA60=${close >= ma60}, bias60=${(bias60 * 100).toFixed(1)}%(0~10%), ret20=${(ret20! * 100).toFixed(1)}%(-2%~5%)`);
     return { 
       code: 'TREND_TRANSITION', 
       reason: `趋势转换中（上涨动能衰减）：价格仍在MA60上方，但20日收益未达到慢涨标准，处于趋势转换观察期。`,
@@ -620,7 +643,7 @@ function calculateTrendPhase(prices: DailyPrice[], index: number, assetType: str
                      !hitSlowGrindUp;
   
   if (trendTransB) {
-    console.log(`[趋势阶段判定] 命中趋势转换中阶段(高位滞涨) - close>=MA60=${close >= ma60}, bias60=${(bias60 * 100).toFixed(1)}%(5%~10%), ret20=${(ret20! * 100).toFixed(1)}%(0~5%), cross60_10=${cross60_10} ≤ 1`);
+    debugTrendLog(`[趋势阶段判定] 命中趋势转换中阶段(高位滞涨) - close>=MA60=${close >= ma60}, bias60=${(bias60 * 100).toFixed(1)}%(5%~10%), ret20=${(ret20! * 100).toFixed(1)}%(0~5%), cross60_10=${cross60_10} ≤ 1`);
     return { 
       code: 'TREND_TRANSITION', 
       reason: `趋势转换中（高位滞涨）：价格明显高于MA60，但20日收益不足5%，上涨动能不足。`,
@@ -635,7 +658,7 @@ function calculateTrendPhase(prices: DailyPrice[], index: number, assetType: str
                      !hitRecovery && !hitSideways && !hitSlowBleed && !hitSlowGrindUp;
   
   if (trendTransC) {
-    console.log(`[趋势阶段判定] 命中趋势转换中阶段(MA60附近方向未定) - abs(bias60)=${Math.abs(bias60 * 100).toFixed(1)}% ≤ 2%, ret20=${(ret20! * 100).toFixed(1)}%(-3%~3%), cross60_10=${cross60_10} < 2`);
+    debugTrendLog(`[趋势阶段判定] 命中趋势转换中阶段(MA60附近方向未定) - abs(bias60)=${Math.abs(bias60 * 100).toFixed(1)}% ≤ 2%, ret20=${(ret20! * 100).toFixed(1)}%(-3%~3%), cross60_10=${cross60_10} < 2`);
     return { 
       code: 'TREND_TRANSITION', 
       reason: `趋势转换中（方向未定型）：价格贴近MA60，但尚未形成修复、横盘、阴跌或重新上涨。`,
@@ -651,7 +674,7 @@ function calculateTrendPhase(prices: DailyPrice[], index: number, assetType: str
                      !hitSlowGrindUp;
   
   if (trendTransD) {
-    console.log(`[趋势阶段判定] 命中趋势转换中阶段(上行确认前) - close>=MA60=${close >= ma60}, bias60=${(bias60 * 100).toFixed(1)}%(0~${(th.HIGH_BASE_BIAS60 * 100).toFixed(1)}%), ret20=${(ret20! * 100).toFixed(1)}% ≥ ${(th.SLOW_UP_20D * 100).toFixed(1)}%, cross60_10=${cross60_10} ≤ 1`);
+    debugTrendLog(`[趋势阶段判定] 命中趋势转换中阶段(上行确认前) - close>=MA60=${close >= ma60}, bias60=${(bias60 * 100).toFixed(1)}%(0~${(th.HIGH_BASE_BIAS60 * 100).toFixed(1)}%), ret20=${(ret20! * 100).toFixed(1)}% ≥ ${(th.SLOW_UP_20D * 100).toFixed(1)}%, cross60_10=${cross60_10} ≤ 1`);
     return { 
       code: 'TREND_TRANSITION', 
       reason: `趋势转换中（上行确认前）：价格站上MA60，20日收益已明显转强，但尚未满足慢涨完整确认条件。`,
@@ -666,7 +689,7 @@ function calculateTrendPhase(prices: DailyPrice[], index: number, assetType: str
                      !hitSlowBleed;
   
   if (trendTransE) {
-    console.log(`[趋势阶段判定] 命中趋势转换中阶段(弱势转换中) - close<MA60=${close < ma60}, bias60=${(bias60 * 100).toFixed(1)}%(-6%~0), ret20=${(ret20! * 100).toFixed(1)}%(-6%~-3%)`);
+    debugTrendLog(`[趋势阶段判定] 命中趋势转换中阶段(弱势转换中) - close<MA60=${close < ma60}, bias60=${(bias60 * 100).toFixed(1)}%(-6%~0), ret20=${(ret20! * 100).toFixed(1)}%(-6%~-3%)`);
     return { 
       code: 'TREND_TRANSITION', 
       reason: `趋势转换中（弱势转换中）：价格位于MA60下方，20日收益为负，但尚未满足阴跌或暴跌条件。`,
@@ -681,7 +704,7 @@ function calculateTrendPhase(prices: DailyPrice[], index: number, assetType: str
                      !hitSlowBleed && !hitSideways && !hitRecovery;
   
   if (trendTransF) {
-    console.log(`[趋势阶段判定] 命中趋势转换中阶段(MA60附近偏弱震荡) - abs(bias60)=${Math.abs(bias60 * 100).toFixed(1)}% ≤ 3%, ret20=${(ret20! * 100).toFixed(1)}%(-5.5%~-3%), cross60_10=${cross60_10} ≤ 1`);
+    debugTrendLog(`[趋势阶段判定] 命中趋势转换中阶段(MA60附近偏弱震荡) - abs(bias60)=${Math.abs(bias60 * 100).toFixed(1)}% ≤ 3%, ret20=${(ret20! * 100).toFixed(1)}%(-5.5%~-3%), cross60_10=${cross60_10} ≤ 1`);
     return { 
       code: 'TREND_TRANSITION', 
       reason: `趋势转换中（偏弱震荡）：价格处于MA60附近，20日收益偏弱但尚未确认阴跌。`,
@@ -695,7 +718,7 @@ function calculateTrendPhase(prices: DailyPrice[], index: number, assetType: str
                      ret20 !== null && ret20 >= th.SLOW_UP_20D && ret20 < th.SURGE_5D;
   
   if (trendTransG) {
-    console.log(`[趋势阶段判定] 命中趋势转换中阶段(上穿前修复) - close<MA60=${close < ma60}, bias60=${(bias60 * 100).toFixed(1)}%(-2%~0), ret20=${(ret20! * 100).toFixed(1)}%(5%~10%)`);
+    debugTrendLog(`[趋势阶段判定] 命中趋势转换中阶段(上穿前修复) - close<MA60=${close < ma60}, bias60=${(bias60 * 100).toFixed(1)}%(-2%~0), ret20=${(ret20! * 100).toFixed(1)}%(5%~10%)`);
     return { 
       code: 'TREND_TRANSITION', 
       reason: `趋势转换中（上穿前修复）：价格仍略低于MA60，但20日收益已明显转强。`,
@@ -712,7 +735,7 @@ function calculateTrendPhase(prices: DailyPrice[], index: number, assetType: str
                      !hitSlowBleed && !hitSideways && !hitRecovery;
 
   if (trendTransH) {
-    console.log(`[趋势阶段判定] 命中趋势转换中阶段(弱势整理中) - close<MA60=${close < ma60}, bias60=${(bias60 * 100).toFixed(1)}%, ret20=${(ret20! * 100).toFixed(1)}%, range20=${(range20 * 100).toFixed(1)}%`);
+    debugTrendLog(`[趋势阶段判定] 命中趋势转换中阶段(弱势整理中) - close<MA60=${close < ma60}, bias60=${(bias60 * 100).toFixed(1)}%, ret20=${(ret20! * 100).toFixed(1)}%, range20=${(range20 * 100).toFixed(1)}%`);
     return {
       code: 'TREND_TRANSITION',
       reason: `趋势转换中（弱势整理中）：价格位于MA60下方，20日收益和振幅尚未触发暴跌或阴跌，等待重新修复确认。`,
@@ -727,7 +750,7 @@ function calculateTrendPhase(prices: DailyPrice[], index: number, assetType: str
                           !hitSideways && !hitRecovery;
   
   if (consolConditionA) {
-    console.log(`[趋势阶段判定] 命中震荡待确认阶段(普通震荡) - abs(bias60)=${Math.abs(bias60 * 100).toFixed(1)}% ≤ 4%, ret20=${(ret20! * 100).toFixed(1)}%(-4%~4%), range20=${(range20 * 100).toFixed(1)}% ≤ 8%`);
+    debugTrendLog(`[趋势阶段判定] 命中震荡待确认阶段(普通震荡) - abs(bias60)=${Math.abs(bias60 * 100).toFixed(1)}% ≤ 4%, ret20=${(ret20! * 100).toFixed(1)}%(-4%~4%), range20=${(range20 * 100).toFixed(1)}% ≤ 8%`);
     return { 
       code: 'CONSOLIDATION', 
       reason: `震荡待确认：价格处于MA60附近，20日收益和振幅均不极端，但尚未满足横盘震荡或修复条件。`,
@@ -743,7 +766,7 @@ function calculateTrendPhase(prices: DailyPrice[], index: number, assetType: str
                           !hitSideways && !hitRecovery;
   
   if (consolConditionB) {
-    console.log(`[趋势阶段判定] 命中震荡待确认阶段(浅度横盘) - abs(bias60)=${Math.abs(bias60 * 100).toFixed(1)}% ≤ 4%, ret20=${(ret20! * 100).toFixed(1)}%(-3%~3%), range20=${(range20 * 100).toFixed(1)}% ≤ 10%, cross60_10=${cross60_10} ≤ 1`);
+    debugTrendLog(`[趋势阶段判定] 命中震荡待确认阶段(浅度横盘) - abs(bias60)=${Math.abs(bias60 * 100).toFixed(1)}% ≤ 4%, ret20=${(ret20! * 100).toFixed(1)}%(-3%~3%), range20=${(range20 * 100).toFixed(1)}% ≤ 10%, cross60_10=${cross60_10} ≤ 1`);
     return { 
       code: 'CONSOLIDATION', 
       reason: `震荡待确认（浅度横盘）：价格波动不大但未满足严格横盘条件。`,
@@ -752,7 +775,7 @@ function calculateTrendPhase(prices: DailyPrice[], index: number, assetType: str
     };
   }
   
-  console.log(`[趋势阶段判定] 未命中任何阶段，返回UNKNOWN - 未满足的条件: ${unmetConditions.join('; ')}`);
+  debugTrendLog(`[趋势阶段判定] 未命中任何阶段，返回UNKNOWN - 未满足的条件: ${unmetConditions.join('; ')}`);
   return { 
     code: 'UNKNOWN', 
     reason: '状态未确认：当前数据未能命中任何趋势阶段判定条件。',
@@ -770,6 +793,18 @@ router.post('/recalc', async (req: Request, res: Response) => {
       return res.status(400).json({
         success: false,
         message: 'symbol, asset_type, source are required'
+      });
+    }
+
+    const marketGate = await getFreshMarketRegime(db, { source });
+    if (!isTrendMarketGateOpen(marketGate)) {
+      return res.status(423).json({
+        success: false,
+        message: `市场总闸未通过，禁止重算走势阶段；本轮不修改走势阶段结果：${getTrendMarketGateBlockReason(marketGate)}`,
+        data: {
+          market_gate: marketGate,
+          downstream_blocked: true
+        }
       });
     }
 
@@ -921,7 +956,9 @@ router.get('/queue', async (req: Request, res: Response) => {
   try {
     const db = await getDb();
     const source = String(req.query.source || 'tushare');
-    const limit = Math.max(Math.min(parseInt(req.query.limit as string) || 80, 300), 1);
+    const page = Math.max(parseInt(req.query.page as string) || 1, 1);
+    const pageSize = Math.max(Math.min(parseInt(req.query.page_size as string) || parseInt(req.query.limit as string) || 10, 100), 1);
+    const offset = (page - 1) * pageSize;
     const assetType = String(req.query.asset_type || '').trim();
 
     const whereParts = [
@@ -1015,8 +1052,8 @@ router.get('/queue', async (req: Request, res: Response) => {
          c.priority_score DESC,
          COALESCE(c.updated_at, c.last_checked_at) DESC,
          c.id DESC
-       LIMIT ?`,
-      [TREND_PHASE_VERSION, ...whereParams, limit]
+       LIMIT ? OFFSET ?`,
+      [TREND_PHASE_VERSION, ...whereParams, pageSize, offset]
     );
 
     const items = rows.map((row: any) => {
@@ -1049,6 +1086,12 @@ router.get('/queue', async (req: Request, res: Response) => {
           blocked_count: Number(countRow?.blocked_count || 0),
           unknown_count: Number(countRow?.unknown_count || 0),
           reject_count: Number(countRow?.reject_count || 0)
+        },
+        pagination: {
+          page,
+          page_size: pageSize,
+          total: Number(countRow?.total || 0),
+          total_pages: Math.max(1, Math.ceil(Number(countRow?.total || 0) / pageSize))
         }
       }
     });

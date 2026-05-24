@@ -5,13 +5,15 @@ import sys
 
 from fetch_asset_universe import classify_etf_universe_types
 
+DEFAULT_DB_PATH = "/Volumes/7100/price-dashboard-data/db/price_dashboard_dev.db"
+
 
 def main():
     db_path = (
         sys.argv[1]
         if len(sys.argv) > 1
         else os.environ.get("DB_PATH")
-        or os.path.join(os.getcwd(), "db", "price_dashboard_dev.db")
+        or DEFAULT_DB_PATH
     )
 
     conn = sqlite3.connect(db_path)

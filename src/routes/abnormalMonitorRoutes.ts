@@ -3,6 +3,19 @@ import getDb from '../config/database';
 
 const router = express.Router();
 
+const isDebugEnabled = (value?: string) => (
+  ['1', 'true', 'yes', 'on'].includes(String(value || '').toLowerCase())
+);
+
+const debugAbnormalMonitorLog = (message: string, payload?: unknown) => {
+  if (!isDebugEnabled(process.env.DEBUG_ABNORMAL_MONITOR)) return;
+  if (payload === undefined) {
+    console.log(message);
+    return;
+  }
+  console.log(message, payload);
+};
+
 // 规则类型优先级
 const rulePriority: Record<string, number> = {
   historical_new_high: 95,
@@ -50,23 +63,29 @@ const ruleDirectionMap: Record<string, Record<string, string>> = {
 const getPriceRecords = async (db: any, categoryId?: string) => {
   let query = `
     SELECT 
-      category as category_name, 
-      object_name, 
-      COALESCE(variant, '') as variant_name, 
-      price as current_price, 
-      date as effective_date
-    FROM price_records
+      pr.category as category_name, 
+      pr.object_name, 
+      COALESCE(pr.variant, '') as variant_name, 
+      pr.price as current_price, 
+      pr.date as effective_date
+    FROM price_records pr
+    LEFT JOIN categories c ON c.name = pr.category
+    LEFT JOIN objects o ON o.category_id = c.id AND o.name = pr.object_name
+    LEFT JOIN variants v ON v.object_id = o.id AND v.name = COALESCE(pr.variant, '') AND COALESCE(pr.variant, '') <> ''
     WHERE 1=1
+      AND COALESCE(c.is_archived, 0) = 0
+      AND COALESCE(o.is_archived, 0) = 0
+      AND (COALESCE(pr.variant, '') = '' OR COALESCE(v.is_archived, 0) = 0)
   `;
   const params: any[] = [];
 
   if (categoryId) {
     // 这里需要根据实际情况调整，可能需要 join 分类表
-    query += ' AND category_id = ?';
+    query += ' AND c.id = ?';
     params.push(categoryId);
   }
 
-  query += ' ORDER BY category, object_name, variant, date DESC, created_at DESC, id DESC';
+  query += ' ORDER BY pr.category, pr.object_name, pr.variant, pr.date DESC, pr.created_at DESC, pr.id DESC';
 
   const records = await db.all(query, params);
   
@@ -496,16 +515,14 @@ const aggregateResults = async (db: any, groupedRecords: Record<string, any[]>) 
     // 获取启用的规则（按优先级：对象规则 > 品类规则 > 全局规则）
     const ruleMap = await getEnabledRules(db, categoryId, objectId);
 
-    // 调试日志
-    console.log('Target:', target);
-    console.log('Category ID:', categoryId);
-    console.log('Object ID:', objectId);
-    console.log('Rule Map:', ruleMap);
+    debugAbnormalMonitorLog('Target:', target);
+    debugAbnormalMonitorLog('Category ID:', categoryId);
+    debugAbnormalMonitorLog('Object ID:', objectId);
+    debugAbnormalMonitorLog('Rule Map:', ruleMap);
 
     const hits = executeRules(target, prices, ruleMap);
     
-    // 调试日志
-    console.log('Hits:', hits);
+    debugAbnormalMonitorLog('Hits:', hits);
     if (hits.length === 0) continue;
 
     // 按优先级排序，选择主规则

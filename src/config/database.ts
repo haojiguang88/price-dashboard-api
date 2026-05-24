@@ -1,8 +1,11 @@
 import sqlite3 from "sqlite3";
 import { open, Database } from "sqlite";
-import path from "path";
 
-const dbPath = process.env.DB_PATH || path.join(process.cwd(), "db", "price_dashboard_dev.db");
+const DEFAULT_DATABASE_PATH = "/Volumes/7100/price-dashboard-data/db/price_dashboard_dev.db";
+
+export const getDatabasePath = () => process.env.DB_PATH || DEFAULT_DATABASE_PATH;
+
+const dbPath = getDatabasePath();
 
 console.log(`Database path: ${dbPath}`);
 
@@ -24,9 +27,18 @@ const initDatabase = async (db: Database) => {
   await db.exec("CREATE TABLE IF NOT EXISTS variants (id INTEGER PRIMARY KEY AUTOINCREMENT, object_id INTEGER NOT NULL, name TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (object_id) REFERENCES objects(id) ON DELETE CASCADE, UNIQUE(object_id, name))");
   await db.exec("CREATE TABLE IF NOT EXISTS buying_plans (id INTEGER PRIMARY KEY AUTOINCREMENT, plan_name TEXT NOT NULL, category_name TEXT NOT NULL, object_name TEXT NOT NULL, variant_name TEXT, target_price REAL NOT NULL, plan_quantity INTEGER NOT NULL, total_amount REAL NOT NULL, note TEXT, track TEXT, type TEXT DEFAULT 'manual', market_type_preset TEXT DEFAULT 'standard', status TEXT NOT NULL DEFAULT 'pending', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)");
   await db.exec("CREATE TABLE IF NOT EXISTS selling_plans (id INTEGER PRIMARY KEY AUTOINCREMENT, plan_name TEXT NOT NULL, category_name TEXT NOT NULL, object_name TEXT NOT NULL, variant_name TEXT, target_price REAL NOT NULL, plan_quantity INTEGER NOT NULL, total_amount REAL NOT NULL, note TEXT, track TEXT, type TEXT DEFAULT 'manual', market_type_preset TEXT DEFAULT 'standard', status TEXT NOT NULL DEFAULT 'pending', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)");
+  await ensureColumn("categories", "is_archived", "INTEGER NOT NULL DEFAULT 0");
+  await ensureColumn("categories", "archived_at", "TEXT");
+  await ensureColumn("objects", "is_archived", "INTEGER NOT NULL DEFAULT 0");
+  await ensureColumn("objects", "archived_at", "TEXT");
+  await ensureColumn("variants", "is_archived", "INTEGER NOT NULL DEFAULT 0");
+  await ensureColumn("variants", "archived_at", "TEXT");
   await ensureColumn("variants", "note", "TEXT");
   await ensureColumn("buying_plans", "batches", "TEXT");
   await ensureColumn("selling_plans", "batches", "TEXT");
+  await db.exec("CREATE INDEX IF NOT EXISTS idx_categories_archive ON categories(is_archived, name)");
+  await db.exec("CREATE INDEX IF NOT EXISTS idx_objects_archive ON objects(is_archived, category_id, name)");
+  await db.exec("CREATE INDEX IF NOT EXISTS idx_variants_archive ON variants(is_archived, object_id, name)");
 
   await db.exec("CREATE TABLE IF NOT EXISTS positions (id INTEGER PRIMARY KEY AUTOINCREMENT, category_name TEXT NOT NULL, object_name TEXT NOT NULL, variant_name TEXT, total_quantity INTEGER NOT NULL, total_cost REAL NOT NULL, avg_price REAL NOT NULL, current_price REAL, total_profit REAL, profit_rate REAL, track TEXT, type TEXT DEFAULT 'manual', market_type_preset TEXT DEFAULT 'standard', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)");
   await db.exec("CREATE TABLE IF NOT EXISTS follows (id INTEGER PRIMARY KEY AUTOINCREMENT, category_id INTEGER NOT NULL, object_id INTEGER NOT NULL, variant_id INTEGER NOT NULL DEFAULT 0 CHECK (TRIM(CAST(variant_id AS TEXT)) != '' AND TRIM(CAST(variant_id AS TEXT)) NOT GLOB '*[^0-9]*'), category_name TEXT NOT NULL, object_name TEXT NOT NULL, variant_name TEXT NOT NULL, track TEXT, type TEXT DEFAULT 'manual', market_type_preset TEXT DEFAULT 'standard', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(category_id, object_id, variant_id), FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE CASCADE, FOREIGN KEY (object_id) REFERENCES objects(id) ON DELETE CASCADE)");
@@ -51,6 +63,19 @@ const initDatabase = async (db: Database) => {
   await db.exec("CREATE TABLE IF NOT EXISTS risk_check_records (id INTEGER PRIMARY KEY AUTOINCREMENT, review_type TEXT NOT NULL DEFAULT 'general_filter', category_name TEXT, object_name TEXT, variant_name TEXT, category_risk_type TEXT, rule_version TEXT DEFAULT 'v1', system_result TEXT NOT NULL, result_reason TEXT, summary TEXT, extra_result_json TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP)");
   await db.exec("CREATE TABLE IF NOT EXISTS risk_check_record_items (id INTEGER PRIMARY KEY AUTOINCREMENT, record_id INTEGER NOT NULL, item_key TEXT, item_label TEXT NOT NULL, group_name TEXT, item_value TEXT, trigger_type TEXT DEFAULT 'none', trigger_reason TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (record_id) REFERENCES risk_check_records(id) ON DELETE CASCADE)");
 
+  await db.exec("CREATE TABLE IF NOT EXISTS speculation_cycle_records (id INTEGER PRIMARY KEY AUTOINCREMENT, category_name TEXT NOT NULL, object_name TEXT NOT NULL, variant_name TEXT DEFAULT '', launch_date TEXT, official_price REAL, open_price REAL, high_price REAL, low_price REAL, current_price REAL, open_level TEXT DEFAULT '中开', release_quantity TEXT DEFAULT '未知', total_quantity TEXT DEFAULT '未知', first_release_quantity TEXT DEFAULT '未知', first_release_status TEXT DEFAULT '未知', official_first_release TEXT DEFAULT '未知', market_background TEXT DEFAULT '未知', cycle_stage TEXT, cycle_pattern TEXT, rise_nature TEXT, main_participants TEXT, expected_arrival_date TEXT, actual_arrival_date TEXT, arrival_scale TEXT, supply_release_type TEXT, high_level_real_demand TEXT, final_result TEXT, future_action_rule TEXT, summary TEXT, lesson TEXT, note TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP)");
+  await ensureColumn("speculation_cycle_records", "open_level", "TEXT DEFAULT '中开'");
+  await ensureColumn("speculation_cycle_records", "release_quantity", "TEXT DEFAULT '未知'");
+  await ensureColumn("speculation_cycle_records", "total_quantity", "TEXT DEFAULT '未知'");
+  await ensureColumn("speculation_cycle_records", "first_release_quantity", "TEXT DEFAULT '未知'");
+  await ensureColumn("speculation_cycle_records", "first_release_status", "TEXT DEFAULT '未知'");
+  await ensureColumn("speculation_cycle_records", "official_first_release", "TEXT DEFAULT '未知'");
+  await ensureColumn("speculation_cycle_records", "market_background", "TEXT DEFAULT '未知'");
+  await db.exec("CREATE TABLE IF NOT EXISTS speculation_cycle_events (id INTEGER PRIMARY KEY AUTOINCREMENT, cycle_id INTEGER NOT NULL, record_time TEXT NOT NULL, price REAL, bid_price_band TEXT, price_type TEXT, stage TEXT, market_action TEXT, sentiment_level TEXT, participation_level TEXT, buyer_strength TEXT, seller_pressure TEXT, discussion_heat TEXT, wall_pressure TEXT, sweep_strength TEXT, trigger_event TEXT, risk_signal TEXT, source TEXT, note TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (cycle_id) REFERENCES speculation_cycle_records(id) ON DELETE CASCADE)");
+  await ensureColumn("speculation_cycle_events", "bid_price_band", "TEXT");
+  await db.exec("CREATE INDEX IF NOT EXISTS idx_speculation_cycle_records_pattern ON speculation_cycle_records(cycle_pattern, cycle_stage, category_name)");
+  await db.exec("CREATE INDEX IF NOT EXISTS idx_speculation_cycle_events_cycle_time ON speculation_cycle_events(cycle_id, record_time)");
+
   await db.exec("CREATE TABLE IF NOT EXISTS analysis_annotations (id INTEGER PRIMARY KEY AUTOINCREMENT, module TEXT NOT NULL, entity_type TEXT NOT NULL, entity_key TEXT NOT NULL, annotation_key TEXT NOT NULL, annotation_value TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(module, entity_type, entity_key, annotation_key))");
   await db.exec("CREATE INDEX IF NOT EXISTS idx_analysis_annotations_scope ON analysis_annotations(module, entity_type, annotation_key)");
   await db.exec("CREATE TABLE IF NOT EXISTS audit_logs (id TEXT PRIMARY KEY, timestamp TEXT NOT NULL, module TEXT NOT NULL, action TEXT NOT NULL, target TEXT NOT NULL, status TEXT NOT NULL, detail TEXT, entity_id TEXT, path TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)");
@@ -65,18 +90,33 @@ const initDatabase = async (db: Database) => {
 
 // 首次初始化
 let initialized = false;
+let dbPromise: Promise<Database> | null = null;
+
 const getDb = async () => {
-  const db = await open({ filename: dbPath, driver: sqlite3.Database, mode: sqlite3.OPEN_READWRITE | sqlite3.OPEN_CREATE });
-  await db.exec("PRAGMA busy_timeout = 60000;");
-  
-  if (!initialized) {
-    await initDatabase(db);
-    initialized = true;
-  } else {
-    await db.exec("PRAGMA foreign_keys = ON;");
+  if (dbPromise) {
+    return dbPromise;
   }
+
+  dbPromise = (async () => {
+    const db = await open({ filename: dbPath, driver: sqlite3.Database, mode: sqlite3.OPEN_READWRITE | sqlite3.OPEN_CREATE });
+    await db.exec("PRAGMA busy_timeout = 60000;");
+    await db.exec("PRAGMA journal_mode = WAL;");
+    await db.exec("PRAGMA synchronous = NORMAL;");
   
-  return db;
+    if (!initialized) {
+      await initDatabase(db);
+      initialized = true;
+    } else {
+      await db.exec("PRAGMA foreign_keys = ON;");
+    }
+  
+    return db;
+  })().catch((error) => {
+    dbPromise = null;
+    throw error;
+  });
+
+  return dbPromise;
 };
 
 export default getDb;

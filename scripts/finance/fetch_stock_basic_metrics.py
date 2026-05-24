@@ -62,7 +62,7 @@ def get_default_trade_date(conn: sqlite3.Connection) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Fetch latest A-share daily_basic market-cap snapshots into local DB.")
-    parser.add_argument("--db", default=os.environ.get("DB_PATH", "db/price_dashboard_dev.db"))
+    parser.add_argument("--db", default=os.environ.get("DB_PATH", "/Volumes/7100/price-dashboard-data/db/price_dashboard_dev.db"))
     parser.add_argument("--trade-date", default=None, help="YYYYMMDD or YYYY-MM-DD. Defaults to latest local stock trade_date.")
     parser.add_argument("--source", default="tushare")
     args = parser.parse_args()

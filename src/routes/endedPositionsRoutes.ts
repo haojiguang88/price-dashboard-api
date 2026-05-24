@@ -264,9 +264,22 @@ router.get('/ended-positions/insights', async (req, res) => {
         LEFT JOIN categories c ON c.name = ep.category_name
         LEFT JOIN objects o ON o.category_id = c.id AND o.name = ep.object_name
         LEFT JOIN variants v ON v.object_id = o.id AND v.name = COALESCE(ep.variant_name, '') AND COALESCE(ep.variant_name, '') <> ''
+        WHERE COALESCE(c.is_archived, 0) = 0
+          AND COALESCE(o.is_archived, 0) = 0
+          AND (COALESCE(ep.variant_name, '') = '' OR COALESCE(v.is_archived, 0) = 0)
         ORDER BY ep.sell_date DESC, ep.created_at DESC
       `),
-      db.all('SELECT * FROM sell_records ORDER BY sell_date ASC, created_at ASC, id ASC')
+      db.all(`
+        SELECT sr.*
+        FROM sell_records sr
+        LEFT JOIN categories c ON c.name = sr.category_name
+        LEFT JOIN objects o ON o.category_id = c.id AND o.name = sr.object_name
+        LEFT JOIN variants v ON v.object_id = o.id AND v.name = COALESCE(sr.variant_name, '') AND COALESCE(sr.variant_name, '') <> ''
+        WHERE COALESCE(c.is_archived, 0) = 0
+          AND COALESCE(o.is_archived, 0) = 0
+          AND (COALESCE(sr.variant_name, '') = '' OR COALESCE(v.is_archived, 0) = 0)
+        ORDER BY sr.sell_date ASC, sr.created_at ASC, sr.id ASC
+      `)
     ]);
 
     const normalizedPositions: EndedInsightRow[] = positions.map((row: any) => ({

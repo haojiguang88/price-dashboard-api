@@ -1,3 +1,5 @@
+import { getLatestCoveredTradeDate } from '../utils/financeTradeDate';
+
 export interface DailyPrice {
   trade_date: string;
   open: number;
@@ -35,6 +37,8 @@ export interface BenchmarkReturns {
 export interface IndustryEtfStrengthContext {
   scope: 'focus' | 'all';
   benchmarkSymbol: string;
+  asOfTradeDate: string | null;
+  benchmarkTradeDate: string | null;
   benchmarkReturns: BenchmarkReturns;
   benchmarkDataCount: number;
   candidateMap: Map<string, IndustryEtfCandidate>;
@@ -42,6 +46,7 @@ export interface IndustryEtfStrengthContext {
 
 export interface IndustryEtfStrengthItem extends IndustryEtfCandidate {
   trade_date: string | null;
+  updated_at?: string | null;
   close: number | null;
   data_count: number;
   return_5d?: number | null;
@@ -115,6 +120,17 @@ export function roundMetric(value: number | null | undefined, digits = 4) {
   return Math.round(value * factor) / factor;
 }
 
+function normalizeTradeDate(value?: string | null) {
+  const text = String(value || '').trim();
+  return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : null;
+}
+
+function filterPricesAsOf(prices: DailyPrice[], asOfTradeDate?: string | null) {
+  const normalizedDate = normalizeTradeDate(asOfTradeDate);
+  if (!normalizedDate) return prices;
+  return prices.filter(item => String(item.trade_date || '') <= normalizedDate);
+}
+
 export function getReturn(prices: DailyPrice[], days: number) {
   if (prices.length <= days) return null;
   const latest = prices[prices.length - 1];
@@ -150,13 +166,21 @@ function getMaxDrawdownToLatest(prices: DailyPrice[], days: number) {
   return latest.close / peak - 1;
 }
 
-export async function getDailyPricesAnySource(db: any, symbol: string, preferredSource = 'tushare'): Promise<DailyPrice[]> {
+export async function getDailyPricesAnySource(
+  db: any,
+  symbol: string,
+  preferredSource = 'tushare',
+  asOfTradeDate?: string | null
+): Promise<DailyPrice[]> {
+  const normalizedDate = normalizeTradeDate(asOfTradeDate);
+  const dateClause = normalizedDate ? ' AND trade_date <= ?' : '';
   const preferred = await db.all(
     `SELECT trade_date, open, high, low, close, volume, amount, updated_at
      FROM financial_daily_prices
      WHERE symbol = ? AND source = ?
+       ${dateClause}
      ORDER BY trade_date ASC`,
-    [symbol, preferredSource]
+    normalizedDate ? [symbol, preferredSource, normalizedDate] : [symbol, preferredSource]
   );
   if (preferred.length > 0) return preferred;
 
@@ -164,8 +188,9 @@ export async function getDailyPricesAnySource(db: any, symbol: string, preferred
     `SELECT trade_date, open, high, low, close, volume, amount, updated_at
      FROM financial_daily_prices
      WHERE symbol = ?
+       ${dateClause}
      ORDER BY trade_date ASC`,
-    [symbol]
+    normalizedDate ? [symbol, normalizedDate] : [symbol]
   );
 }
 
@@ -212,11 +237,22 @@ export async function getIndustryEtfCandidates(db: any, scope: 'focus' | 'all') 
 
 export async function buildIndustryEtfStrengthContext(
   db: any,
-  options: { scope?: 'focus' | 'all'; benchmarkSymbol?: string } = {}
+  options: { scope?: 'focus' | 'all'; benchmarkSymbol?: string; asOfTradeDate?: string | null } = {}
 ): Promise<IndustryEtfStrengthContext> {
   const scope = options.scope || 'focus';
   const benchmarkSymbol = options.benchmarkSymbol || '000300';
-  const benchmarkPrices = await getDailyPricesAnySource(db, benchmarkSymbol, getPreferredMarketSource(benchmarkSymbol));
+  const asOfTradeDate = normalizeTradeDate(options.asOfTradeDate)
+    || await getLatestCoveredTradeDate(db, {
+      source: 'tushare',
+      assetTypes: ['etf', 'index'],
+      minCoverageRatio: 0.88
+    });
+  const benchmarkPrices = await getDailyPricesAnySource(
+    db,
+    benchmarkSymbol,
+    getPreferredMarketSource(benchmarkSymbol),
+    asOfTradeDate
+  );
   const benchmarkReturns = {
     ret5: getReturn(benchmarkPrices, 5),
     ret10: getReturn(benchmarkPrices, 10),
@@ -228,6 +264,8 @@ export async function buildIndustryEtfStrengthContext(
   return {
     scope,
     benchmarkSymbol,
+    asOfTradeDate,
+    benchmarkTradeDate: benchmarkPrices.length > 0 ? benchmarkPrices[benchmarkPrices.length - 1].trade_date : null,
     benchmarkReturns,
     benchmarkDataCount: benchmarkPrices.length,
     candidateMap: new Map(candidates.map(candidate => [candidate.symbol, candidate]))
@@ -237,14 +275,17 @@ export async function buildIndustryEtfStrengthContext(
 export function calculateIndustryEtfStrength(
   item: IndustryEtfCandidate,
   prices: DailyPrice[],
-  benchmarkReturns: BenchmarkReturns
+  benchmarkReturns: BenchmarkReturns,
+  options: { asOfTradeDate?: string | null } = {}
 ): IndustryEtfStrengthItem {
-  if (prices.length < 120) {
+  const scopedPrices = filterPricesAsOf(prices, options.asOfTradeDate);
+  if (scopedPrices.length < 120) {
     return {
       ...item,
-      trade_date: prices.length > 0 ? prices[prices.length - 1].trade_date : null,
-      close: prices.length > 0 ? prices[prices.length - 1].close : null,
-      data_count: prices.length,
+      trade_date: scopedPrices.length > 0 ? scopedPrices[scopedPrices.length - 1].trade_date : null,
+      updated_at: scopedPrices.length > 0 ? scopedPrices[scopedPrices.length - 1].updated_at || null : null,
+      close: scopedPrices.length > 0 ? scopedPrices[scopedPrices.length - 1].close : null,
+      data_count: scopedPrices.length,
       ma20_slope: 'unknown',
       ma60_slope: 'unknown',
       strength_score: 0,
@@ -255,27 +296,27 @@ export function calculateIndustryEtfStrength(
     };
   }
 
-  const latest = prices[prices.length - 1];
-  const ret5 = getReturn(prices, 5);
-  const ret10 = getReturn(prices, 10);
-  const ret20 = getReturn(prices, 20);
-  const ret60 = getReturn(prices, 60);
+  const latest = scopedPrices[scopedPrices.length - 1];
+  const ret5 = getReturn(scopedPrices, 5);
+  const ret10 = getReturn(scopedPrices, 10);
+  const ret20 = getReturn(scopedPrices, 20);
+  const ret60 = getReturn(scopedPrices, 60);
   const rel5 = ret5 !== null && benchmarkReturns.ret5 !== null ? ret5 - benchmarkReturns.ret5 : null;
   const rel10 = ret10 !== null && benchmarkReturns.ret10 !== null ? ret10 - benchmarkReturns.ret10 : null;
   const rel20 = ret20 !== null && benchmarkReturns.ret20 !== null ? ret20 - benchmarkReturns.ret20 : null;
   const rel60 = ret60 !== null && benchmarkReturns.ret60 !== null ? ret60 - benchmarkReturns.ret60 : null;
-  const ma20 = getMovingAverage(prices, 20);
-  const ma60 = getMovingAverage(prices, 60);
-  const ma20Prev = getMovingAverage(prices, 20, 1);
-  const ma60Prev = getMovingAverage(prices, 60, 1);
+  const ma20 = getMovingAverage(scopedPrices, 20);
+  const ma60 = getMovingAverage(scopedPrices, 60);
+  const ma20Prev = getMovingAverage(scopedPrices, 20, 1);
+  const ma60Prev = getMovingAverage(scopedPrices, 60, 1);
   const ma20Slope = ma20 !== null && ma20Prev !== null ? (ma20 > ma20Prev ? 'up' : ma20 < ma20Prev ? 'down' : 'flat') : 'unknown';
   const ma60Slope = ma60 !== null && ma60Prev !== null ? (ma60 > ma60Prev ? 'up' : ma60 < ma60Prev ? 'down' : 'flat') : 'unknown';
   const distanceToMa20 = ma20 ? latest.close / ma20 - 1 : null;
   const distanceToMa60 = ma60 ? latest.close / ma60 - 1 : null;
-  const drawdown20 = getMaxDrawdownToLatest(prices, 20);
-  const drawdown60 = getMaxDrawdownToLatest(prices, 60);
-  const recentActivity = getAverageActivity(prices.slice(-5));
-  const baseActivity = getAverageActivity(prices.slice(-25, -5));
+  const drawdown20 = getMaxDrawdownToLatest(scopedPrices, 20);
+  const drawdown60 = getMaxDrawdownToLatest(scopedPrices, 60);
+  const recentActivity = getAverageActivity(scopedPrices.slice(-5));
+  const baseActivity = getAverageActivity(scopedPrices.slice(-25, -5));
   const activityRatio = recentActivity !== null && baseActivity !== null && baseActivity > 0 ? recentActivity / baseActivity : null;
 
   let score = 50;
@@ -341,8 +382,9 @@ export function calculateIndustryEtfStrength(
   return {
     ...item,
     trade_date: latest.trade_date,
+    updated_at: latest.updated_at || null,
     close: roundMetric(latest.close, 3),
-    data_count: prices.length,
+    data_count: scopedPrices.length,
     return_5d: roundMetric(ret5),
     return_10d: roundMetric(ret10),
     return_20d: roundMetric(ret20),
@@ -387,17 +429,28 @@ export function formatIndustryStrengthNote(item?: IndustryEtfStrengthItem | null
 
 export async function buildIndustryEtfStrengthResponse(
   db: any,
-  options: { scope?: 'focus' | 'all'; limit?: number; benchmarkSymbol?: string } = {}
+  options: { scope?: 'focus' | 'all'; limit?: number; benchmarkSymbol?: string; asOfTradeDate?: string | null } = {}
 ) {
   const scope = options.scope || 'focus';
   const limit = Math.min(Number(options.limit || 30), 200);
   const benchmarkSymbol = options.benchmarkSymbol || '000300';
-  const context = await buildIndustryEtfStrengthContext(db, { scope, benchmarkSymbol });
+  const context = await buildIndustryEtfStrengthContext(db, {
+    scope,
+    benchmarkSymbol,
+    asOfTradeDate: options.asOfTradeDate
+  });
   const items = [];
 
   for (const candidate of context.candidateMap.values()) {
-    const prices = await getDailyPricesAnySource(db, candidate.symbol, candidate.source || 'tushare');
-    items.push(calculateIndustryEtfStrength(candidate, prices, context.benchmarkReturns));
+    const prices = await getDailyPricesAnySource(
+      db,
+      candidate.symbol,
+      candidate.source || 'tushare',
+      context.asOfTradeDate
+    );
+    items.push(calculateIndustryEtfStrength(candidate, prices, context.benchmarkReturns, {
+      asOfTradeDate: context.asOfTradeDate
+    }));
   }
 
   const sortedItems = items
@@ -413,13 +466,29 @@ export async function buildIndustryEtfStrengthResponse(
     summary[item.strength_status] = (summary[item.strength_status] || 0) + 1;
     return summary;
   }, {});
+  const dataDate = sortedItems
+    .map(item => item.trade_date)
+    .filter(Boolean)
+    .sort()
+    .pop() || null;
+  const latestUpdatedAt = sortedItems
+    .map(item => item.updated_at)
+    .filter(Boolean)
+    .sort()
+    .pop() || null;
 
   return {
     rule_version: 'industry_etf_strength_v1',
     scope,
+    as_of_trade_date: context.asOfTradeDate,
+    data_date: dataDate,
+    data_label: dataDate ? `${dataDate} 收盘` : null,
+    updated_at: latestUpdatedAt,
     benchmark: {
       symbol: benchmarkSymbol,
       name: getMarketAssetMeta(benchmarkSymbol).name,
+      trade_date: context.benchmarkTradeDate,
+      as_of_trade_date: context.asOfTradeDate,
       return_5d: roundMetric(context.benchmarkReturns.ret5),
       return_10d: roundMetric(context.benchmarkReturns.ret10),
       return_20d: roundMetric(context.benchmarkReturns.ret20),

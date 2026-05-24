@@ -5,6 +5,19 @@ const router = express.Router();
 
 // 年度计划子项相关接口
 
+const normalizePriorityOrder = (value: unknown) => {
+  if (value === undefined || value === null || value === '') {
+    return { ok: true, value: null as number | null };
+  }
+
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed)) {
+    return { ok: false, value: null as number | null };
+  }
+
+  return { ok: true, value: parsed };
+};
+
 // 新增年度计划子项
 router.post('/annual-plan-items', async (req, res) => {
   try {
@@ -20,11 +33,16 @@ router.post('/annual-plan-items', async (req, res) => {
     if (!planExists) {
       return res.status(404).json({ success: false, message: '关联的年度计划不存在' });
     }
+
+    const normalizedPriorityOrder = normalizePriorityOrder(priority_order);
+    if (!normalizedPriorityOrder.ok) {
+      return res.status(400).json({ success: false, message: '优先级必须是整数或留空' });
+    }
     
     const now = new Date().toISOString();
     const result = await db.run(
       'INSERT INTO annual_plan_items (plan_id, scope_type, category, object_name, current_role, current_action, current_status, thesis, current_reason, position_rule, exit_rule, downgrade_reason, resume_condition, priority_order, note, is_deleted, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [plan_id, scope_type, category, object_name, current_role, current_action, current_status, thesis, current_reason, position_rule, exit_rule, downgrade_reason, resume_condition, priority_order, note, 0, now, now]
+      [plan_id, scope_type, category, object_name, current_role, current_action, current_status, thesis, current_reason, position_rule, exit_rule, downgrade_reason, resume_condition, normalizedPriorityOrder.value, note, 0, now, now]
     );
     
     res.json({ success: true, data: { id: result.lastID } });
@@ -48,7 +66,7 @@ router.get('/annual-plan-items', async (req, res) => {
       params.push(plan_id);
     }
     
-    query += ' ORDER BY priority_order ASC, created_at DESC';
+    query += ' ORDER BY CASE WHEN priority_order IS NULL THEN 1 ELSE 0 END, priority_order ASC, created_at DESC';
     
     const records = await db.all(query, params);
     res.json({ success: true, data: records });
@@ -118,11 +136,16 @@ router.put('/annual-plan-items/:id', async (req, res) => {
     if (!planExists) {
       return res.status(404).json({ success: false, message: '关联的年度计划不存在' });
     }
+
+    const normalizedPriorityOrder = normalizePriorityOrder(priority_order);
+    if (!normalizedPriorityOrder.ok) {
+      return res.status(400).json({ success: false, message: '优先级必须是整数或留空' });
+    }
     
     const now = new Date().toISOString();
     const result = await db.run(
       'UPDATE annual_plan_items SET plan_id = ?, scope_type = ?, category = ?, object_name = ?, current_role = ?, current_action = ?, current_status = ?, thesis = ?, current_reason = ?, position_rule = ?, exit_rule = ?, downgrade_reason = ?, resume_condition = ?, priority_order = ?, note = ?, updated_at = ? WHERE id = ? AND is_deleted = 0',
-      [plan_id, scope_type, category, object_name, current_role, current_action, current_status, thesis, current_reason, position_rule, exit_rule, downgrade_reason, resume_condition, priority_order, note, now, id]
+      [plan_id, scope_type, category, object_name, current_role, current_action, current_status, thesis, current_reason, position_rule, exit_rule, downgrade_reason, resume_condition, normalizedPriorityOrder.value, note, now, id]
     );
     
     res.json({ success: true, data: { changes: result.changes } });

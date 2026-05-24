@@ -7,21 +7,27 @@ const router = express.Router();
 const getPriceRecords = async (db: any, period: number, categoryId?: string) => {
   let query = `
     SELECT 
-      category AS category_name, 
-      object_name, 
-      COALESCE(variant, '') AS variant_name, 
-      price AS current_price, 
-      date AS effective_date
-    FROM price_records
+      pr.category AS category_name, 
+      pr.object_name, 
+      COALESCE(pr.variant, '') AS variant_name, 
+      pr.price AS current_price, 
+      pr.date AS effective_date
+    FROM price_records pr
+    LEFT JOIN categories c ON c.name = pr.category
+    LEFT JOIN objects o ON o.category_id = c.id AND o.name = pr.object_name
+    LEFT JOIN variants v ON v.object_id = o.id AND v.name = COALESCE(pr.variant, '') AND COALESCE(pr.variant, '') <> ''
     WHERE 1=1
-      AND date BETWEEN date('now', '-' || ? || ' days') AND date('now')
+      AND COALESCE(c.is_archived, 0) = 0
+      AND COALESCE(o.is_archived, 0) = 0
+      AND (COALESCE(pr.variant, '') = '' OR COALESCE(v.is_archived, 0) = 0)
+      AND pr.date BETWEEN date('now', '-' || ? || ' days') AND date('now')
   `;
   const params: any[] = [period];
 
   // 暂时不支持 category_id 筛选，因为 price_records 表中没有 category_id 字段
   // 后续可以通过 join categories 表实现
 
-  query += ' ORDER BY category, object_name, variant, date ASC, created_at DESC, id DESC';
+  query += ' ORDER BY pr.category, pr.object_name, pr.variant, pr.date ASC, pr.created_at DESC, pr.id DESC';
 
   const records = await db.all(query, params);
   

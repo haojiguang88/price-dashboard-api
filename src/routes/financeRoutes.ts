@@ -5,6 +5,8 @@ import getDb from '../config/database';
 import {
   DEFAULT_FINANCE_CANDIDATE_FUNNEL_CONFIG,
   DEFAULT_FINANCE_PIPELINE_CONFIG,
+  compactFinancePipelineResultForStorage,
+  markFinancePipelineResultInterrupted,
   runFinanceCandidateFunnelPipeline,
   runFinanceDailyPipeline
 } from '../services/financeDailyPipeline';
@@ -14,14 +16,74 @@ import {
   getMarketAssetMeta,
   getPreferredMarketSource
 } from '../services/industryEtfStrengthService';
+import { getLatestCoveredTradeDate, getTradeDateCoverage } from '../utils/financeTradeDate';
+import { getFreshMarketRegime } from '../utils/financeMarketRegime';
+import { calculateMetalRegime, filterMetalTradingPrices, getMetalAsset } from './metalRoutes';
 
 const router = Router();
 const execAsync = promisify(exec);
 const FINANCE_PIPELINE_TASK_KEY = 'finance_daily_pipeline';
 const FINANCE_FUNNEL_TASK_KEY = 'finance_candidate_funnel_pipeline';
+const FINANCE_TUSHARE_SUPPLEMENTAL_TASK_KEY = 'finance_tushare_supplemental_update';
 const CHINA_TIME_ZONE = 'Asia/Shanghai';
-const PIPELINE_MANUAL_EARLIEST_MINUTE = 16 * 60;
+const PIPELINE_MANUAL_EARLIEST_MINUTE = 17 * 60;
 const PIPELINE_RUNNING_TIMEOUT_MS = 2 * 60 * 60 * 1000;
+const WORKFLOW_SUMMARY_CACHE_TTL_MS = 10 * 1000;
+const INDUSTRY_ETF_STRENGTH_CACHE_TTL_MS = 60 * 1000;
+let workflowDailyChangesCache: {
+  key: string;
+  expiresAt: number;
+  data: any;
+} | null = null;
+let workflowDailyPriceHealthCache: {
+  expiresAt: number;
+  data: any;
+} | null = null;
+let workflowEntryObservationRowsCache: {
+  expiresAt: number;
+  data: any[];
+} | null = null;
+let workflowMetalsHealthCache: {
+  key: string;
+  expiresAt: number;
+  data: any;
+} | null = null;
+let industryEtfStrengthCache: {
+  key: string;
+  expiresAt: number;
+  data: any;
+} | null = null;
+const latestEntryObservationCte = `
+  WITH latest_entry_observations AS (
+    SELECT *
+    FROM (
+      SELECT
+        o.*,
+        ROW_NUMBER() OVER (
+          PARTITION BY o.symbol, o.asset_type, o.source
+          ORDER BY o.updated_at DESC, o.id DESC
+        ) AS rn
+      FROM financial_entry_trigger_observations o
+    )
+    WHERE rn = 1
+  )
+`;
+
+router.get('/workflow-summary/light', async (_req: Request, res: Response) => {
+  try {
+    const db = await getDb();
+    const data = await buildWorkflowLightSummary(db);
+    res.json({
+      success: true,
+      data
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: `获取金融流程轻量总览失败: ${(error as Error).message}`
+    });
+  }
+});
 
 interface DailyPrice {
   trade_date: string;
@@ -119,15 +181,62 @@ function getChinaDateKey(date = new Date()) {
   return date.toLocaleDateString('en-CA', { timeZone: CHINA_TIME_ZONE });
 }
 
+function getChinaDateParts(date = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: CHINA_TIME_ZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).formatToParts(date).reduce<Record<string, string>>((acc, part) => {
+    if (part.type !== 'literal') acc[part.type] = part.value;
+    return acc;
+  }, {});
+  return {
+    year: Number(parts.year),
+    month: Number(parts.month),
+    day: Number(parts.day)
+  };
+}
+
+function getChinaDateTimeParts(date = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: CHINA_TIME_ZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+    weekday: 'short'
+  }).formatToParts(date).reduce<Record<string, string>>((acc, part) => {
+    if (part.type !== 'literal') acc[part.type] = part.value;
+    return acc;
+  }, {});
+  const weekdayMap: Record<string, number> = {
+    Sun: 0,
+    Mon: 1,
+    Tue: 2,
+    Wed: 3,
+    Thu: 4,
+    Fri: 5,
+    Sat: 6
+  };
+  const hour = Number(parts.hour);
+  return {
+    year: Number(parts.year),
+    month: Number(parts.month),
+    day: Number(parts.day),
+    hour: hour === 24 ? 0 : hour,
+    minute: Number(parts.minute),
+    weekday: weekdayMap[parts.weekday] ?? -1
+  };
+}
+
 function getMarketDailyAssetType(symbol: string): 'index' | 'etf' | null {
   const meta = getMarketAssetMeta(symbol);
   if (meta.category === 'broad' || meta.category === 'style') return 'index';
   if (meta.category === 'industry' || symbol.startsWith('5') || symbol.startsWith('1')) return 'etf';
   return null;
-}
-
-function getChinaLocalDate(date = new Date()) {
-  return new Date(date.toLocaleString('en-US', { timeZone: CHINA_TIME_ZONE }));
 }
 
 function getPipelineEarliestTimeLabel() {
@@ -153,7 +262,39 @@ function getRunDateKey(startedAt?: string | null) {
   return getChinaDateKey(date);
 }
 
+function getChinaScheduleDueTime(scheduleTime = '17:10', now = new Date()) {
+  const [hour, minute] = scheduleTime.split(':').map(Number);
+  if (!Number.isFinite(hour) || !Number.isFinite(minute)) return null;
+  const { year, month, day } = getChinaDateParts(now);
+  if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) return null;
+  return new Date(Date.UTC(year, month - 1, day, hour - 8, minute, 0, 0));
+}
+
+function hasRunAtOrAfterSchedule(startedAt?: string | null, scheduleTime = '17:10', now = new Date()) {
+  if (!startedAt) return false;
+  const runDate = new Date(startedAt);
+  if (!Number.isFinite(runDate.getTime())) return false;
+  if (getChinaDateKey(runDate) !== getChinaDateKey(now)) return false;
+
+  const due = getChinaScheduleDueTime(scheduleTime, now);
+  if (!due) return true;
+  return runDate >= due;
+}
+
 async function expireStaleFinancePipelineRuns(db: any) {
+  const latestCompletedRun = await db.get(
+    `SELECT started_at
+     FROM task_center_runs
+     WHERE task_key = ?
+       AND status != 'running'
+       AND finished_at IS NOT NULL
+     ORDER BY started_at DESC, id DESC
+     LIMIT 1`,
+    [FINANCE_PIPELINE_TASK_KEY]
+  );
+  const latestCompletedMs = latestCompletedRun?.started_at
+    ? new Date(latestCompletedRun.started_at).getTime()
+    : NaN;
   const runningRows = await db.all(
     `SELECT id, started_at
      FROM task_center_runs
@@ -164,19 +305,37 @@ async function expireStaleFinancePipelineRuns(db: any) {
   const nowMs = Date.now();
   const staleRows = runningRows.filter((row: any) => {
     const startedMs = new Date(row.started_at).getTime();
-    return Number.isFinite(startedMs) && nowMs - startedMs > PIPELINE_RUNNING_TIMEOUT_MS;
+    if (!Number.isFinite(startedMs)) return false;
+    if (Number.isFinite(latestCompletedMs) && latestCompletedMs > startedMs) return true;
+    return nowMs - startedMs > PIPELINE_RUNNING_TIMEOUT_MS;
   });
   if (staleRows.length === 0) return;
 
   const now = new Date().toISOString();
   for (const row of staleRows) {
     const message = `金融日终流水线超过 ${Math.round(PIPELINE_RUNNING_TIMEOUT_MS / 3600000)} 小时仍未结束，已自动标记为失败，请确认是否在非交易时段或数据源无响应时启动。`;
-    await db.run(
-      `UPDATE task_center_runs
-       SET status = 'error', message = ?, finished_at = ?
-       WHERE id = ? AND status = 'running'`,
-      [message, now, row.id]
+    const resultRow = await db.get(
+      `SELECT result_json
+       FROM task_center_runs
+       WHERE id = ?`,
+      [row.id]
     );
+    const interruptedResult = markFinancePipelineResultInterrupted(resultRow?.result_json, message, now);
+    if (interruptedResult) {
+      await db.run(
+        `UPDATE task_center_runs
+         SET status = 'error', message = ?, result_json = ?, finished_at = ?
+         WHERE id = ? AND status = 'running'`,
+        [message, JSON.stringify(compactFinancePipelineResultForStorage(interruptedResult)), now, row.id]
+      );
+    } else {
+      await db.run(
+        `UPDATE task_center_runs
+         SET status = 'error', message = ?, finished_at = ?
+         WHERE id = ? AND status = 'running'`,
+        [message, now, row.id]
+      );
+    }
     await db.run(
       `UPDATE task_center_tasks
        SET last_status = 'error', last_message = ?, last_run_at = ?, updated_at = ?
@@ -210,9 +369,8 @@ async function buildManualPipelineRunGuard(db: any, force = false) {
     };
   }
 
-  const localNow = getChinaLocalDate();
-  const day = localNow.getDay();
-  if (day === 0 || day === 6) {
+  const localNow = getChinaDateTimeParts();
+  if (localNow.weekday === 0 || localNow.weekday === 6) {
     return {
       can_run: false,
       reason: '今天不是交易日（周末），日终流水线不启动，避免无意义请求数据源。',
@@ -220,13 +378,65 @@ async function buildManualPipelineRunGuard(db: any, force = false) {
     };
   }
 
-  const minuteOfDay = localNow.getHours() * 60 + localNow.getMinutes();
+  const minuteOfDay = localNow.hour * 60 + localNow.minute;
   if (minuteOfDay < PIPELINE_MANUAL_EARLIEST_MINUTE) {
     return {
       can_run: false,
-      reason: `日终流水线只允许 ${getPipelineEarliestTimeLabel()} 后执行。当前还未到收盘后处理窗口，先不要请求行情源。`,
+      reason: `日终流水线只允许 ${getPipelineEarliestTimeLabel()} 后执行；Tushare辅助数据补全会在 17:00 后先跑，金融日终流水线随后接着跑。当前还未到收盘后处理窗口。`,
       force_supported: true
     };
+  }
+
+  const runningSupplemental = await db.get(
+    `SELECT id, started_at
+     FROM task_center_runs
+     WHERE task_key = ? AND status = 'running'
+     ORDER BY started_at DESC, id DESC
+     LIMIT 1`,
+    [FINANCE_TUSHARE_SUPPLEMENTAL_TASK_KEY]
+  );
+  if (runningSupplemental?.started_at) {
+    const startedMs = new Date(runningSupplemental.started_at).getTime();
+    const isFreshRunning = Number.isFinite(startedMs)
+      && Date.now() - startedMs <= PIPELINE_RUNNING_TIMEOUT_MS;
+    if (isFreshRunning) {
+      return {
+        can_run: false,
+        reason: `Tushare辅助数据补全正在执行，先不要手动跑日终流水线，避免拿半新半旧数据推进。Tushare开始时间：${formatChinaDateTime(runningSupplemental.started_at)}`,
+        force_supported: true,
+        running: runningSupplemental
+      };
+    }
+  }
+
+  const supplementalTask = await db.get(
+    `SELECT enabled, schedule_time FROM task_center_tasks WHERE task_key = ?`,
+    [FINANCE_TUSHARE_SUPPLEMENTAL_TASK_KEY]
+  );
+  if (supplementalTask?.enabled) {
+    const supplementalScheduleTime = supplementalTask.schedule_time || '17:00';
+    const latestSupplemental = await db.get(
+      `SELECT id, status, started_at, finished_at, message
+       FROM task_center_runs
+       WHERE task_key = ? AND status IN ('success', 'error')
+       ORDER BY started_at DESC, id DESC
+       LIMIT 1`,
+      [FINANCE_TUSHARE_SUPPLEMENTAL_TASK_KEY]
+    );
+    if (!hasRunAtOrAfterSchedule(latestSupplemental?.started_at, supplementalScheduleTime)) {
+      return {
+        can_run: false,
+        reason: `Tushare辅助数据补全今天尚未在 ${supplementalScheduleTime} 后成功完成，先不要手动跑日终流水线，避免旧辅助特征推进。`,
+        force_supported: true
+      };
+    }
+    if (latestSupplemental.status === 'error') {
+      return {
+        can_run: false,
+        reason: `Tushare辅助数据补全今天失败，先不要手动跑日终流水线。失败信息：${latestSupplemental.message || '原因未知'}`,
+        force_supported: true
+      };
+    }
   }
 
   const latestRun = await db.get(
@@ -237,10 +447,18 @@ async function buildManualPipelineRunGuard(db: any, force = false) {
      LIMIT 1`,
     [FINANCE_PIPELINE_TASK_KEY]
   );
-  if (latestRun?.status === 'success' && getRunDateKey(latestRun.started_at) === getChinaDateKey()) {
+  const pipelineTask = await db.get(
+    `SELECT schedule_time FROM task_center_tasks WHERE task_key = ?`,
+    [FINANCE_PIPELINE_TASK_KEY]
+  );
+  if (
+    latestRun?.status === 'success'
+    && getRunDateKey(latestRun.started_at) === getChinaDateKey()
+    && hasRunAtOrAfterSchedule(latestRun.started_at, pipelineTask?.schedule_time || '17:10')
+  ) {
     return {
       can_run: false,
-      reason: '今日流水线已经成功执行过。本页默认不重复跑，避免休市或无新数据时反复请求。',
+      reason: '今日正式窗口后的流水线已经成功执行过。本页默认不重复跑，避免休市或无新数据时反复请求。',
       force_supported: true
     };
   }
@@ -355,7 +573,7 @@ async function getLatestRegime(symbol: string): Promise<any | null> {
   const result = await db.get(
     `SELECT * FROM financial_market_regime 
      WHERE symbol = ? AND result_reason NOT LIKE '%模拟数据%' 
-     ORDER BY id DESC LIMIT 1`,
+     ORDER BY trade_date DESC, id DESC LIMIT 1`,
     [symbol]
   );
   return result;
@@ -374,14 +592,14 @@ async function ensureFinancePipelineTask(db: any) {
   await db.run(
     `INSERT OR IGNORE INTO task_center_tasks
       (task_key, name, domain, task_type, enabled, schedule_time, schedule_days, priority, config_json, last_status, last_message)
-     VALUES (?, ?, ?, ?, 0, '16:30', 'trade_days', 8, ?, 'pending', ?)`,
+     VALUES (?, ?, ?, ?, 0, '17:10', 'trade_days', 8, ?, 'pending', ?)`,
     [
       FINANCE_PIPELINE_TASK_KEY,
       '金融日终流水线',
       'finance',
       'finance_daily_pipeline',
       JSON.stringify(DEFAULT_FINANCE_PIPELINE_CONFIG),
-      '一键串联市场总闸、日线更新、备选池、入场触发和持仓建议；只更新建议，不自动买卖'
+      '收盘后自动串联日线、市场总闸、备选池、模型复核、入池漏斗、入场触发、持仓建议、五模型实验预测池和后验标签；计划生成与仓位填写仍保留人工确认'
     ]
   );
   return db.get(`SELECT * FROM task_center_tasks WHERE task_key = ?`, [FINANCE_PIPELINE_TASK_KEY]);
@@ -391,20 +609,92 @@ async function ensureFinanceFunnelTask(db: any) {
   await db.run(
     `INSERT OR IGNORE INTO task_center_tasks
       (task_key, name, domain, task_type, enabled, schedule_time, schedule_days, priority, config_json, last_status, last_message)
-     VALUES (?, ?, ?, ?, 0, '09:30', 'trade_days', 7, ?, 'pending', ?)`,
+     VALUES (?, ?, ?, ?, 0, '17:25', 'trade_days', 7, ?, 'pending', ?)`,
     [
       FINANCE_FUNNEL_TASK_KEY,
       '入池漏斗流水线',
       'finance',
       'finance_candidate_funnel_pipeline',
       JSON.stringify(DEFAULT_FINANCE_CANDIDATE_FUNNEL_CONFIG),
-      '从当前备选池自动重算走势阶段、复核资格并推进入场触发观察；只推进建议，不自动建仓'
+      '收盘后自动推进走势阶段、单标的判断和入场触发观察；不自动生成买入计划'
     ]
+  );
+  await db.run(
+    `UPDATE task_center_tasks
+     SET schedule_time = '17:25',
+         last_message = '收盘后自动推进走势阶段、单标的判断和入场触发观察；不自动生成买入计划',
+         updated_at = CURRENT_TIMESTAMP
+     WHERE task_key = ?
+       AND schedule_time IN ('09:30', '16:45')`,
+    [FINANCE_FUNNEL_TASK_KEY]
   );
   return db.get(`SELECT * FROM task_center_tasks WHERE task_key = ?`, [FINANCE_FUNNEL_TASK_KEY]);
 }
 
+const FUNNEL_REPAIR_STEP_KEYS = new Set([
+  'model_feature_refresh',
+  'candidate_scan',
+  'model_recheck_auto',
+  'model_candidate_scores',
+  'candidate_funnel',
+  'entry_trigger_scan',
+  'entry_observation_settlement',
+  'active_plan_suggestions'
+]);
+
+function getRecoverableFunnelRepair(latestDaily: any) {
+  if (!latestDaily || latestDaily.status !== 'error') return null;
+  const result = parseJsonConfig(latestDaily.result_json);
+  const steps = toArray(result.steps);
+  if (steps.length === 0) return null;
+
+  const dailyPricesStep = steps.find((step: any) => step.key === 'daily_prices');
+  const marketStep = steps.find((step: any) => step.key === 'market_environment');
+  const failedStep = steps.find((step: any) => step.status === 'error');
+  const skippedSteps = steps.filter((step: any) => step.status === 'skipped');
+  const marketBlocked = steps.some((step: any) => step?.data?.downstream_blocked);
+  const repairRelevant = Boolean(failedStep && FUNNEL_REPAIR_STEP_KEYS.has(String(failedStep.key || '')))
+    || skippedSteps.some((step: any) => FUNNEL_REPAIR_STEP_KEYS.has(String(step.key || '')));
+
+  if (marketBlocked || dailyPricesStep?.status !== 'success' || marketStep?.status !== 'success' || !repairRelevant) {
+    return null;
+  }
+
+  return {
+    failed_step: failedStep?.key || null,
+    failed_label: failedStep?.label || null,
+    skipped_count: skippedSteps.length,
+    started_at: latestDaily.started_at,
+    message: latestDaily.message || failedStep?.message || '日终流水线下游步骤未闭环'
+  };
+}
+
+function compactRunGuardRun(run: any) {
+  if (!run || typeof run !== 'object') return run;
+  const { result_json: _resultJson, ...safeRun } = run;
+  return safeRun;
+}
+
 async function buildManualFunnelRunGuard(db: any) {
+  await expireStaleFinancePipelineRuns(db);
+
+  const runningDaily = await db.get(
+    `SELECT id, started_at
+     FROM task_center_runs
+     WHERE task_key = ? AND status = 'running'
+     ORDER BY started_at DESC, id DESC
+     LIMIT 1`,
+    [FINANCE_PIPELINE_TASK_KEY]
+  );
+  if (runningDaily) {
+    return {
+      can_run: false,
+      reason: `金融日终流水线正在执行中，漏斗已包含在本次收盘流程内。开始时间：${formatChinaDateTime(runningDaily.started_at)}`,
+      force_supported: false,
+      running: runningDaily
+    };
+  }
+
   const running = await db.get(
     `SELECT id, started_at
      FROM task_center_runs
@@ -422,7 +712,70 @@ async function buildManualFunnelRunGuard(db: any) {
     };
   }
 
-  return { can_run: true, reason: null, force_supported: false };
+  const dailyTask = await db.get(
+    `SELECT schedule_time FROM task_center_tasks WHERE task_key = ?`,
+    [FINANCE_PIPELINE_TASK_KEY]
+  );
+  const latestDaily = await db.get(
+    `SELECT id, status, started_at, finished_at, message, result_json
+     FROM task_center_runs
+     WHERE task_key = ? AND status IN ('success', 'error')
+     ORDER BY started_at DESC, id DESC
+     LIMIT 1`,
+    [FINANCE_PIPELINE_TASK_KEY]
+  );
+  const dailyScheduleTime = dailyTask?.schedule_time || '17:10';
+  const recoverableRepair = getRecoverableFunnelRepair(latestDaily);
+  if (recoverableRepair) {
+    return {
+      can_run: true,
+      reason: `金融日终已完成日线和市场总闸，但下游停在「${recoverableRepair.failed_label || recoverableRepair.failed_step || '未知步骤'}」，可单独补跑本地入池漏斗；不会拉新行情，也不会自动生成买入计划。日终失败信息：${recoverableRepair.message}`,
+      latest_daily: compactRunGuardRun(latestDaily),
+      repair: recoverableRepair,
+      force_supported: false
+    };
+  }
+
+  const localNow = getChinaDateTimeParts();
+  if (localNow.weekday === 0 || localNow.weekday === 6) {
+    return {
+      can_run: false,
+      reason: '今天不是交易日（周末），漏斗不单独启动，避免用休市旧数据推进。',
+      force_supported: false
+    };
+  }
+
+  const minuteOfDay = localNow.hour * 60 + localNow.minute;
+  if (minuteOfDay < PIPELINE_MANUAL_EARLIEST_MINUTE) {
+    return {
+      can_run: false,
+      reason: `入池漏斗按收盘日线口径执行，只允许 ${getPipelineEarliestTimeLabel()} 后启动。建议直接跑金融日终流水线，它会一并执行漏斗。`,
+      force_supported: false
+    };
+  }
+
+  const dailyRanAfterSchedule = hasRunAtOrAfterSchedule(latestDaily?.started_at, dailyScheduleTime);
+  if (dailyRanAfterSchedule && latestDaily?.status === 'success') {
+    return {
+      can_run: false,
+      reason: `今日金融日终流水线已经成功执行，且已包含入池漏斗，不需要单独重复跑。完成时间：${formatChinaDateTime(latestDaily.finished_at)}`,
+      force_supported: false
+    };
+  }
+  if (dailyRanAfterSchedule && latestDaily?.status === 'error') {
+    return {
+      can_run: true,
+      reason: `今日金融日终流水线失败，可单独补跑入池漏斗；漏斗内部会再次检查全市场日线覆盖，避免半截行情推进。日终失败信息：${latestDaily.message || '原因未知'}`,
+      latest_daily: compactRunGuardRun(latestDaily),
+      force_supported: false
+    };
+  }
+
+  return {
+    can_run: true,
+    reason: `今日 ${dailyScheduleTime} 后的金融日终流水线尚未成功执行，可单独补跑入池漏斗；漏斗内部会再次检查全市场日线覆盖，避免旧数据推进。`,
+    force_supported: false
+  };
 }
 
 function getDurationSeconds(startedAt?: string, finishedAt?: string) {
@@ -473,6 +826,7 @@ function summarizePipelineStep(step: any) {
     key: step.key,
     label: step.label,
     status: step.status,
+    severity: undefined as 'warning' | undefined,
     message: step.message,
     started_at: step.started_at,
     finished_at: step.finished_at,
@@ -555,12 +909,186 @@ function summarizePipelineStep(step: any) {
       }));
       break;
     }
+    case 'model_recheck_auto': {
+      base.metrics = {
+        checked: Number(data.checked_count || results.length),
+        selected: Number(data.selected_count || 0),
+        settled: Number(data.settled_count || 0),
+        manual_required: Number(data.manual_required_count || 0),
+        daily_updated: Number(data.daily_updated_count || 0),
+        data_gap: Number(data.data_gap_count || 0),
+        neutral: Number(data.neutral_count || 0),
+        high_conflict: Number(data.high_conflict_count || 0),
+        failed: Number(data.failed_count || 0)
+      };
+      const rankModelRecheck = (item: any) => {
+        if (item.success === false) return 0;
+        if (item.manual_required) return 1;
+        if (item.selected) return 2;
+        if (item.settled) return 3;
+        return 4;
+      };
+      base.details = results
+        .slice()
+        .sort((left: any, right: any) => rankModelRecheck(left) - rankModelRecheck(right))
+        .slice(0, 40)
+        .map((item: any) => {
+          const category = item.success === false
+            ? 'failed'
+            : item.manual_required
+              ? 'true_conflict'
+              : item.selected
+                ? 'reflow'
+                : item.settled
+                  ? 'auto_settled'
+                  : 'other';
+          return {
+            category,
+            symbol: item.symbol,
+            name: item.name,
+            asset_type: item.asset_type,
+            status: item.success === false
+              ? '失败'
+              : item.manual_required
+                ? '真冲突'
+                : item.selected
+                  ? '回流'
+                  : item.settled
+                    ? '自动沉淀'
+                    : '复核',
+            result: item.reason || item.bucket || '--'
+          };
+        });
+      break;
+    }
+    case 'model_feature_refresh': {
+      const failedCount = Number(data.failed_count || 0);
+      const blockingStaleCount = Number(data.blocking_stale_count || 0);
+      const auxiliaryUnavailable = data.model_auxiliary_available === false;
+      if (auxiliaryUnavailable || failedCount > 0 || blockingStaleCount > 0) {
+        base.severity = 'warning';
+      }
+      base.metrics = {
+        checked: Number(data.checked_count || results.filter((item: any) => item.success).length),
+        refreshed: Number(data.refreshed_count || 0),
+        stale: Number(data.stale_count || 0),
+        blocking_stale: blockingStaleCount,
+        failed: failedCount,
+        model_auxiliary: auxiliaryUnavailable ? '降级' : '可用'
+      };
+      base.details = results.map((item: any) => ({
+        category: item.success === false || item.featureStale || item.scoreStale ? 'failed' : 'other',
+        symbol: item.domain,
+        status: item.success === false
+          ? '失败'
+          : item.featureStale
+            ? '特征滞后'
+            : item.scoreStale
+              ? '候选分滞后'
+              : item.refreshed
+                ? '已重建'
+                : '正常',
+        trade_date: item.latestCoveredTradeDate || item.latestTradeDate || null,
+        result: item.success === false
+          ? item.message || '模型特征检查失败'
+          : `特征 ${item.latestTradeDate || '--'} / 候选分 ${item.latestScoreTradeDate || '--'} / 最新日线 ${item.latestCoveredTradeDate || '--'}`
+      }));
+      break;
+    }
+    case 'model_candidate_scores': {
+      const failedCount = Number(data.failed_count || 0);
+      if (data.model_auxiliary_available === false || failedCount > 0) {
+        base.severity = 'warning';
+      }
+      base.metrics = {
+        checked: Number(data.checked_count || 0),
+        scored: Number(data.scored_count || 0),
+        failed: failedCount,
+        model_auxiliary: data.model_auxiliary_available === false ? '降级' : '可用'
+      };
+      base.details = results.map((item: any) => ({
+        category: item.success === false ? 'failed' : 'other',
+        symbol: item.domain,
+        status: item.success === false ? '失败' : '成功',
+        trade_date: item.coveredTradeDate || null,
+        result: item.success
+          ? `评分 ${Number(item.scored || 0)} / 检查 ${Number(item.checked || 0)}，模型 ${item.modelKey || '--'} #${item.modelRunId || '--'}`
+          : item.message || '候选模型分数同步失败'
+      }));
+      break;
+    }
+    case 'entry_observation_preflight_settlement':
+    case 'entry_observation_settlement': {
+      const details = toArray(data.details);
+      const invalidatedCount = Number(data.invalidated_count || 0);
+      const readyToPlanCount = Number(data.ready_to_plan_count || 0);
+      const plannedCount = Number(data.planned_count || 0);
+      const orphanOpenReturnedCount = Number(data.orphan_open_returned_count || data.orphan_ready_returned_count || 0);
+      const timeoutReturnedCount = Number(data.returned_count || 0);
+      const dedupedCount = Number(data.deduped_count || 0);
+      base.metrics = {
+        invalidated: invalidatedCount,
+        ready_to_plan: readyToPlanCount,
+        planned: plannedCount,
+        returned: orphanOpenReturnedCount + timeoutReturnedCount,
+        orphan_open_returned: orphanOpenReturnedCount,
+        timeout_returned: timeoutReturnedCount,
+        deduped: dedupedCount,
+        total: invalidatedCount
+          + readyToPlanCount
+          + plannedCount
+          + orphanOpenReturnedCount
+          + timeoutReturnedCount
+          + dedupedCount,
+        latest_trade_date: data.latest_trade_date || null,
+        stale_days: Number(data.stale_days || 0)
+      };
+      base.details = details.slice(0, 60).map((item: any) => ({
+        category: item.category || 'other',
+        observation_id: item.observation_id,
+        symbol: item.symbol,
+        name: item.name,
+        asset_type: item.asset_type,
+        status: item.status || '--',
+        trade_date: item.trade_date,
+        close_price: item.close_price,
+        invalidation_line: item.invalidation_line,
+        trend_phase_code: item.trend_phase_code,
+        result: item.result || '--'
+      }));
+      break;
+    }
+    case 'experiment_prediction_snapshots': {
+      base.metrics = {
+        checked: Number(data.checked_count || results.length),
+        saved: Number(data.saved_count || 0),
+        inserted: Number(data.inserted_count || 0),
+        updated: Number(data.updated_count || 0),
+        refreshed: Number(data.refreshed_count || 0),
+        completed: Number(data.completed_count || 0),
+        partial: Number(data.partial_count || 0),
+        pending: Number(data.pending_count || 0),
+        failed: Number(data.failed_count || 0)
+      };
+      base.details = results.map((item: any) => ({
+        experiment_key: item.experiment_key,
+        asset_type: item.asset_type,
+        status: item.success ? '成功' : '失败',
+        saved_count: Number(item.saved_count || 0),
+        refreshed_count: Number(item.refreshed_count || 0),
+        result: item.success
+          ? `保存 ${Number(item.saved_count || 0)}，后验 ${Number(item.refreshed_count || 0)}`
+          : item.message || '失败'
+      }));
+      break;
+    }
     case 'active_candidate_collect': {
       const byAssetType = assetTypeBreakdown(items);
       base.metrics = {
         active: items.length,
         stock: byAssetType.stock,
-        etf: byAssetType.etf
+        etf: byAssetType.etf,
+        normalized: Number(data.normalized_rejected_active_count || 0)
       };
       base.details = items.slice(0, 8).map((item: any) => ({
         symbol: item.symbol,
@@ -657,7 +1185,7 @@ function summarizePipelineStep(step: any) {
         action_counts: countBy(results, (item: any) => item.action_label || item.action)
       };
       base.details = results
-        .filter((item: any) => item.action === 'READY_TO_PLAN' || item.observation_status === 'confirmed' || item.observation_status === 'invalidated')
+        .filter((item: any) => item.action === 'READY_TO_PLAN' || ['confirmed', 'plan_candidate', 'invalidated'].includes(item.observation_status))
         .slice(0, 8)
         .map((item: any) => ({
           symbol: item.symbol,
@@ -677,6 +1205,54 @@ function summarizePipelineStep(step: any) {
         plan_id: item.plan_id,
         suggestion_id: item.suggestion_id,
         result: item.action_label || '--'
+      }));
+      break;
+    }
+    case 'decision_sample_tracking': {
+      const syncResult = data.syncResult || {};
+      const tracking = data.decisionTracking || {};
+      const stages = toArray(tracking.stages);
+      const recentItems = toArray(tracking.items || tracking.recentItems);
+      base.metrics = {
+        synced: Number(syncResult.processed || 0),
+        snapshots: Number(syncResult.snapshots || tracking.snapshotCount || 0),
+        total: Number(tracking.total || tracking.totalSamples || 0),
+        tracking: stages.reduce((sum: number, stage: any) => sum + Number(stage.tracking || 0), 0),
+        advanced: stages.reduce((sum: number, stage: any) => sum + Number(stage.advanced || 0), 0),
+        blocked: stages.reduce((sum: number, stage: any) => sum + Number(stage.blocked || 0), 0)
+      };
+      base.details = recentItems.slice(0, 12).map((item: any) => ({
+        symbol: item.symbol,
+        name: item.name,
+        asset_type: item.assetType || item.asset_type,
+        status: item.labelStatus || item.label_status || item.stageStatus || item.stage_status,
+        result: item.stageLabel || item.stage_label || item.stageKey || item.stage_key || '决策样本'
+      }));
+      break;
+    }
+    case 'signal_lifecycle_sync': {
+      base.metrics = {
+        checked: Number(data.checked || 0),
+        synced: Number(data.synced || 0),
+        total: Number(data.total || 0)
+      };
+      base.details = toArray(data.statusCards).slice(0, 12).map((item: any) => ({
+        status: item.label || item.key,
+        result: `${Number(item.count ?? item.value ?? 0)} 条`
+      }));
+      break;
+    }
+    case 'sample_validation_snapshot': {
+      const snapshots = toArray(data.snapshots);
+      base.metrics = {
+        saved: 1,
+        snapshots: snapshots.length,
+        latest: data.snapshotDate || null
+      };
+      base.details = snapshots.slice(0, 8).map((item: any) => ({
+        snapshot_date: item.snapshotDate || item.snapshot_date,
+        rule_version: item.ruleVersion || item.rule_version,
+        result: '样本验证快照'
       }));
       break;
     }
@@ -713,6 +1289,7 @@ function compactPipelineResult(resultJson?: string | null) {
     summary: result.summary || {
       total: steps.length,
       success: steps.filter((step: any) => step.status === 'success').length,
+      skipped: steps.filter((step: any) => step.status === 'skipped').length,
       failed: steps.filter((step: any) => step.status === 'error').length,
       failed_step: steps.find((step: any) => step.status === 'error')?.key || null
     },
@@ -722,13 +1299,133 @@ function compactPipelineResult(resultJson?: string | null) {
   };
 }
 
+async function buildCandidateFlowIntegrity(db: any) {
+  const row = await db.get(
+    `SELECT
+       SUM(CASE WHEN pool_status = 'active'
+                  AND asset_type IN ('stock', 'etf')
+                  AND COALESCE(review_status, 'unreviewed') = 'unreviewed'
+                THEN 1 ELSE 0 END) AS active_unreviewed,
+       SUM(CASE WHEN pool_status = 'active'
+                  AND asset_type IN ('stock', 'etf')
+                  AND COALESCE(review_status, '') <> 'plan_ready'
+                  AND final_status = 'READY_FOR_PLAN'
+                THEN 1 ELSE 0 END) AS ready_for_plan_mismatch,
+       SUM(CASE WHEN pool_status = 'active'
+                  AND asset_type IN ('stock', 'etf')
+                  AND review_status = 'plan_ready'
+                  AND final_status <> 'READY_FOR_PLAN'
+                THEN 1 ELSE 0 END) AS plan_ready_final_mismatch,
+       SUM(CASE WHEN pool_status = 'active'
+                  AND asset_type IN ('stock', 'etf')
+                  AND review_status IN ('wait_confirmation', 'trend_blocked', 'structure_pending', 'structure_watch')
+                  AND final_status <> 'WAIT'
+                THEN 1 ELSE 0 END) AS wait_state_final_mismatch
+     FROM financial_candidate_pool`
+  );
+  const counts = {
+    active_unreviewed: Number(row?.active_unreviewed || 0),
+    ready_for_plan_mismatch: Number(row?.ready_for_plan_mismatch || 0),
+    plan_ready_final_mismatch: Number(row?.plan_ready_final_mismatch || 0),
+    wait_state_final_mismatch: Number(row?.wait_state_final_mismatch || 0)
+  };
+  const issues = [
+    counts.active_unreviewed > 0
+      ? { code: 'active_unreviewed', count: counts.active_unreviewed, message: `发现 ${counts.active_unreviewed} 条 active 候选仍停在 unreviewed，说明漏斗状态推进没有闭环。` }
+      : null,
+    counts.ready_for_plan_mismatch > 0
+      ? { code: 'ready_for_plan_mismatch', count: counts.ready_for_plan_mismatch, message: `发现 ${counts.ready_for_plan_mismatch} 条非 plan_ready 候选挂着 READY_FOR_PLAN，计划口径会被误放大。` }
+      : null,
+    counts.plan_ready_final_mismatch > 0
+      ? { code: 'plan_ready_final_mismatch', count: counts.plan_ready_final_mismatch, message: `发现 ${counts.plan_ready_final_mismatch} 条 plan_ready 候选未挂 READY_FOR_PLAN，买入计划准备池会漏数。` }
+      : null,
+    counts.wait_state_final_mismatch > 0
+      ? { code: 'wait_state_final_mismatch', count: counts.wait_state_final_mismatch, message: `发现 ${counts.wait_state_final_mismatch} 条等待态候选 final_status 不是 WAIT，后续队列可能错位。` }
+      : null
+  ].filter(Boolean);
+  return {
+    status: issues.length > 0 ? 'attention' : 'ok',
+    counts,
+    issues
+  };
+}
+
+function appendCandidateFlowWarnings(workflowWarnings: any[], integrity: any) {
+  const issues = Array.isArray(integrity?.issues) ? integrity.issues : [];
+  for (const issue of issues) {
+    workflowWarnings.push({
+      code: issue.code || 'candidate_flow_integrity',
+      level: 'needs_reconcile',
+      message: issue.message || '备选池状态口径需要修复。'
+    });
+  }
+}
+
+async function persistManualPipelineProgress(
+  db: any,
+  taskId: number,
+  runId: number,
+  label: string,
+  step: any,
+  result: any
+) {
+  const now = new Date().toISOString();
+  const stepLabel = step?.label || step?.key || '未知步骤';
+  const stepMessage = step?.message ? `：${step.message}` : '';
+  const message = step?.status === 'error'
+    ? `${label}执行中断：停在「${stepLabel}」${stepMessage}`
+    : step?.status === 'success'
+      ? `${label}执行中：已完成「${stepLabel}」${stepMessage}`
+      : step?.status === 'skipped'
+        ? `${label}执行中：已跳过「${stepLabel}」${stepMessage}`
+        : `${label}执行中：正在执行「${stepLabel}」`;
+
+  await db.run(
+    `UPDATE task_center_runs
+     SET message = ?, result_json = ?
+     WHERE id = ? AND status = 'running'`,
+    [message, JSON.stringify(compactFinancePipelineResultForStorage(result)), runId]
+  );
+  await db.run(
+    `UPDATE task_center_tasks
+     SET last_status = 'running',
+         last_message = ?,
+         last_run_at = ?,
+         updated_at = ?
+     WHERE id = ?`,
+    [message, now, now, taskId]
+  );
+}
+
 function extractDailyChanges(compactResult: any) {
   const steps = toArray(compactResult?.steps);
   const findStep = (key: string) => steps.find((step: any) => step.key === key);
   const dailyPrices = findStep('daily_prices');
   const candidateScan = findStep('candidate_scan');
   const entryTriggerScan = findStep('entry_trigger_scan');
+  const entryObservationPreflight = findStep('entry_observation_preflight_settlement');
+  const entryObservationSettlement = findStep('entry_observation_settlement');
   const activePlanSuggestions = findStep('active_plan_suggestions');
+  const mergeMetrics = (...metricItems: Array<Record<string, any> | undefined>) => {
+    const merged: Record<string, any> = {};
+    metricItems.forEach((metrics) => {
+      Object.entries(metrics || {}).forEach(([key, value]) => {
+        if (typeof value === 'number') {
+          merged[key] = Number(merged[key] || 0) + value;
+        } else if (value !== null && value !== undefined && value !== '') {
+          merged[key] = merged[key] || value;
+        }
+      });
+    });
+    return merged;
+  };
+  const settlementDetails = [
+    ...toArray(entryObservationPreflight?.details).map((item: any) => ({ ...item, source_step: '预沉淀' })),
+    ...toArray(entryObservationSettlement?.details).map((item: any) => ({ ...item, source_step: '沉淀收尾' }))
+  ];
+  const settlementMessage = [entryObservationPreflight?.message, entryObservationSettlement?.message]
+    .filter(Boolean)
+    .join('；');
 
   return {
     data_update: {
@@ -748,11 +1445,334 @@ function extractDailyChanges(compactResult: any) {
       items: toArray(entryTriggerScan?.details).slice(0, 8),
       summary: entryTriggerScan?.message || '暂无入场触发扫描记录'
     },
+    settlement_changes: {
+      label: '自动沉淀/归档',
+      metrics: mergeMetrics(entryObservationPreflight?.metrics, entryObservationSettlement?.metrics),
+      items: settlementDetails.slice(0, 8),
+      summary: settlementMessage || '暂无入场观察沉淀记录'
+    },
     plan_actions: {
       label: '计划动作建议',
       metrics: activePlanSuggestions?.metrics || {},
       items: toArray(activePlanSuggestions?.details).slice(0, 8),
       summary: activePlanSuggestions?.message || '暂无计划动作建议记录'
+    }
+  };
+}
+
+function getPipelineDailyChangesCacheKey(run: any) {
+  return [
+    run?.id || '',
+    run?.status || '',
+    run?.message || '',
+    run?.started_at || '',
+    run?.finished_at || '',
+    run?.result_json_size || 0
+  ].join('|');
+}
+
+async function buildWorkflowDailyChanges(db: any, latestPipelineRun: any) {
+  if (!latestPipelineRun) return null;
+
+  const cacheKey = getPipelineDailyChangesCacheKey(latestPipelineRun);
+  if (workflowDailyChangesCache?.key === cacheKey && workflowDailyChangesCache.expiresAt > Date.now()) {
+    return workflowDailyChangesCache.data;
+  }
+
+  const resultRow = await db.get(
+    `SELECT result_json
+     FROM task_center_runs
+     WHERE id = ?`,
+    [latestPipelineRun.id]
+  );
+  const latestPipelineResult = resultRow?.result_json ? compactPipelineResult(resultRow.result_json) : null;
+  const dailyChanges = latestPipelineResult ? {
+    run_id: latestPipelineRun.id,
+    status: latestPipelineRun.status,
+    message: latestPipelineRun.message,
+    started_at: latestPipelineRun.started_at,
+    finished_at: latestPipelineRun.finished_at,
+    duration_seconds: getDurationSeconds(latestPipelineRun.started_at, latestPipelineRun.finished_at),
+    ...extractDailyChanges(latestPipelineResult)
+  } : null;
+
+  workflowDailyChangesCache = {
+    key: cacheKey,
+    expiresAt: latestPipelineRun.status === 'running'
+      ? Date.now() + WORKFLOW_SUMMARY_CACHE_TTL_MS
+      : Number.POSITIVE_INFINITY,
+    data: dailyChanges
+  };
+
+  return dailyChanges;
+}
+
+async function buildWorkflowDailyPriceHealth(db: any) {
+  if (workflowDailyPriceHealthCache && workflowDailyPriceHealthCache.expiresAt > Date.now()) {
+    return workflowDailyPriceHealthCache.data;
+  }
+
+  const targetTradeRow = await db.get(
+    `SELECT MAX(trade_date) AS trade_date
+     FROM financial_daily_prices
+     WHERE source = 'tushare'
+       AND asset_type IN ('stock', 'etf', 'index')
+       AND close IS NOT NULL
+       AND close > 0`
+  );
+  const targetTradeDate = targetTradeRow?.trade_date || null;
+  if (!targetTradeDate) {
+    const data = {
+      target_trade_date: null,
+      covered_trade_date: null,
+      raw_latest_trade_date: null,
+      rows: 0,
+      coverage: null
+    };
+    workflowDailyPriceHealthCache = {
+      expiresAt: Date.now() + 5 * 1000,
+      data
+    };
+    return data;
+  }
+
+  const previousRow = await db.get(
+    `SELECT MAX(trade_date) AS trade_date
+     FROM financial_daily_prices
+     WHERE source = 'tushare'
+       AND asset_type IN ('stock', 'etf')
+       AND trade_date < ?`,
+    [targetTradeDate]
+  );
+  const previousTradeDate = previousRow?.trade_date || null;
+
+  const allRowsForDate = async (tradeDate: string) => {
+    const row = await db.get(
+      `SELECT COUNT(p.symbol) AS count
+       FROM financial_daily_prices p
+       WHERE p.source = 'tushare'
+         AND p.asset_type IN ('stock', 'etf', 'index')
+         AND p.trade_date = ?
+         AND p.close IS NOT NULL
+         AND p.close > 0`,
+      [tradeDate]
+    );
+    return Number(row?.count || 0);
+  };
+  const enabledRowsForDate = async (tradeDate: string) => {
+    const row = await db.get(
+      `SELECT COUNT(DISTINCT p.symbol || '|' || p.asset_type || '|' || p.source) AS count
+       FROM financial_daily_prices p
+       JOIN financial_asset_universe u
+         ON u.symbol = p.symbol
+        AND u.asset_type = p.asset_type
+        AND u.source = p.source
+       WHERE p.source = 'tushare'
+         AND p.asset_type IN ('stock', 'etf')
+         AND p.trade_date = ?
+         AND u.enabled = 1`,
+      [tradeDate]
+    );
+    return Number(row?.count || 0);
+  };
+
+  const [
+    rawLatestRows,
+    currentEnabledCount,
+    previousEnabledCount
+  ] = await Promise.all([
+    allRowsForDate(targetTradeDate),
+    enabledRowsForDate(targetTradeDate),
+    previousTradeDate ? enabledRowsForDate(previousTradeDate) : Promise.resolve(0)
+  ]);
+  const minExpected = previousEnabledCount > 0 ? Math.floor(previousEnabledCount * 0.92) : 0;
+  const coverageStatus = previousEnabledCount > 0 && currentEnabledCount < minExpected ? 'incomplete' : 'ok';
+  const coveredTradeDate = coverageStatus === 'incomplete'
+    ? await getLatestCoveredTradeDate(db)
+    : targetTradeDate;
+  const data = {
+    target_trade_date: targetTradeDate,
+    covered_trade_date: coveredTradeDate,
+    raw_latest_trade_date: targetTradeDate,
+    rows: rawLatestRows,
+    coverage: previousTradeDate ? {
+      current_count: currentEnabledCount,
+      previous_trade_date: previousTradeDate,
+      previous_count: previousEnabledCount,
+      min_expected: minExpected,
+      status: coverageStatus
+    } : null
+  };
+
+  workflowDailyPriceHealthCache = {
+    expiresAt: Date.now() + 5 * 1000,
+    data
+  };
+  return data;
+}
+
+async function buildWorkflowLatestEntryObservationRows(db: any) {
+  if (workflowEntryObservationRowsCache && workflowEntryObservationRowsCache.expiresAt > Date.now()) {
+    return workflowEntryObservationRowsCache.data;
+  }
+
+  const rows = await db.all(
+    `${latestEntryObservationCte}
+     SELECT id, symbol, name, asset_type, source, observation_status,
+            trigger_score, trigger_reason, structure_score, trend_phase_code,
+            close_price, invalidation_line, note, updated_at
+     FROM latest_entry_observations`
+  );
+
+  workflowEntryObservationRowsCache = {
+    expiresAt: Date.now() + 5 * 1000,
+    data: rows
+  };
+  return rows;
+}
+
+async function buildWorkflowLightSummary(db: any) {
+  const [
+    market,
+    dailyPriceHealth,
+    candidateCountsRow,
+    tradePlansActiveRow,
+    latestEntryObservationRows,
+    activeTradePlanKeyRows,
+    latestCandidates,
+    waitConfirmationCandidateRows,
+    candidateFlowIntegrity
+  ] = await Promise.all([
+    getFreshMarketRegime(db, { source: 'tushare' }),
+    buildWorkflowDailyPriceHealth(db),
+    db.get(
+      `SELECT
+         SUM(CASE WHEN pool_status = 'active' AND COALESCE(review_status, 'unreviewed') <> 'rejected' THEN 1 ELSE 0 END) AS candidate_active,
+         SUM(CASE WHEN pool_status = 'active' AND COALESCE(review_status, 'unreviewed') = 'unreviewed' THEN 1 ELSE 0 END) AS review_unreviewed,
+         SUM(CASE WHEN pool_status = 'active' AND review_status = 'drafted' THEN 1 ELSE 0 END) AS review_drafted,
+         SUM(CASE WHEN pool_status = 'active' AND review_status = 'trend_blocked' THEN 1 ELSE 0 END) AS trend_blocked,
+         SUM(CASE WHEN pool_status = 'active' AND review_status = 'structure_pending' THEN 1 ELSE 0 END) AS structure_pending,
+         SUM(CASE WHEN pool_status = 'active' AND review_status = 'structure_watch' THEN 1 ELSE 0 END) AS structure_watch,
+         SUM(CASE WHEN pool_status = 'active' AND review_status = 'rejected' THEN 1 ELSE 0 END) AS rejected
+       FROM financial_candidate_pool
+       WHERE asset_type IN ('stock', 'etf')`
+    ),
+    db.get(
+      `SELECT COUNT(*) AS count
+       FROM financial_trade_plans
+       WHERE is_deleted = 0
+         AND status IN ('draft', 'watching', 'paper_tracking', 'active')`
+    ),
+    buildWorkflowLatestEntryObservationRows(db),
+    db.all(
+      `SELECT symbol, asset_type, source
+       FROM financial_trade_plans
+       WHERE is_deleted = 0
+         AND status IN ('draft', 'watching', 'paper_tracking', 'active')`
+    ),
+    db.all(
+      `SELECT id, symbol, name, asset_type, priority_score, review_status, candidate_reason, last_checked_at
+       FROM financial_candidate_pool
+       WHERE pool_status = 'active'
+         AND asset_type IN ('stock', 'etf')
+         AND COALESCE(review_status, 'unreviewed') <> 'rejected'
+       ORDER BY priority_score DESC, last_checked_at DESC
+       LIMIT 6`
+    ),
+    db.all(
+      `SELECT c.id, c.symbol, c.name, c.asset_type, c.source, c.priority_score, c.last_review_at
+       FROM financial_candidate_pool c
+       WHERE c.pool_status = 'active'
+         AND c.asset_type IN ('stock', 'etf')
+         AND c.review_status = 'wait_confirmation'`
+    ),
+    buildCandidateFlowIntegrity(db)
+  ]);
+
+  const rowKey = (row: any) => `${row.symbol || ''}|${row.asset_type || ''}|${row.source || ''}`;
+  const numberValue = (value: any) => Number(value || 0);
+  const rowTime = (value: any) => {
+    const time = value ? new Date(value).getTime() : 0;
+    return Number.isFinite(time) ? time : 0;
+  };
+  const activeTradePlanKeys = new Set(activeTradePlanKeyRows.map(rowKey));
+  const activeEntryObservationKeys = new Set(
+    latestEntryObservationRows
+      .filter((row: any) => ['watching', 'plan_candidate', 'confirmed'].includes(row.observation_status))
+      .map(rowKey)
+  );
+  const planReadyObservationRows = latestEntryObservationRows
+    .filter((row: any) => ['confirmed', 'plan_candidate'].includes(row.observation_status) && !activeTradePlanKeys.has(rowKey(row)));
+  const pendingTriggerRows = waitConfirmationCandidateRows
+    .filter((row: any) => !activeEntryObservationKeys.has(rowKey(row)));
+  const latestObservations = latestEntryObservationRows
+    .slice()
+    .sort((a: any, b: any) => rowTime(b.updated_at) - rowTime(a.updated_at) || numberValue(b.id) - numberValue(a.id))
+    .slice(0, 6)
+    .map((row: any) => ({
+      id: row.id,
+      symbol: row.symbol,
+      name: row.name,
+      asset_type: row.asset_type,
+      observation_status: row.observation_status,
+      trigger_score: row.trigger_score,
+      trend_phase_code: row.trend_phase_code,
+      updated_at: row.updated_at
+    }));
+  const dailyCoverage = dailyPriceHealth.coverage;
+  const targetTradeDate = dailyPriceHealth.target_trade_date || market?.target_trade_date || null;
+  const coveredTradeDate = dailyPriceHealth.covered_trade_date || null;
+  const workflowWarnings = [];
+  if (market?.stale) {
+    workflowWarnings.push({
+      code: 'market_gate_stale',
+      level: 'block_flow',
+      message: market.freshness_reason
+    });
+  }
+  if (dailyCoverage?.status === 'incomplete') {
+    workflowWarnings.push({
+      code: 'daily_prices_incomplete',
+      level: 'block_flow',
+      message: `最新日线 ${targetTradeDate || '--'} 覆盖不足，当前流程应锁定最近完整交易日 ${coveredTradeDate || '--'}，不要用半截行情推进备选池、漏斗和入场触发。`
+    });
+  }
+  appendCandidateFlowWarnings(workflowWarnings, candidateFlowIntegrity);
+
+  return {
+    market,
+    counts: {
+      candidate_active: numberValue(candidateCountsRow?.candidate_active),
+      review_unreviewed: numberValue(candidateCountsRow?.review_unreviewed),
+      review_drafted: numberValue(candidateCountsRow?.review_drafted),
+      trend_blocked: numberValue(candidateCountsRow?.trend_blocked),
+      structure_pending: numberValue(candidateCountsRow?.structure_pending),
+      structure_watch: numberValue(candidateCountsRow?.structure_watch),
+      wait_confirmation: pendingTriggerRows.length,
+      entry_observations: latestEntryObservationRows.filter((row: any) => ['watching', 'plan_candidate'].includes(row.observation_status)).length,
+      plan_ready: planReadyObservationRows.length,
+      invalidated: numberValue(candidateCountsRow?.rejected) + latestEntryObservationRows.filter((row: any) => row.observation_status === 'invalidated').length,
+      trade_plans_active: numberValue(tradePlansActiveRow?.count)
+    },
+    latest_candidates: latestCandidates,
+    latest_observations: latestObservations,
+    data_freshness: {
+      target_trade_date: targetTradeDate,
+      effective_trade_date: coveredTradeDate || targetTradeDate,
+      raw_latest_trade_date: targetTradeDate,
+      workflow_data_mode: dailyCoverage?.status === 'incomplete' ? 'locked_to_latest_covered_trade_date' : 'latest_trade_date',
+      workflow_warnings: workflowWarnings,
+      queue_integrity: candidateFlowIntegrity,
+      sources: [{
+        key: 'daily_prices',
+        label: 'A股/ETF日线',
+        latest_trade_date: targetTradeDate,
+        target_trade_date: targetTradeDate,
+        lag_days: 0,
+        status: dailyCoverage?.status === 'incomplete' ? 'incomplete' : targetTradeDate ? 'fresh' : 'missing',
+        rows: Number(dailyPriceHealth.rows || 0),
+        ...(dailyCoverage ? { coverage: dailyCoverage } : {})
+      }]
     }
   };
 }
@@ -840,198 +1860,266 @@ function buildRiskBoardObservationItem(row: any, sourceType: 'plan_ready' | 'ent
 router.get('/workflow-summary', async (_req: Request, res: Response) => {
   try {
     const db = await getDb();
-    const scalar = async (sql: string, params: any[] = []) => {
-      const row = await db.get(sql, params);
-      return Number(row?.count || 0);
-    };
+    const dailyPriceHealth = await buildWorkflowDailyPriceHealth(db);
+    const coveredTradeDate = dailyPriceHealth.covered_trade_date;
 
     const latestMarket = await db.get(
       `SELECT symbol, name, trade_date, close, market_regime, entry_permission, entry_reason, distance_to_ma60
        FROM financial_market_regime
        WHERE symbol = '000300'
+         ${coveredTradeDate ? 'AND trade_date <= ?' : ''}
        ORDER BY trade_date DESC, id DESC
-       LIMIT 1`
+       LIMIT 1`,
+      coveredTradeDate ? [coveredTradeDate] : []
     );
 
+    const [
+      candidateCountsRow,
+      tradePlansActiveRow,
+      latestEntryObservationRows,
+      activeTradePlanKeyRows,
+      activePlanReadyCandidateRows
+    ] = await Promise.all([
+      db.get(
+        `SELECT
+           SUM(CASE WHEN pool_status = 'active' AND COALESCE(review_status, 'unreviewed') <> 'rejected' THEN 1 ELSE 0 END) AS candidate_active,
+           SUM(CASE WHEN pool_status = 'active' AND COALESCE(review_status, 'unreviewed') = 'unreviewed' THEN 1 ELSE 0 END) AS review_unreviewed,
+           SUM(CASE WHEN pool_status = 'active' AND review_status = 'drafted' THEN 1 ELSE 0 END) AS review_drafted,
+           SUM(CASE WHEN pool_status = 'active' AND review_status = 'trend_blocked' THEN 1 ELSE 0 END) AS trend_blocked,
+           SUM(CASE WHEN pool_status = 'active' AND review_status = 'structure_pending' THEN 1 ELSE 0 END) AS structure_pending,
+           SUM(CASE WHEN pool_status = 'active' AND review_status = 'structure_watch' THEN 1 ELSE 0 END) AS structure_watch,
+           SUM(CASE WHEN pool_status = 'active' AND review_status = 'rejected' THEN 1 ELSE 0 END) AS rejected
+         FROM financial_candidate_pool
+         WHERE asset_type IN ('stock', 'etf')`
+      ),
+      db.get(
+        `SELECT COUNT(*) AS count
+         FROM financial_trade_plans
+         WHERE is_deleted = 0
+           AND status IN ('draft', 'watching', 'paper_tracking', 'active')`
+      ),
+      buildWorkflowLatestEntryObservationRows(db),
+      db.all(
+        `SELECT symbol, asset_type, source
+         FROM financial_trade_plans
+         WHERE is_deleted = 0
+           AND status IN ('draft', 'watching', 'paper_tracking', 'active')`
+      ),
+      db.all(
+        `SELECT symbol, asset_type, source
+         FROM financial_candidate_pool
+         WHERE pool_status = 'active'
+           AND asset_type IN ('stock', 'etf')
+           AND review_status = 'plan_ready'`
+      )
+    ]);
+    const rowKey = (row: any) => `${row.symbol || ''}|${row.asset_type || ''}|${row.source || ''}`;
+    const activeTradePlanKeys = new Set(activeTradePlanKeyRows.map(rowKey));
+    const activePlanReadyCandidateKeys = new Set(activePlanReadyCandidateRows.map(rowKey));
+    const activeEntryObservationKeys = new Set(
+      latestEntryObservationRows
+        .filter((row: any) => ['watching', 'plan_candidate', 'confirmed'].includes(row.observation_status))
+        .map(rowKey)
+    );
+    const planReadyObservationRows = latestEntryObservationRows
+      .filter((row: any) => ['confirmed', 'plan_candidate'].includes(row.observation_status) && !activeTradePlanKeys.has(rowKey(row)));
+    const waitConfirmationObservationBlockers = activeEntryObservationKeys;
     const counts = {
-      candidate_active: await scalar(`SELECT COUNT(*) as count FROM financial_candidate_pool WHERE pool_status = 'active' AND asset_type IN ('stock', 'etf')`),
-      review_unreviewed: await scalar(`SELECT COUNT(*) as count FROM financial_candidate_pool WHERE pool_status = 'active' AND asset_type IN ('stock', 'etf') AND COALESCE(review_status, 'unreviewed') = 'unreviewed'`),
-      review_drafted: await scalar(`SELECT COUNT(*) as count FROM financial_candidate_pool WHERE pool_status = 'active' AND asset_type IN ('stock', 'etf') AND review_status = 'drafted'`),
-      trend_blocked: await scalar(`SELECT COUNT(*) as count FROM financial_candidate_pool WHERE pool_status = 'active' AND asset_type IN ('stock', 'etf') AND review_status = 'trend_blocked'`),
-      structure_pending: await scalar(`SELECT COUNT(*) as count FROM financial_candidate_pool WHERE pool_status = 'active' AND asset_type IN ('stock', 'etf') AND review_status = 'structure_pending'`),
-      structure_watch: await scalar(`SELECT COUNT(*) as count FROM financial_candidate_pool WHERE pool_status = 'active' AND asset_type IN ('stock', 'etf') AND review_status = 'structure_watch'`),
-      wait_confirmation: await scalar(`
-        SELECT COUNT(*) as count
-        FROM financial_candidate_pool c
-        WHERE c.pool_status = 'active'
-          AND c.asset_type IN ('stock', 'etf')
-          AND c.review_status = 'wait_confirmation'
-          AND NOT EXISTS (
-            SELECT 1
-            FROM financial_entry_trigger_observations o
-            WHERE o.symbol = c.symbol
-              AND o.asset_type = c.asset_type
-              AND o.source = c.source
-              AND o.observation_status IN ('watching', 'plan_candidate', 'confirmed')
-          )
-      `),
-      entry_observations: await scalar(`SELECT COUNT(*) as count FROM financial_entry_trigger_observations WHERE observation_status IN ('watching', 'plan_candidate')`),
-      plan_ready: await scalar(`
-        SELECT COUNT(*) as count
-        FROM financial_entry_trigger_observations o
-        WHERE o.observation_status = 'confirmed'
-          AND NOT EXISTS (
-            SELECT 1
-            FROM financial_trade_plans p
-            WHERE p.symbol = o.symbol
-              AND p.asset_type = o.asset_type
-              AND p.source = o.source
-              AND p.is_deleted = 0
-              AND p.status IN ('draft', 'watching', 'active')
-          )
-      `),
-      invalidated: await scalar(`
-        SELECT
-          (SELECT COUNT(*) FROM financial_candidate_pool WHERE asset_type IN ('stock', 'etf') AND review_status = 'rejected') +
-          (SELECT COUNT(*) FROM financial_entry_trigger_observations WHERE observation_status = 'invalidated') as count
-      `),
-      trade_plans_active: await scalar(`SELECT COUNT(*) as count FROM financial_trade_plans WHERE is_deleted = 0 AND status IN ('draft', 'watching', 'active')`),
+      candidate_active: Number(candidateCountsRow?.candidate_active || 0),
+      review_unreviewed: Number(candidateCountsRow?.review_unreviewed || 0),
+      review_drafted: Number(candidateCountsRow?.review_drafted || 0),
+      trend_blocked: Number(candidateCountsRow?.trend_blocked || 0),
+      structure_pending: Number(candidateCountsRow?.structure_pending || 0),
+      structure_watch: Number(candidateCountsRow?.structure_watch || 0),
+      wait_confirmation: 0,
+      entry_observations: latestEntryObservationRows.filter((row: any) => ['watching', 'plan_candidate'].includes(row.observation_status)).length,
+      plan_ready: planReadyObservationRows.length,
+      invalidated: Number(candidateCountsRow?.rejected || 0) + latestEntryObservationRows.filter((row: any) => row.observation_status === 'invalidated').length,
+      trade_plans_active: Number(tradePlansActiveRow?.count || 0),
     };
 
-    const latestCandidates = await db.all(
-      `SELECT id, symbol, name, asset_type, priority_score, review_status, candidate_reason, last_checked_at
-       FROM financial_candidate_pool
-       WHERE pool_status = 'active'
-         AND asset_type IN ('stock', 'etf')
-       ORDER BY priority_score DESC, last_checked_at DESC
-       LIMIT 6`
-    );
-
-    const latestObservations = await db.all(
-      `SELECT id, symbol, name, asset_type, observation_status, trigger_score, trend_phase_code, updated_at
-       FROM financial_entry_trigger_observations
-       ORDER BY updated_at DESC, id DESC
-       LIMIT 6`
-    );
-
-    const highPrioritySuggestions = await db.all(
-      `SELECT s.id, s.symbol, p.name, p.asset_type, s.action_label, s.action_reason, s.priority,
-              s.trigger_score, s.trend_phase_code, s.close_price, s.invalidation_line, s.suggestion_date
-       FROM financial_action_suggestions s
-       JOIN financial_trade_plans p ON p.id = s.plan_id
-       WHERE p.is_deleted = 0
-         AND s.id IN (
+    const [
+      latestCandidates,
+      highPrioritySuggestions,
+      waitConfirmationCandidateRows,
+      rejectedCandidateItems,
+      activePlanRows
+    ] = await Promise.all([
+      db.all(
+        `SELECT id, symbol, name, asset_type, priority_score, review_status, candidate_reason, last_checked_at
+         FROM financial_candidate_pool
+         WHERE pool_status = 'active'
+           AND asset_type IN ('stock', 'etf')
+           AND COALESCE(review_status, 'unreviewed') <> 'rejected'
+         ORDER BY priority_score DESC, last_checked_at DESC
+         LIMIT 6`
+      ),
+      db.all(
+        `SELECT s.id, s.symbol, p.name, p.asset_type, s.action_label, s.action_reason, s.priority,
+                s.trigger_score, s.trend_phase_code, s.close_price, s.invalidation_line, s.suggestion_date
+         FROM financial_action_suggestions s
+         JOIN financial_trade_plans p ON p.id = s.plan_id
+         WHERE p.is_deleted = 0
+           AND s.id IN (
+             SELECT MAX(id)
+             FROM financial_action_suggestions
+             GROUP BY plan_id
+           )
+         ORDER BY
+           CASE s.priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END,
+           s.suggestion_date DESC,
+           s.id DESC
+         LIMIT 6`
+      ),
+      db.all(
+        `SELECT c.id, c.symbol, c.name, c.asset_type, c.source, c.priority_score, c.candidate_reason, c.last_review_at
+         FROM financial_candidate_pool c
+         WHERE c.pool_status = 'active'
+           AND c.asset_type IN ('stock', 'etf')
+           AND c.review_status = 'wait_confirmation'`
+      ),
+      db.all(
+        `SELECT id, symbol, name, asset_type, 'candidate' as source_type, forbidden_reason as reason, updated_at
+         FROM financial_candidate_pool
+         WHERE pool_status = 'active'
+           AND asset_type IN ('stock', 'etf')
+           AND review_status = 'rejected'
+         ORDER BY updated_at DESC
+         LIMIT 12`
+      ),
+      db.all(
+        `SELECT p.id as plan_id, p.symbol, p.name, p.asset_type, p.status, p.is_bought,
+                p.trigger_reason, p.structure_score, p.trend_phase_code, p.close_price, p.invalidation_line,
+                p.updated_at,
+                s.id as suggestion_id, s.action_code, s.action_label, s.action_reason, s.priority,
+                s.trigger_score, s.trend_phase_code as suggestion_trend_phase_code,
+                s.close_price as latest_close, s.invalidation_line as latest_invalidation_line,
+                s.base_position_amount, s.tactical_position_amount, s.observation_position_amount,
+                s.suggestion_date
+         FROM financial_trade_plans p
+         LEFT JOIN financial_action_suggestions s ON s.id = (
            SELECT MAX(id)
            FROM financial_action_suggestions
-           GROUP BY plan_id
+           WHERE plan_id = p.id
          )
-       ORDER BY
-         CASE s.priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END,
-         s.suggestion_date DESC,
-         s.id DESC
-       LIMIT 6`
-    );
+         WHERE p.is_deleted = 0
+           AND p.status IN ('draft', 'watching', 'paper_tracking', 'active')
+         ORDER BY
+           CASE COALESCE(s.priority, 'normal') WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END,
+           p.is_bought DESC,
+           COALESCE(s.suggestion_date, p.updated_at) DESC
+         LIMIT 12`
+      )
+    ]);
 
-    const planReadyItems = await db.all(
-      `SELECT id, symbol, name, asset_type, trigger_score, trigger_reason, structure_score,
-              trend_phase_code, close_price, invalidation_line, updated_at
-       FROM financial_entry_trigger_observations o
-       WHERE o.observation_status = 'confirmed'
-         AND NOT EXISTS (
-           SELECT 1
-           FROM financial_trade_plans p
-           WHERE p.symbol = o.symbol
-             AND p.asset_type = o.asset_type
-             AND p.source = o.source
-             AND p.is_deleted = 0
-             AND p.status IN ('draft', 'watching', 'active')
-         )
-       ORDER BY
-         CASE
-           WHEN trend_phase_code = 'SLOW_GRIND_UP' AND trigger_score >= 75 AND structure_score >= 75
-                AND close_price > 0 AND invalidation_line > 0
-                AND ((close_price - invalidation_line) / close_price) <= 0.04 THEN 0
-           WHEN trigger_score >= 80 AND structure_score >= 75 THEN 1
-           WHEN trend_phase_code = 'BREAKOUT' AND trigger_score >= 70 AND structure_score >= 75 THEN 2
-           WHEN trend_phase_code = 'SLOW_GRIND_UP' THEN 3
-           WHEN trend_phase_code = 'BREAKOUT' THEN 4
-           WHEN trend_phase_code = 'RECOVERY' THEN 5
-           ELSE 9
-         END,
-         trigger_score DESC,
-         CASE
-           WHEN close_price > 0 AND invalidation_line > 0 THEN ((close_price - invalidation_line) / close_price)
-           ELSE 9
-         END ASC,
-         updated_at DESC,
-         id DESC
-       LIMIT 6`
-    );
+    const numberValue = (value: any) => Number(value || 0);
+    const rowTime = (value: any) => {
+      const time = value ? new Date(value).getTime() : 0;
+      return Number.isFinite(time) ? time : 0;
+    };
+    const compareUpdatedDesc = (a: any, b: any) => rowTime(b.updated_at) - rowTime(a.updated_at)
+      || numberValue(b.id) - numberValue(a.id);
+    const pickLatestObservation = (row: any) => ({
+      id: row.id,
+      symbol: row.symbol,
+      name: row.name,
+      asset_type: row.asset_type,
+      observation_status: row.observation_status,
+      trigger_score: row.trigger_score,
+      trend_phase_code: row.trend_phase_code,
+      updated_at: row.updated_at
+    });
+    const pickPlanReadyObservation = (row: any) => ({
+      id: row.id,
+      symbol: row.symbol,
+      name: row.name,
+      asset_type: row.asset_type,
+      trigger_score: row.trigger_score,
+      trigger_reason: row.trigger_reason,
+      structure_score: row.structure_score,
+      trend_phase_code: row.trend_phase_code,
+      close_price: row.close_price,
+      invalidation_line: row.invalidation_line,
+      updated_at: row.updated_at
+    });
+    const pickWatchObservation = (row: any) => ({
+      id: row.id,
+      symbol: row.symbol,
+      name: row.name,
+      asset_type: row.asset_type,
+      observation_status: row.observation_status,
+      trigger_score: row.trigger_score,
+      trigger_reason: row.trigger_reason,
+      trend_phase_code: row.trend_phase_code,
+      updated_at: row.updated_at
+    });
+    const latestObservations = latestEntryObservationRows
+      .slice()
+      .sort(compareUpdatedDesc)
+      .slice(0, 6)
+      .map(pickLatestObservation);
+    const planReadyRank = (row: any) => {
+      const triggerScore = numberValue(row.trigger_score);
+      const structureScore = numberValue(row.structure_score);
+      const close = numberValue(row.close_price);
+      const invalidationLine = numberValue(row.invalidation_line);
+      const invalidationDistance = close > 0 && invalidationLine > 0
+        ? (close - invalidationLine) / close
+        : 9;
+      if (row.trend_phase_code === 'SLOW_GRIND_UP' && triggerScore >= 75 && structureScore >= 75 && invalidationDistance <= 0.04) return 0;
+      if (triggerScore >= 80 && structureScore >= 75) return 1;
+      if (row.trend_phase_code === 'BREAKOUT' && triggerScore >= 70 && structureScore >= 75) return 2;
+      if (row.trend_phase_code === 'SLOW_GRIND_UP') return 3;
+      if (row.trend_phase_code === 'BREAKOUT') return 4;
+      if (row.trend_phase_code === 'RECOVERY') return 5;
+      return 9;
+    };
+    const planReadyItems = planReadyObservationRows
+      .slice()
+      .sort((a: any, b: any) => {
+        const closeA = numberValue(a.close_price);
+        const invalidationA = numberValue(a.invalidation_line);
+        const distanceA = closeA > 0 && invalidationA > 0 ? (closeA - invalidationA) / closeA : 9;
+        const closeB = numberValue(b.close_price);
+        const invalidationB = numberValue(b.invalidation_line);
+        const distanceB = closeB > 0 && invalidationB > 0 ? (closeB - invalidationB) / closeB : 9;
+        return planReadyRank(a) - planReadyRank(b)
+          || numberValue(b.trigger_score) - numberValue(a.trigger_score)
+          || distanceA - distanceB
+          || compareUpdatedDesc(a, b);
+      })
+      .slice(0, 6)
+      .map(pickPlanReadyObservation);
+    const pendingTriggerRows = waitConfirmationCandidateRows
+      .filter((row: any) => !waitConfirmationObservationBlockers.has(rowKey(row)));
+    counts.wait_confirmation = pendingTriggerRows.length;
+    const pendingTriggerItems = pendingTriggerRows
+      .slice()
+      .sort((a: any, b: any) => numberValue(b.priority_score) - numberValue(a.priority_score)
+        || rowTime(b.last_review_at) - rowTime(a.last_review_at)
+        || numberValue(b.id) - numberValue(a.id))
+      .slice(0, 6);
+    const watchObservationItems = latestEntryObservationRows
+      .filter((row: any) => ['watching', 'plan_candidate'].includes(row.observation_status))
+      .sort((a: any, b: any) => numberValue(b.trigger_score) - numberValue(a.trigger_score) || compareUpdatedDesc(a, b))
+      .slice(0, 6)
+      .map(pickWatchObservation);
+    const invalidatedItems = [
+      ...rejectedCandidateItems,
+      ...latestEntryObservationRows
+        .filter((row: any) => row.observation_status === 'invalidated')
+        .map((row: any) => ({
+          id: row.id,
+          symbol: row.symbol,
+          name: row.name,
+          asset_type: row.asset_type,
+          source_type: 'observation',
+          reason: row.note,
+          updated_at: row.updated_at
+        }))
+    ].sort(compareUpdatedDesc).slice(0, 6);
 
-    const pendingTriggerItems = await db.all(
-      `SELECT c.id, c.symbol, c.name, c.asset_type, c.priority_score, c.candidate_reason, c.last_review_at
-       FROM financial_candidate_pool c
-       WHERE c.pool_status = 'active'
-         AND c.asset_type IN ('stock', 'etf')
-         AND c.review_status = 'wait_confirmation'
-         AND NOT EXISTS (
-           SELECT 1
-           FROM financial_entry_trigger_observations o
-           WHERE o.symbol = c.symbol
-             AND o.asset_type = c.asset_type
-             AND o.source = c.source
-             AND o.observation_status IN ('watching', 'plan_candidate', 'confirmed')
-         )
-       ORDER BY c.priority_score DESC, c.last_review_at DESC, c.id DESC
-       LIMIT 6`
-    );
-
-    const watchObservationItems = await db.all(
-      `SELECT id, symbol, name, asset_type, observation_status, trigger_score, trigger_reason, trend_phase_code, updated_at
-       FROM financial_entry_trigger_observations
-       WHERE observation_status IN ('watching', 'plan_candidate')
-       ORDER BY trigger_score DESC, updated_at DESC, id DESC
-       LIMIT 6`
-    );
-
-    const invalidatedItems = await db.all(
-      `SELECT id, symbol, name, asset_type, 'candidate' as source_type, forbidden_reason as reason, updated_at
-       FROM financial_candidate_pool
-       WHERE asset_type IN ('stock', 'etf')
-         AND review_status = 'rejected'
-       UNION ALL
-       SELECT id, symbol, name, asset_type, 'observation' as source_type, note as reason, updated_at
-       FROM financial_entry_trigger_observations
-       WHERE observation_status = 'invalidated'
-       ORDER BY updated_at DESC
-       LIMIT 6`
-    );
-
-    const activePlanRows = await db.all(
-      `SELECT p.id as plan_id, p.symbol, p.name, p.asset_type, p.status, p.is_bought,
-              p.trigger_reason, p.structure_score, p.trend_phase_code, p.close_price, p.invalidation_line,
-              p.updated_at,
-              s.id as suggestion_id, s.action_code, s.action_label, s.action_reason, s.priority,
-              s.trigger_score, s.trend_phase_code as suggestion_trend_phase_code,
-              s.close_price as latest_close, s.invalidation_line as latest_invalidation_line,
-              s.base_position_amount, s.tactical_position_amount, s.observation_position_amount,
-              s.suggestion_date
-       FROM financial_trade_plans p
-       LEFT JOIN financial_action_suggestions s ON s.id = (
-         SELECT MAX(id)
-         FROM financial_action_suggestions
-         WHERE plan_id = p.id
-       )
-       WHERE p.is_deleted = 0
-         AND p.status IN ('draft', 'watching', 'paper_tracking', 'active')
-       ORDER BY
-         CASE COALESCE(s.priority, 'normal') WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END,
-         p.is_bought DESC,
-         COALESCE(s.suggestion_date, p.updated_at) DESC
-       LIMIT 12`
-    );
-
-    const todayFocus: TodayActionItem[] = [
+	    const todayFocus: TodayActionItem[] = [
       ...highPrioritySuggestions
         .filter((item: any) => item.priority === 'high')
         .map((item: any) => ({
@@ -1052,31 +2140,45 @@ router.get('/workflow-summary', async (_req: Request, res: Response) => {
         asset_type: item.asset_type,
         label: '待生成计划',
         detail: item.trigger_reason,
-        score: item.trigger_score,
-        priority: 'normal',
-        path: '/finance/entry-trigger'
-      })),
+	          score: item.trigger_score,
+	          priority: 'normal',
+	          path: '/finance/entry-trigger/plan-ready'
+	        })),
       ...pendingTriggerItems.slice(0, 3).map((item: any) => ({
         id: item.id,
         symbol: item.symbol,
         name: item.name,
         asset_type: item.asset_type,
         label: '待触发扫描',
-        detail: item.candidate_reason,
-        score: item.priority_score,
-        priority: 'normal',
-        path: '/finance/entry-trigger'
-      }))
-    ].slice(0, 8);
-
-    const todaySummary = {
-      focus_items: todayFocus,
-      plan_ready: planReadyItems,
-      pending_triggers: pendingTriggerItems,
-      entry_watch: watchObservationItems,
-      risk_alerts: highPrioritySuggestions,
-      invalidated: invalidatedItems
-    };
+	          detail: item.candidate_reason,
+	          score: item.priority_score,
+	          priority: 'normal',
+	          path: '/finance/entry-trigger/pending'
+	        }))
+	    ].slice(0, 8);
+	
+	    const todaySummary = {
+	      focus_items: todayFocus,
+	      plan_ready: planReadyItems.map((item: any) => ({
+	        ...item,
+	        path: '/finance/entry-trigger/plan-ready'
+	      })),
+	      pending_triggers: pendingTriggerItems.map((item: any) => ({
+	        ...item,
+	        path: '/finance/entry-trigger/pending'
+	      })),
+	      entry_watch: watchObservationItems.map((item: any) => ({
+	        ...item,
+	        path: '/finance/entry-trigger/observations'
+	      })),
+	      risk_alerts: highPrioritySuggestions,
+	      invalidated: invalidatedItems.map((item: any) => ({
+	        ...item,
+	        path: item.source_type === 'candidate'
+	          ? `/finance/candidate-pool/${item.asset_type === 'etf' ? 'etf' : 'stock'}`
+	          : '/finance/entry-trigger/observations'
+	      }))
+	    };
 
     const riskBoardItems = [
       ...activePlanRows.map(buildRiskBoardPlanItem),
@@ -1105,23 +2207,296 @@ router.get('/workflow-summary', async (_req: Request, res: Response) => {
     };
 
     const latestPipelineRun = await db.get(
-      `SELECT id, status, message, result_json, started_at, finished_at
+      `SELECT id, status, message, started_at, finished_at, LENGTH(result_json) AS result_json_size
        FROM task_center_runs
        WHERE task_key = ?
        ORDER BY started_at DESC, id DESC
        LIMIT 1`,
       [FINANCE_PIPELINE_TASK_KEY]
     );
-    const latestPipelineResult = latestPipelineRun?.result_json ? compactPipelineResult(latestPipelineRun.result_json) : null;
-    const dailyChanges = latestPipelineResult ? {
-      run_id: latestPipelineRun.id,
-      status: latestPipelineRun.status,
-      message: latestPipelineRun.message,
-      started_at: latestPipelineRun.started_at,
-      finished_at: latestPipelineRun.finished_at,
-      duration_seconds: getDurationSeconds(latestPipelineRun.started_at, latestPipelineRun.finished_at),
-      ...extractDailyChanges(latestPipelineResult)
-    } : null;
+    const dailyChanges = await buildWorkflowDailyChanges(db, latestPipelineRun);
+
+    const targetTradeDate = dailyPriceHealth.target_trade_date;
+    const lagDays = (tradeDate?: string | null) => {
+      if (!targetTradeDate || !tradeDate) return null;
+      const start = new Date(`${tradeDate}T00:00:00Z`).getTime();
+      const end = new Date(`${targetTradeDate}T00:00:00Z`).getTime();
+      if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
+      return Math.max(0, Math.round((end - start) / (24 * 60 * 60 * 1000)));
+    };
+    const freshnessStatus = (tradeDate?: string | null) => {
+      const lag = lagDays(tradeDate);
+      if (!tradeDate) return 'missing';
+      if (lag === null || lag <= 0) return 'fresh';
+      if (lag <= 2) return 'lagging';
+      return 'stale';
+    };
+	    const sourceFreshness = async (key: string, label: string, sql: string, params: any[] = [], extra: Record<string, any> = {}) => {
+	      const row = await db.get(sql, params);
+	      const tradeDate = row?.trade_date || null;
+	      return {
+	        key,
+        label,
+        latest_trade_date: tradeDate,
+        target_trade_date: targetTradeDate,
+        lag_days: lagDays(tradeDate),
+        status: extra.status || freshnessStatus(tradeDate),
+        rows: Number(row?.rows || row?.count || 0),
+	        ...extra
+	      };
+	    };
+	    const buildMetalWorkflowHealth = async () => {
+	      const cacheKey = targetTradeDate || 'no-target-date';
+	      const cachedMetalsHealth = workflowMetalsHealthCache;
+	      if (cachedMetalsHealth !== null && cachedMetalsHealth.key === cacheKey && cachedMetalsHealth.expiresAt > Date.now()) {
+	        return cachedMetalsHealth.data;
+	      }
+	      const assets = [
+	        { symbol: 'XAUUSD', label: '黄金主锚' },
+	        { symbol: 'SGE_AGTD', label: '白银弹性' }
+	      ];
+	      const items = await Promise.all(assets.map(async (item) => {
+	        const asset = getMetalAsset(item.symbol);
+	        if (!asset) {
+	          return {
+	            symbol: item.symbol,
+	            label: item.label,
+	            status: 'missing',
+	            health_level: 'data_gap',
+	            reason: '贵金属资产配置不存在，无法纳入金融主流程健康检查。'
+	          };
+	        }
+	        const prices = filterMetalTradingPrices(await db.all(
+	          `SELECT trade_date, open, high, low, close, volume, amount
+	           FROM (
+	             SELECT trade_date, open, high, low, close, volume, amount
+	             FROM financial_daily_prices
+	             WHERE symbol = ?
+	               AND source = ?
+	               AND strftime('%w', trade_date) NOT IN ('0', '6')
+	             ORDER BY trade_date DESC
+	             LIMIT 1260
+	           )
+	           ORDER BY trade_date ASC`,
+	          [item.symbol, asset.source]
+	        ));
+	        if (prices.length === 0) {
+	          return {
+	            symbol: item.symbol,
+	            label: item.label,
+	            source: asset.source,
+	            status: 'missing',
+	            rows: 0,
+	            health_level: 'data_gap',
+	            reason: '暂无贵金属日线，先跑贵金属行情更新。'
+	          };
+	        }
+	        const regime = calculateMetalRegime(prices, asset.source);
+	        const status = prices.length < 120 ? 'incomplete' : freshnessStatus(regime.trade_date);
+	        const isDataGap = status === 'missing' || status === 'stale' || status === 'incomplete';
+	        const isRiskState = ['RISK', 'OVERHEAT', 'UNKNOWN'].includes(regime.state_code);
+	        const isWatchState = ['REBOUND', 'LOW_RANGE', 'REPAIR_WATCH', 'STRUCTURE_FORMING', 'SAFE_CANDIDATE'].includes(regime.state_code);
+	        const healthLevel = isDataGap ? 'data_gap' : isRiskState ? 'risk' : isWatchState ? 'watch' : 'ok';
+	        return {
+	          symbol: item.symbol,
+	          label: item.label,
+	          source: asset.source,
+	          latest_trade_date: regime.trade_date,
+	          target_trade_date: targetTradeDate,
+	          lag_days: lagDays(regime.trade_date),
+	          rows: prices.length,
+	          close: regime.close,
+	          status,
+	          health_level: healthLevel,
+	          state_code: regime.state_code,
+	          state_label: regime.mid_label || regime.state_code,
+	          entry_permission: regime.entry_permission,
+	          entry_reason: regime.entry_reason,
+	          safe_confirmation_days: regime.safe_confirmation_days || 0,
+	          signal_maturity_label: regime.signal_maturity_label || null,
+	          latest_change: regime.latest_change,
+	          reason: isDataGap
+	            ? `贵金属行情口径${status === 'incomplete' ? '样本不足' : '未对齐'}，不能只看 A股/ETF 健康就推进。`
+	            : regime.entry_reason
+	        };
+	      }));
+	      const health = {
+	        summary: {
+	          total: items.length,
+	          ok: items.filter((item: any) => item.health_level === 'ok').length,
+	          watch: items.filter((item: any) => item.health_level === 'watch').length,
+	          risk: items.filter((item: any) => item.health_level === 'risk').length,
+	          data_gap: items.filter((item: any) => item.health_level === 'data_gap').length,
+	          action_required: items.filter((item: any) => item.health_level === 'risk' || item.health_level === 'data_gap').length
+	        },
+	        items
+	      };
+	      workflowMetalsHealthCache = {
+	        key: cacheKey,
+	        expiresAt: Date.now() + 5 * 1000,
+	        data: health
+	      };
+	      return health;
+	    };
+	    const dailyCoverage = dailyPriceHealth.coverage;
+    const activePlanReadyCandidateCount = activePlanReadyCandidateRows.length;
+    const confirmedWithoutActivePlanReadyCandidate = latestEntryObservationRows
+      .filter((row: any) => ['confirmed', 'plan_candidate'].includes(row.observation_status) && !activePlanReadyCandidateKeys.has(rowKey(row)))
+      .length;
+    const metalsHealth = await buildMetalWorkflowHealth();
+    const candidateFlowIntegrity = await buildCandidateFlowIntegrity(db);
+	    const workflowWarnings = [];
+	    if (dailyCoverage?.status === 'incomplete') {
+	      workflowWarnings.push({
+	        code: 'daily_prices_incomplete',
+        level: 'block_flow',
+        message: `最新日线 ${targetTradeDate} 覆盖不足，当前流程应锁定最近完整交易日 ${coveredTradeDate || '--'}，不要用半截行情推进备选池、漏斗和入场触发。`
+      });
+    }
+    if (confirmedWithoutActivePlanReadyCandidate > 0) {
+      workflowWarnings.push({
+        code: 'plan_ready_queue_mismatch',
+        level: 'needs_reconcile',
+	        message: `发现 ${confirmedWithoutActivePlanReadyCandidate} 条已确认入场观察未对应 active 计划准备候选，可能来自历史半推进或人工/流水线错位。`
+	      });
+	    }
+	    if (metalsHealth.summary.action_required > 0) {
+	      const blockedLabels = metalsHealth.items
+	        .filter((item: any) => item.health_level === 'risk' || item.health_level === 'data_gap')
+	        .map((item: any) => `${item.label}${item.state_label ? `/${item.state_label}` : ''}`);
+	      workflowWarnings.push({
+	        code: 'metals_health_attention',
+	        level: 'needs_review',
+	        message: `贵金属主流程有 ${metalsHealth.summary.action_required} 个健康项需要复核：${blockedLabels.join('、')}。`
+	      });
+	    }
+    appendCandidateFlowWarnings(workflowWarnings, candidateFlowIntegrity);
+    const dailyPricesFreshnessItem = {
+      key: 'daily_prices',
+      label: 'A股/ETF日线',
+      latest_trade_date: targetTradeDate,
+      target_trade_date: targetTradeDate,
+      lag_days: lagDays(targetTradeDate),
+      status: dailyCoverage?.status === 'incomplete' ? 'incomplete' : freshnessStatus(targetTradeDate),
+      rows: Number(dailyPriceHealth.rows || 0),
+      ...(dailyCoverage ? { coverage: dailyCoverage } : {})
+    };
+    const sourceFreshnessItems = await Promise.all([
+      sourceFreshness(
+        'market_regime',
+        '市场总闸',
+        `WITH latest AS (
+           SELECT trade_date FROM financial_market_regime ORDER BY trade_date DESC LIMIT 1
+         )
+         SELECT latest.trade_date, COUNT(r.id) AS rows
+         FROM latest
+         LEFT JOIN financial_market_regime r ON r.trade_date = latest.trade_date`
+      ),
+      sourceFreshness(
+        'market_breadth',
+        '市场广度',
+        `WITH latest AS (
+           SELECT trade_date FROM financial_market_breadth_daily ORDER BY trade_date DESC LIMIT 1
+         )
+         SELECT latest.trade_date, COUNT(b.id) AS rows
+         FROM latest
+         LEFT JOIN financial_market_breadth_daily b ON b.trade_date = latest.trade_date`
+      ),
+      sourceFreshness(
+        'industry_strength',
+        '行业强弱',
+        `WITH latest AS (
+           SELECT trade_date FROM financial_sw_industry_daily ORDER BY trade_date DESC LIMIT 1
+         )
+         SELECT latest.trade_date, COUNT(i.id) AS rows
+         FROM latest
+         LEFT JOIN financial_sw_industry_daily i ON i.trade_date = latest.trade_date`
+      ),
+      sourceFreshness(
+        'limit_events',
+        '涨跌停事件',
+        `WITH latest AS (
+           SELECT trade_date FROM financial_limit_events ORDER BY trade_date DESC LIMIT 1
+         )
+         SELECT latest.trade_date, COUNT(e.id) AS rows
+         FROM latest
+         LEFT JOIN financial_limit_events e ON e.trade_date = latest.trade_date`
+      ),
+      sourceFreshness(
+        'basic_metrics',
+        '成交额/基础指标',
+        `WITH latest AS (
+           SELECT trade_date FROM financial_stock_basic_metrics ORDER BY trade_date DESC LIMIT 1
+         )
+         SELECT latest.trade_date, COUNT(m.symbol) AS rows
+         FROM latest
+         LEFT JOIN financial_stock_basic_metrics m ON m.trade_date = latest.trade_date`
+      )
+    ]);
+    const staleSourceItems = sourceFreshnessItems.filter((item: any) => ['missing', 'stale', 'incomplete'].includes(item.status));
+    if (staleSourceItems.length > 0) {
+      workflowWarnings.push({
+        code: 'auxiliary_sources_stale',
+        level: 'needs_review',
+        message: `辅助行情源未对齐 ${targetTradeDate || '--'}：${staleSourceItems.map((item: any) => `${item.label}${item.latest_trade_date ? `停在 ${item.latest_trade_date}` : '暂无数据'}`).join('、')}。涉及广度、行业强弱、涨跌停或基础指标的结论先按滞后处理。`
+      });
+    }
+    const laggingSourceItems = sourceFreshnessItems.filter((item: any) => item.status === 'lagging');
+    if (laggingSourceItems.length > 0) {
+      workflowWarnings.push({
+        code: 'auxiliary_sources_lagging',
+        level: 'needs_sync',
+        message: `辅助行情源有轻微滞后：${laggingSourceItems.map((item: any) => `${item.label}${item.latest_trade_date ? ` ${item.latest_trade_date}` : ''}`).join('、')}。自动补齐前，不把相关分层当成最新收盘结论。`
+      });
+    }
+
+	    const dataFreshness = {
+	      target_trade_date: targetTradeDate,
+	      effective_trade_date: coveredTradeDate || targetTradeDate,
+	      raw_latest_trade_date: targetTradeDate,
+	      workflow_data_mode: dailyCoverage?.status === 'incomplete' ? 'locked_to_latest_covered_trade_date' : 'latest_trade_date',
+	      workflow_warnings: workflowWarnings,
+	      metals_health: metalsHealth,
+	      queue_consistency: {
+	        active_plan_ready_candidates: activePlanReadyCandidateCount,
+	        confirmed_observations_without_active_plan_ready_candidate: confirmedWithoutActivePlanReadyCandidate,
+	        candidate_flow_integrity: candidateFlowIntegrity
+	      },
+      sources: [
+        dailyPricesFreshnessItem,
+        ...sourceFreshnessItems,
+	        ...metalsHealth.items.map((item: any) => ({
+	          key: `metal_${String(item.symbol || '').toLowerCase()}`,
+	          label: item.label || item.symbol,
+	          latest_trade_date: item.latest_trade_date || null,
+	          target_trade_date: targetTradeDate,
+	          lag_days: item.lag_days ?? null,
+	          status: item.status || 'missing',
+	          rows: Number(item.rows || 0),
+	          state_code: item.state_code || null,
+	          state_label: item.state_label || null,
+	          entry_permission: item.entry_permission || null
+	        }))
+	      ],
+      experiment_snapshots: await db.all(
+        `WITH latest AS (
+           SELECT experiment_key, MAX(trade_date) AS latest_trade_date
+           FROM finance_experiment_prediction_snapshots
+           WHERE saved_from = 'latest_prediction_pool'
+             ${coveredTradeDate ? 'AND trade_date <= ?' : ''}
+           GROUP BY experiment_key
+         )
+         SELECT l.experiment_key, l.latest_trade_date, COUNT(s.id) AS rows
+         FROM latest l
+         LEFT JOIN finance_experiment_prediction_snapshots s
+           ON s.experiment_key = l.experiment_key
+          AND s.saved_from = 'latest_prediction_pool'
+         AND s.trade_date = l.latest_trade_date
+         GROUP BY l.experiment_key, l.latest_trade_date
+         ORDER BY l.experiment_key`,
+        coveredTradeDate ? [coveredTradeDate] : []
+      )
+    };
 
     res.json({
       success: true,
@@ -1132,6 +2507,7 @@ router.get('/workflow-summary', async (_req: Request, res: Response) => {
         latest_observations: latestObservations,
         today_summary: todaySummary,
         risk_board: riskBoard,
+        data_freshness: dataFreshness,
         daily_changes: dailyChanges
       }
     });
@@ -1148,6 +2524,19 @@ router.get('/daily-pipeline/status', async (_req: Request, res: Response) => {
     const db = await getDb();
     const task = await ensureFinancePipelineTask(db);
     const runGuard = await buildManualPipelineRunGuard(db);
+    const latestPriceRow = await db.get(
+      `SELECT MAX(trade_date) AS trade_date
+       FROM financial_daily_prices
+       WHERE source = 'tushare'
+         AND asset_type IN ('stock', 'etf', 'index')
+         AND close IS NOT NULL
+         AND close > 0`
+    );
+    const latestPriceTradeDate = latestPriceRow?.trade_date ? String(latestPriceRow.trade_date) : null;
+    const coveredTradeDate = await getLatestCoveredTradeDate(db);
+    const dailyPriceQuality = latestPriceTradeDate
+      ? await getTradeDateCoverage(db, latestPriceTradeDate)
+      : null;
     const latestRun = await db.get(
       `SELECT *
        FROM task_center_runs
@@ -1160,6 +2549,10 @@ router.get('/daily-pipeline/status', async (_req: Request, res: Response) => {
     if (latestRun?.result_json) {
       latestRun.result = compactPipelineResult(latestRun.result_json);
       latestRun.duration_seconds = getDurationSeconds(latestRun.started_at, latestRun.finished_at);
+      if (latestRun.status === 'success' && dailyPriceQuality?.status === 'incomplete') {
+        latestRun.effective_status = 'stale_success';
+        latestRun.effective_message = `最近成功记录对应的行情覆盖不足：${latestPriceTradeDate} 当前 ${dailyPriceQuality.current_count} 个，上一交易日 ${dailyPriceQuality.previous_trade_date} ${dailyPriceQuality.previous_count} 个。`;
+      }
       delete latestRun.result_json;
     }
 
@@ -1168,7 +2561,13 @@ router.get('/daily-pipeline/status', async (_req: Request, res: Response) => {
       data: {
         task,
         latest_run: latestRun || null,
-        run_guard: runGuard
+        run_guard: runGuard,
+        daily_price_quality: {
+          latest_trade_date: latestPriceTradeDate,
+          covered_trade_date: coveredTradeDate,
+          coverage: dailyPriceQuality,
+          status: dailyPriceQuality?.status || 'unknown'
+        }
       }
     });
   } catch (error) {
@@ -1183,22 +2582,62 @@ router.get('/daily-pipeline/logs', async (req: Request, res: Response) => {
   try {
     const db = await getDb();
     await ensureFinancePipelineTask(db);
+    await ensureFinanceFunnelTask(db);
     const limit = Math.min(Math.max(Number(req.query.limit || 8), 1), 30);
+    const scope = String(req.query.scope || 'daily');
+    const stepsMode = String(req.query.steps || 'all');
+    const taskKeys = scope === 'workflow'
+      ? [FINANCE_TUSHARE_SUPPLEMENTAL_TASK_KEY, FINANCE_PIPELINE_TASK_KEY, FINANCE_FUNNEL_TASK_KEY]
+      : [FINANCE_PIPELINE_TASK_KEY];
+    const placeholders = taskKeys.map(() => '?').join(',');
     const runs = await db.all(
-      `SELECT id, task_id, task_key, trigger_type, status, message, result_json, started_at, finished_at, created_at
-       FROM task_center_runs
-       WHERE task_key = ?
-       ORDER BY started_at DESC, id DESC
+      `SELECT r.id, r.task_id, r.task_key, r.trigger_type, r.status, r.message,
+              r.started_at, r.finished_at, r.created_at,
+              COALESCE(t.name, r.task_key) AS task_label
+       FROM task_center_runs r
+       LEFT JOIN task_center_tasks t ON t.id = r.task_id
+       WHERE r.task_key IN (${placeholders})
+       ORDER BY r.started_at DESC, r.id DESC
        LIMIT ?`,
-      [FINANCE_PIPELINE_TASK_KEY, limit]
+      [...taskKeys, limit]
     );
 
     const todayKey = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Shanghai' });
+    const compactResultByRunId = new Map<number, ReturnType<typeof compactPipelineResult>>();
+    if (stepsMode === 'all') {
+      const resultRows = runs.length
+        ? await db.all(
+            `SELECT id, result_json
+             FROM task_center_runs
+             WHERE id IN (${runs.map(() => '?').join(',')})`,
+            runs.map((run: any) => run.id)
+          )
+        : [];
+      resultRows.forEach((row: any) => {
+        compactResultByRunId.set(Number(row.id), compactPipelineResult(row.result_json));
+      });
+    } else if (stepsMode === 'latest') {
+      for (const run of runs) {
+        const row = await db.get(
+          `SELECT result_json
+           FROM task_center_runs
+           WHERE id = ?`,
+          [run.id]
+        );
+        const compactResult = compactPipelineResult(row?.result_json);
+        if ((compactResult.steps || []).length > 0) {
+          compactResultByRunId.set(Number(run.id), compactResult);
+          break;
+        }
+      }
+    }
+
     const items = runs.map((run: any) => {
-      const compactResult = compactPipelineResult(run.result_json);
+      const compactResult = compactResultByRunId.get(Number(run.id));
       return {
         id: run.id,
         task_key: run.task_key,
+        task_label: run.task_label,
         trigger_type: run.trigger_type,
         status: run.status,
         message: run.message,
@@ -1209,13 +2648,17 @@ router.get('/daily-pipeline/logs', async (req: Request, res: Response) => {
         is_today: run.started_at
           ? new Date(run.started_at).toLocaleDateString('en-CA', { timeZone: 'Asia/Shanghai' }) === todayKey
           : false,
-        result: compactResult
+        result: compactResult || {
+          summary: null,
+          finished_at: run.finished_at || null
+        }
       };
     });
 
     res.json({
       success: true,
       data: {
+        scope,
         items,
         latest: items[0] || null
       }
@@ -1249,54 +2692,90 @@ router.post('/daily-pipeline/run', async (req: Request, res: Response) => {
      VALUES (?, ?, 'manual', 'running', ?)`,
     [task.id, FINANCE_PIPELINE_TASK_KEY, startedAt]
   );
-  const runId = runResult.lastID;
-
-  try {
-    const config = {
-      ...parseJsonConfig(task.config_json),
-      ...(req.body?.config || {})
-    };
-    const result = await runFinanceDailyPipeline(config);
-    const failedStep = result.steps.find((step: any) => step.status === 'error');
-    const status = failedStep ? 'error' : 'success';
-    const message = failedStep
-      ? `金融日终流水线失败：停在「${failedStep.label}」 - ${failedStep.message || '原因未知'}`
-      : `金融日终流水线完成：${result.summary.success}/${result.summary.total} 步完成`;
-
-    await db.run(
-      `UPDATE task_center_runs
-       SET status = ?, message = ?, result_json = ?, finished_at = ?
-       WHERE id = ?`,
-      [status, message, JSON.stringify(result), new Date().toISOString(), runId]
-    );
-    await db.run(
-      `UPDATE task_center_tasks
-       SET last_status = ?, last_message = ?, last_run_at = ?, updated_at = ?
-       WHERE id = ?`,
-      [status, message, new Date().toISOString(), new Date().toISOString(), task.id]
-    );
-
-    res.status(failedStep ? 500 : 200).json({
-      success: !failedStep,
-      message,
-      data: result
-    });
-  } catch (error) {
-    const message = `金融日终流水线执行失败: ${(error as Error).message}`;
-    await db.run(
-      `UPDATE task_center_runs
-       SET status = 'error', message = ?, finished_at = ?
-       WHERE id = ?`,
-      [message, new Date().toISOString(), runId]
-    );
-    await db.run(
-      `UPDATE task_center_tasks
-       SET last_status = 'error', last_message = ?, last_run_at = ?, updated_at = ?
-       WHERE id = ?`,
-      [message, new Date().toISOString(), new Date().toISOString(), task.id]
-    );
-    res.status(500).json({ success: false, message });
+  const runId = Number(runResult.lastID);
+  if (!Number.isFinite(runId)) {
+    throw new Error('金融日终流水线运行记录创建失败');
   }
+
+  const config = {
+    ...parseJsonConfig(task.config_json),
+    ...(req.body?.config || {}),
+    force: req.body?.force === true
+  };
+
+  void (async () => {
+    try {
+      const result = await runFinanceDailyPipeline(config, {
+        taskKey: FINANCE_PIPELINE_TASK_KEY,
+        onProgress: ({ step, result: progressResult }) => persistManualPipelineProgress(
+          db,
+          task.id,
+          runId,
+          '金融日终流水线',
+          step,
+          progressResult
+        )
+      });
+      const failedStep = result.steps.find((step: any) => step.status === 'error');
+      const skippedSteps = result.steps.filter((step: any) => step.status === 'skipped');
+      const marketGateSkippedStep = skippedSteps.find((step: any) => step.data?.downstream_blocked);
+      const status = failedStep ? 'error' : marketGateSkippedStep ? 'skipped' : 'success';
+      const message = failedStep
+        ? `金融日终流水线失败：停在「${failedStep.label}」 - ${failedStep.message || '原因未知'}`
+        : marketGateSkippedStep
+          ? `金融日终流水线已按市场总闸停止下游：${marketGateSkippedStep.message || '总闸未通过'}`
+        : `金融日终流水线完成：${result.summary.success}/${result.summary.total} 步完成`;
+
+      await db.run(
+        `UPDATE task_center_runs
+         SET status = ?, message = ?, result_json = ?, finished_at = ?
+         WHERE id = ?`,
+        [status, message, JSON.stringify(compactFinancePipelineResultForStorage(result)), new Date().toISOString(), runId]
+      );
+      await db.run(
+        `UPDATE task_center_tasks
+         SET last_status = ?, last_message = ?, last_run_at = ?, updated_at = ?
+         WHERE id = ?`,
+        [status, message, new Date().toISOString(), new Date().toISOString(), task.id]
+      );
+      if (status === 'success') {
+        const now = new Date().toISOString();
+        await db.run(
+          `UPDATE task_center_tasks
+           SET last_status = 'success',
+               last_message = '今日漏斗已由金融日终流水线覆盖执行，不需要兜底重复跑。',
+               last_run_at = ?,
+               updated_at = ?
+           WHERE task_key = ?`,
+          [now, now, FINANCE_FUNNEL_TASK_KEY]
+        );
+      }
+    } catch (error) {
+      const message = `金融日终流水线执行失败: ${(error as Error).message}`;
+      await db.run(
+        `UPDATE task_center_runs
+         SET status = 'error', message = ?, finished_at = ?
+         WHERE id = ?`,
+        [message, new Date().toISOString(), runId]
+      );
+      await db.run(
+        `UPDATE task_center_tasks
+         SET last_status = 'error', last_message = ?, last_run_at = ?, updated_at = ?
+         WHERE id = ?`,
+        [message, new Date().toISOString(), new Date().toISOString(), task.id]
+      );
+    }
+  })();
+
+  res.status(202).json({
+    success: true,
+    message: '金融日终流水线已启动，页面会自动刷新执行状态。',
+    data: {
+      run_id: runId,
+      status: 'running',
+      started_at: startedAt
+    }
+  });
 });
 
 router.get('/candidate-funnel/status', async (_req: Request, res: Response) => {
@@ -1354,25 +2833,42 @@ router.post('/candidate-funnel/run', async (req: Request, res: Response) => {
      VALUES (?, ?, 'manual', 'running', ?)`,
     [task.id, FINANCE_FUNNEL_TASK_KEY, startedAt]
   );
-  const runId = runResult.lastID;
+  const runId = Number(runResult.lastID);
+  if (!Number.isFinite(runId)) {
+    throw new Error('入池漏斗流水线运行记录创建失败');
+  }
 
   try {
     const config = {
       ...parseJsonConfig(task.config_json),
       ...(req.body?.config || {})
     };
-    const result = await runFinanceCandidateFunnelPipeline(config);
+    const result = await runFinanceCandidateFunnelPipeline(config, {
+      taskKey: FINANCE_FUNNEL_TASK_KEY,
+      onProgress: ({ step, result: progressResult }) => persistManualPipelineProgress(
+        db,
+        task.id,
+        runId,
+        '入池漏斗流水线',
+        step,
+        progressResult
+      )
+    });
     const failedStep = result.steps.find((step: any) => step.status === 'error');
-    const status = failedStep ? 'error' : 'success';
+    const skippedSteps = result.steps.filter((step: any) => step.status === 'skipped');
+    const marketGateSkippedStep = skippedSteps.find((step: any) => step.data?.downstream_blocked);
+    const status = failedStep ? 'error' : marketGateSkippedStep ? 'skipped' : 'success';
     const message = failedStep
       ? `入池漏斗流水线失败：停在「${failedStep.label}」 - ${failedStep.message || '原因未知'}`
+      : marketGateSkippedStep
+        ? `入池漏斗流水线已按市场总闸跳过：${marketGateSkippedStep.message || '总闸未通过'}`
       : `入池漏斗流水线完成：${result.summary.success}/${result.summary.total} 步完成`;
 
     await db.run(
       `UPDATE task_center_runs
        SET status = ?, message = ?, result_json = ?, finished_at = ?
        WHERE id = ?`,
-      [status, message, JSON.stringify(result), new Date().toISOString(), runId]
+      [status, message, JSON.stringify(compactFinancePipelineResultForStorage(result)), new Date().toISOString(), runId]
     );
     await db.run(
       `UPDATE task_center_tasks
@@ -1971,12 +3467,26 @@ function calculateMarketRegime(prices: DailyPrice[], isMock: boolean, source: st
 
 async function saveMarketRegime(regime: MarketRegime): Promise<void> {
   const db = await getDb();
-  await db.run(
-    `INSERT INTO financial_market_regime 
-      (symbol, name, trade_date, close, ma60, ma60_prev, ma60_slope, low_60, low_120, cross_count_10, above_ma60_days, below_ma60_days, drawdown_20, drawdown_60, drawdown_120, distance_to_ma60, market_regime, result_reason, entry_permission, entry_reason, rule_version, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-    [regime.symbol, regime.name, regime.trade_date, regime.close, regime.ma60, regime.ma60_prev, regime.ma60_slope, regime.low_60, regime.low_120, regime.cross_count_10, regime.above_ma60_days, regime.below_ma60_days, regime.drawdown_20, regime.drawdown_60, regime.drawdown_120, regime.distance_to_ma60, regime.market_regime, regime.result_reason, regime.entry_permission, regime.entry_reason, regime.rule_version]
-  );
+  await db.exec('BEGIN TRANSACTION');
+  try {
+    await db.run(
+      `DELETE FROM financial_market_regime
+       WHERE symbol = ?
+         AND trade_date = ?
+         AND COALESCE(rule_version, 'market_regime_v1') = COALESCE(?, 'market_regime_v1')`,
+      [regime.symbol, regime.trade_date, regime.rule_version || 'market_regime_v1']
+    );
+    await db.run(
+      `INSERT INTO financial_market_regime 
+        (symbol, name, trade_date, close, ma60, ma60_prev, ma60_slope, low_60, low_120, cross_count_10, above_ma60_days, below_ma60_days, drawdown_20, drawdown_60, drawdown_120, distance_to_ma60, market_regime, result_reason, entry_permission, entry_reason, rule_version, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+      [regime.symbol, regime.name, regime.trade_date, regime.close, regime.ma60, regime.ma60_prev, regime.ma60_slope, regime.low_60, regime.low_120, regime.cross_count_10, regime.above_ma60_days, regime.below_ma60_days, regime.drawdown_20, regime.drawdown_60, regime.drawdown_120, regime.distance_to_ma60, regime.market_regime, regime.result_reason, regime.entry_permission, regime.entry_reason, regime.rule_version]
+    );
+    await db.exec('COMMIT');
+  } catch (error) {
+    await db.exec('ROLLBACK');
+    throw error;
+  }
 }
 
 function pickCycleLayerFields(regime: MarketRegime) {
@@ -2053,11 +3563,12 @@ async function enrichMarketRegimeWithCycleLayers(regime: any | null, symbol: str
 async function getOrCalculateLatestRegime(symbol: string): Promise<any | null> {
   const source = getPreferredMarketSource(symbol);
   const latest = await getLatestRegime(symbol);
-  if (latest) {
+  const prices = await getDailyPrices(symbol, source);
+  const latestPriceTradeDate = prices.length > 0 ? prices[prices.length - 1]?.trade_date : null;
+  if (latest && (!latestPriceTradeDate || String(latest.trade_date || '') >= String(latestPriceTradeDate))) {
     return enrichMarketRegimeWithCycleLayers(latest, symbol, source, false);
   }
 
-  const prices = await getDailyPrices(symbol, source);
   if (prices.length < 60) return null;
 
   const regime = calculateMarketRegime(prices, false, source, symbol);
@@ -2179,6 +3690,23 @@ router.post('/market/index/update', async (req: Request, res: Response) => {
 
 router.post('/market/environment/update', async (req: Request, res: Response) => {
   try {
+    if (req.body?.force !== true) {
+      const localNow = getChinaDateTimeParts();
+      const minuteOfDay = localNow.hour * 60 + localNow.minute;
+      if (localNow.weekday === 0 || localNow.weekday === 6) {
+        return res.status(425).json({
+          success: false,
+          message: '今天不是交易日（周末），市场环境层不刷新，保持最近一个收盘日口径。'
+        });
+      }
+      if (minuteOfDay < PIPELINE_MANUAL_EARLIEST_MINUTE) {
+        return res.status(425).json({
+          success: false,
+          message: `市场环境层按收盘日线口径刷新，只允许 ${getPipelineEarliestTimeLabel()} 后执行。建议收盘后直接跑金融日终流水线。`
+        });
+      }
+    }
+
     const symbols = Array.isArray(req.body.symbols) && req.body.symbols.length > 0
       ? req.body.symbols
       : MARKET_ASSETS.map(asset => asset.symbol);
@@ -2223,11 +3751,35 @@ router.get('/market/industry-etf-strength', async (req: Request, res: Response) 
     const scope = req.query.scope === 'all' ? 'all' : 'focus';
     const limit = Math.min(Number(req.query.limit || 30), 200);
     const benchmarkSymbol = String(req.query.benchmark || '000300');
-    const data = await buildIndustryEtfStrengthResponse(db, { scope, limit, benchmarkSymbol });
+    const asOfTradeDate = String(req.query.as_of_trade_date || req.query.asOfTradeDate || '').trim();
+    const cacheKey = JSON.stringify({ scope, limit, benchmarkSymbol, asOfTradeDate });
+    if (industryEtfStrengthCache?.key === cacheKey && industryEtfStrengthCache.expiresAt > Date.now()) {
+      return res.json({
+        success: true,
+        data: {
+          ...industryEtfStrengthCache.data,
+          cache: { hit: true, ttl_ms: INDUSTRY_ETF_STRENGTH_CACHE_TTL_MS }
+        }
+      });
+    }
+    const data = await buildIndustryEtfStrengthResponse(db, {
+      scope,
+      limit,
+      benchmarkSymbol,
+      asOfTradeDate
+    });
+    industryEtfStrengthCache = {
+      key: cacheKey,
+      expiresAt: Date.now() + INDUSTRY_ETF_STRENGTH_CACHE_TTL_MS,
+      data
+    };
 
     res.json({
       success: true,
-      data
+      data: {
+        ...data,
+        cache: { hit: false, ttl_ms: INDUSTRY_ETF_STRENGTH_CACHE_TTL_MS }
+      }
     });
   } catch (error) {
     res.status(500).json({
@@ -2274,15 +3826,28 @@ router.get('/market/environment', async (_req: Request, res: Response) => {
         result_reason: regime?.result_reason || '暂无本地市场状态数据。',
         entry_reason: regime?.entry_reason || '暂无本地市场状态数据。',
         source: regime?.source || getPreferredMarketSource(asset.symbol),
+        updated_at: regime?.updated_at || null,
         opportunity
       });
     }
+    const dataDate = items
+      .map((item: any) => item.trade_date)
+      .filter(Boolean)
+      .sort()
+      .pop() || null;
+    const latestUpdatedAt = items
+      .map((item: any) => item.updated_at)
+      .filter(Boolean)
+      .sort()
+      .pop() || null;
 
     res.json({
       success: true,
       data: {
         rule_version: 'market_environment_v1',
-        updated_at: new Date().toISOString(),
+        data_date: dataDate,
+        data_label: dataDate ? `${dataDate} 收盘` : null,
+        updated_at: latestUpdatedAt || new Date().toISOString(),
         conclusion: buildEnvironmentConclusion(items),
         items
       }
@@ -2309,7 +3874,7 @@ router.get('/market/regime/latest', async (req: Request, res: Response) => {
       query += `AND result_reason NOT LIKE '%模拟数据%' `;
     }
     
-    query += `ORDER BY id DESC LIMIT 1`;
+    query += `ORDER BY trade_date DESC, id DESC LIMIT 1`;
     
     const result = await getDb().then(db => db.get(query, params));
     

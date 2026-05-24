@@ -1,7 +1,7 @@
 const sqlite3 = require('sqlite3').verbose();
 
 // 连接到数据库
-const db = new sqlite3.Database('./db/price_dashboard_dev.db');
+const db = new sqlite3.Database(process.env.DB_PATH || '/Volumes/7100/price-dashboard-data/db/price_dashboard_dev.db');
 
 // 测试查询
 const category = '苹果手机';

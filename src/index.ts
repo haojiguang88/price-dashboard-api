@@ -3,9 +3,8 @@ dotenv.config();
 
 import express from "express";
 import cors from "cors";
-import getDb from "./config/database";
+import getDb, { getDatabasePath } from "./config/database";
 import { runMigrations } from "./migrations";
-import path from "path";
 import priceRoutes from "./routes/priceRoutes";
 import masterDataRoutes from "./routes/masterDataRoutes";
 import positionRoutes from "./routes/positionRoutes";
@@ -38,7 +37,7 @@ import metalRoutes from "./routes/metalRoutes";
 import trendPhaseRoutes from "./routes/trendPhaseRoutes";
 import candidatePoolRoutes from "./routes/candidatePoolRoutes";
 import assetUniverseRoutes from "./routes/assetUniverseRoutes";
-import taskCenterRoutes, { startTaskCenterScheduler } from "./routes/taskCenterRoutes";
+import taskCenterRoutes, { cleanupOrphanedFinanceTaskRunsOnStartup, startTaskCenterScheduler } from "./routes/taskCenterRoutes";
 import financialTradePlanRoutes from "./routes/financialTradePlanRoutes";
 import footballLotteryRoutes from "./routes/footballLotteryRoutes";
 import modelTrainingRoutes from "./routes/modelTrainingRoutes";
@@ -47,12 +46,34 @@ import auditLogRoutes from "./routes/auditLogRoutes";
 import userPreferenceRoutes from "./routes/userPreferenceRoutes";
 import rejectedOpportunitiesRoutes from "./routes/rejectedOpportunitiesRoutes";
 import financeDecisionSupportRoutes from "./routes/financeDecisionSupportRoutes";
+import speculationCycleRoutes from "./routes/speculationCycleRoutes";
+import financeSignalLifecycleRoutes from "./routes/financeSignalLifecycleRoutes";
+import productSupplyEventsRoutes from "./routes/productSupplyEventsRoutes";
+import financeExperimentRoutes from "./routes/financeExperimentRoutes";
+import financeResearchInputRoutes from "./routes/financeResearchInputRoutes";
 
 const app = express();
 const port = process.env.PORT || 3001;
 
 // 配置 CORS
-app.use(cors({ origin: "http://localhost:5173" }));
+const allowedLocalOrigins = new Set([
+  "http://localhost:5173",
+  "http://127.0.0.1:5173",
+  "http://[::1]:5173",
+  "http://localhost:5174",
+  "http://127.0.0.1:5174",
+  "http://[::1]:5174"
+]);
+
+app.use(cors({
+  origin(origin, callback) {
+    if (!origin || allowedLocalOrigins.has(origin)) {
+      callback(null, true);
+      return;
+    }
+    callback(new Error(`CORS origin not allowed: ${origin}`));
+  }
+}));
 
 app.use(express.json({ limit: "20mb" }));
 app.use("/api", priceRoutes);
@@ -89,6 +110,9 @@ app.use("/api/finance", candidatePoolRoutes);
 app.use("/api/finance", assetUniverseRoutes);
 app.use("/api/finance", financialTradePlanRoutes);
 app.use("/api/finance", financeDecisionSupportRoutes);
+app.use("/api/finance", financeSignalLifecycleRoutes);
+app.use("/api/finance", financeExperimentRoutes);
+app.use("/api/finance", financeResearchInputRoutes);
 app.use("/api", taskCenterRoutes);
 app.use("/api/football-lottery", footballLotteryRoutes);
 app.use("/api/model-training", modelTrainingRoutes);
@@ -96,6 +120,8 @@ app.use("/api", analysisAnnotationRoutes);
 app.use("/api", auditLogRoutes);
 app.use("/api", userPreferenceRoutes);
 app.use("/api", rejectedOpportunitiesRoutes);
+app.use("/api", speculationCycleRoutes);
+app.use("/api", productSupplyEventsRoutes);
 
 app.get("/db-test", async (req, res) => {
   try {
@@ -113,7 +139,12 @@ app.get("/", (req, res) => {
 });
 
 app.get("/health", (req, res) => {
-  res.json({ status: "healthy" });
+  const dbPath = getDatabasePath();
+  res.json({
+    status: "healthy",
+    db_path: dbPath,
+    external_storage: dbPath.startsWith("/Volumes/")
+  });
 });
 
 // 初始化数据库连接
@@ -123,9 +154,10 @@ const initDatabase = async () => {
     console.log("Database initialized successfully");
     
     // 执行迁移
-    const dbPath = process.env.DB_PATH || path.join(process.cwd(), "db", "price_dashboard_dev.db");
+    const dbPath = getDatabasePath();
     await runMigrations(dbPath);
     console.log("Migrations executed successfully");
+    await cleanupOrphanedFinanceTaskRunsOnStartup();
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     console.error("Failed to initialize database:", errorMessage);

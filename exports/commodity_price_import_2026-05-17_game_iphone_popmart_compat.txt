@@ -1,0 +1,731 @@
+[
+  {
+    "date": "2026-05-17",
+    "category_name": "游戏机",
+    "category": "游戏机",
+    "object_name": "NS2新加坡单机原盒",
+    "object": "NS2新加坡单机原盒",
+    "price": 3240,
+    "source": "档口报价"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "游戏机",
+    "category": "游戏机",
+    "object_name": "NS2新加坡同捆",
+    "object": "NS2新加坡同捆",
+    "price": 3580,
+    "source": "档口报价"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "游戏机",
+    "category": "游戏机",
+    "object_name": "NS2港版单机原盒",
+    "object": "NS2港版单机原盒",
+    "price": 3330,
+    "source": "档口报价"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "游戏机",
+    "category": "游戏机",
+    "object_name": "NS2港版捆绑马车同捆",
+    "object": "NS2港版捆绑马车同捆",
+    "price": 3650,
+    "source": "档口报价"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "游戏机",
+    "category": "游戏机",
+    "object_name": "PS5 Pro国行数字",
+    "object": "PS5 Pro国行数字",
+    "price": 5530,
+    "source": "档口报价"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "游戏机",
+    "category": "游戏机",
+    "object_name": "PS5 Pro日版数字",
+    "object": "PS5 Pro日版数字",
+    "price": 5750,
+    "source": "档口报价"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "游戏机",
+    "category": "游戏机",
+    "object_name": "PS5 Pro港版数字",
+    "object": "PS5 Pro港版数字",
+    "price": 5850,
+    "source": "档口报价"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "游戏机",
+    "category": "游戏机",
+    "object_name": "PS5国行光驱slim",
+    "object": "PS5国行光驱slim",
+    "price": 3360,
+    "source": "档口报价"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "游戏机",
+    "category": "游戏机",
+    "object_name": "PS5国行数字slim",
+    "object": "PS5国行数字slim",
+    "price": 2950,
+    "source": "档口报价"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "游戏机",
+    "category": "游戏机",
+    "object_name": "PS5日版光驱slim",
+    "object": "PS5日版光驱slim",
+    "price": 3700,
+    "source": "档口报价"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "游戏机",
+    "category": "游戏机",
+    "object_name": "PS5日版数字slim",
+    "object": "PS5日版数字slim",
+    "price": 3050,
+    "source": "档口报价"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "游戏机",
+    "category": "游戏机",
+    "object_name": "PS5港版光驱slim",
+    "object": "PS5港版光驱slim",
+    "price": 3800,
+    "source": "档口报价"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "游戏机",
+    "category": "游戏机",
+    "object_name": "PS5港版数字",
+    "object": "PS5港版数字",
+    "price": 3100,
+    "source": "档口报价"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "游戏机",
+    "category": "游戏机",
+    "object_name": "Switch OLED日版红蓝",
+    "object": "Switch OLED日版红蓝",
+    "price": 2050,
+    "source": "档口报价"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "游戏机",
+    "category": "游戏机",
+    "object_name": "Switch OLED日版黑白",
+    "object": "Switch OLED日版黑白",
+    "price": 1890,
+    "source": "档口报价"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "游戏机",
+    "category": "游戏机",
+    "object_name": "Switch OLED港版红蓝",
+    "object": "Switch OLED港版红蓝",
+    "price": 1940,
+    "source": "档口报价"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "游戏机",
+    "category": "游戏机",
+    "object_name": "Switch OLED港版黑白",
+    "object": "Switch OLED港版黑白",
+    "price": 1880,
+    "source": "档口报价"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "游戏机",
+    "category": "游戏机",
+    "object_name": "Switch日版续航灰",
+    "object": "Switch日版续航灰",
+    "price": 1400,
+    "source": "档口报价"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "游戏机",
+    "category": "游戏机",
+    "object_name": "Switch日版续航红蓝",
+    "object": "Switch日版续航红蓝",
+    "price": 1550,
+    "source": "档口报价"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "苹果手机",
+    "category": "苹果手机",
+    "object_name": "iPhone 16 128G",
+    "object": "iPhone 16 128G",
+    "price": 4520,
+    "source": "档口报价",
+    "variant_name": "深青色",
+    "variant": "深青色"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "苹果手机",
+    "category": "苹果手机",
+    "object_name": "iPhone 16 128G",
+    "object": "iPhone 16 128G",
+    "price": 4520,
+    "source": "档口报价",
+    "variant_name": "白色",
+    "variant": "白色"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "苹果手机",
+    "category": "苹果手机",
+    "object_name": "iPhone 16 128G",
+    "object": "iPhone 16 128G",
+    "price": 4520,
+    "source": "档口报价",
+    "variant_name": "粉色",
+    "variant": "粉色"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "苹果手机",
+    "category": "苹果手机",
+    "object_name": "iPhone 16 128G",
+    "object": "iPhone 16 128G",
+    "price": 4520,
+    "source": "档口报价",
+    "variant_name": "群青色",
+    "variant": "群青色"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "苹果手机",
+    "category": "苹果手机",
+    "object_name": "iPhone 16 128G",
+    "object": "iPhone 16 128G",
+    "price": 4520,
+    "source": "档口报价",
+    "variant_name": "黑色",
+    "variant": "黑色"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "苹果手机",
+    "category": "苹果手机",
+    "object_name": "iPhone 16 256G",
+    "object": "iPhone 16 256G",
+    "price": 4950,
+    "source": "档口报价",
+    "variant_name": "深青色",
+    "variant": "深青色"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "苹果手机",
+    "category": "苹果手机",
+    "object_name": "iPhone 16 256G",
+    "object": "iPhone 16 256G",
+    "price": 5100,
+    "source": "档口报价",
+    "variant_name": "白色",
+    "variant": "白色"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "苹果手机",
+    "category": "苹果手机",
+    "object_name": "iPhone 16 256G",
+    "object": "iPhone 16 256G",
+    "price": 5050,
+    "source": "档口报价",
+    "variant_name": "粉色",
+    "variant": "粉色"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "苹果手机",
+    "category": "苹果手机",
+    "object_name": "iPhone 16 256G",
+    "object": "iPhone 16 256G",
+    "price": 4950,
+    "source": "档口报价",
+    "variant_name": "群青色",
+    "variant": "群青色"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "苹果手机",
+    "category": "苹果手机",
+    "object_name": "iPhone 16 256G",
+    "object": "iPhone 16 256G",
+    "price": 5050,
+    "source": "档口报价",
+    "variant_name": "黑色",
+    "variant": "黑色"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "苹果手机",
+    "category": "苹果手机",
+    "object_name": "iPhone 16 Pro 128G",
+    "object": "iPhone 16 Pro 128G",
+    "price": 6100,
+    "source": "档口报价",
+    "variant_name": "原色",
+    "variant": "原色"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "苹果手机",
+    "category": "苹果手机",
+    "object_name": "iPhone 16 Pro 128G",
+    "object": "iPhone 16 Pro 128G",
+    "price": 6160,
+    "source": "档口报价",
+    "variant_name": "沙色",
+    "variant": "沙色"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "苹果手机",
+    "category": "苹果手机",
+    "object_name": "iPhone 16 Pro 128G",
+    "object": "iPhone 16 Pro 128G",
+    "price": 5830,
+    "source": "档口报价",
+    "variant_name": "白色",
+    "variant": "白色"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "苹果手机",
+    "category": "苹果手机",
+    "object_name": "iPhone 16 Pro 128G",
+    "object": "iPhone 16 Pro 128G",
+    "price": 6200,
+    "source": "档口报价",
+    "variant_name": "黑色",
+    "variant": "黑色"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "苹果手机",
+    "category": "苹果手机",
+    "object_name": "iPhone 16 Pro 256G",
+    "object": "iPhone 16 Pro 256G",
+    "price": 7400,
+    "source": "档口报价",
+    "variant_name": "原色",
+    "variant": "原色"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "苹果手机",
+    "category": "苹果手机",
+    "object_name": "iPhone 16 Pro 256G",
+    "object": "iPhone 16 Pro 256G",
+    "price": 7400,
+    "source": "档口报价",
+    "variant_name": "沙色",
+    "variant": "沙色"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "苹果手机",
+    "category": "苹果手机",
+    "object_name": "iPhone 16 Pro 256G",
+    "object": "iPhone 16 Pro 256G",
+    "price": 7400,
+    "source": "档口报价",
+    "variant_name": "白色",
+    "variant": "白色"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "苹果手机",
+    "category": "苹果手机",
+    "object_name": "iPhone 16 Pro 256G",
+    "object": "iPhone 16 Pro 256G",
+    "price": 7400,
+    "source": "档口报价",
+    "variant_name": "黑色",
+    "variant": "黑色"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "苹果手机",
+    "category": "苹果手机",
+    "object_name": "iPhone 16 Pro Max 256G",
+    "object": "iPhone 16 Pro Max 256G",
+    "price": 8000,
+    "source": "档口报价",
+    "variant_name": "原色",
+    "variant": "原色"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "苹果手机",
+    "category": "苹果手机",
+    "object_name": "iPhone 16 Pro Max 256G",
+    "object": "iPhone 16 Pro Max 256G",
+    "price": 8000,
+    "source": "档口报价",
+    "variant_name": "沙色",
+    "variant": "沙色"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "苹果手机",
+    "category": "苹果手机",
+    "object_name": "iPhone 16 Pro Max 256G",
+    "object": "iPhone 16 Pro Max 256G",
+    "price": 8000,
+    "source": "档口报价",
+    "variant_name": "白色",
+    "variant": "白色"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "苹果手机",
+    "category": "苹果手机",
+    "object_name": "iPhone 16 Pro Max 256G",
+    "object": "iPhone 16 Pro Max 256G",
+    "price": 7880,
+    "source": "档口报价",
+    "variant_name": "黑色",
+    "variant": "黑色"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "苹果手机",
+    "category": "苹果手机",
+    "object_name": "iPhone 16 Pro Max 512G",
+    "object": "iPhone 16 Pro Max 512G",
+    "price": 9000,
+    "source": "档口报价",
+    "variant_name": "原色",
+    "variant": "原色"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "苹果手机",
+    "category": "苹果手机",
+    "object_name": "iPhone 16 Pro Max 512G",
+    "object": "iPhone 16 Pro Max 512G",
+    "price": 8670,
+    "source": "档口报价",
+    "variant_name": "沙色",
+    "variant": "沙色"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "苹果手机",
+    "category": "苹果手机",
+    "object_name": "iPhone 16 Pro Max 512G",
+    "object": "iPhone 16 Pro Max 512G",
+    "price": 9000,
+    "source": "档口报价",
+    "variant_name": "白色",
+    "variant": "白色"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "苹果手机",
+    "category": "苹果手机",
+    "object_name": "iPhone 16 Pro Max 512G",
+    "object": "iPhone 16 Pro Max 512G",
+    "price": 9000,
+    "source": "档口报价",
+    "variant_name": "黑色",
+    "variant": "黑色"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "苹果手机",
+    "category": "苹果手机",
+    "object_name": "iPhone 17 256G",
+    "object": "iPhone 17 256G",
+    "price": 5560,
+    "source": "档口报价",
+    "variant_name": "白色",
+    "variant": "白色"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "苹果手机",
+    "category": "苹果手机",
+    "object_name": "iPhone 17 256G",
+    "object": "iPhone 17 256G",
+    "price": 5540,
+    "source": "档口报价",
+    "variant_name": "紫色",
+    "variant": "紫色"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "苹果手机",
+    "category": "苹果手机",
+    "object_name": "iPhone 17 256G",
+    "object": "iPhone 17 256G",
+    "price": 5540,
+    "source": "档口报价",
+    "variant_name": "绿色",
+    "variant": "绿色"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "苹果手机",
+    "category": "苹果手机",
+    "object_name": "iPhone 17 256G",
+    "object": "iPhone 17 256G",
+    "price": 5540,
+    "source": "档口报价",
+    "variant_name": "蓝色",
+    "variant": "蓝色"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "苹果手机",
+    "category": "苹果手机",
+    "object_name": "iPhone 17 256G",
+    "object": "iPhone 17 256G",
+    "price": 5540,
+    "source": "档口报价",
+    "variant_name": "黑色",
+    "variant": "黑色"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "苹果手机",
+    "category": "苹果手机",
+    "object_name": "iPhone 17 Pro 256G",
+    "object": "iPhone 17 Pro 256G",
+    "price": 7960,
+    "source": "档口报价",
+    "variant_name": "橙色",
+    "variant": "橙色"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "苹果手机",
+    "category": "苹果手机",
+    "object_name": "iPhone 17 Pro 256G",
+    "object": "iPhone 17 Pro 256G",
+    "price": 7960,
+    "source": "档口报价",
+    "variant_name": "蓝色",
+    "variant": "蓝色"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "苹果手机",
+    "category": "苹果手机",
+    "object_name": "iPhone 17 Pro 256G",
+    "object": "iPhone 17 Pro 256G",
+    "price": 7960,
+    "source": "档口报价",
+    "variant_name": "银色",
+    "variant": "银色"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "苹果手机",
+    "category": "苹果手机",
+    "object_name": "iPhone 17 Pro Max 256G",
+    "object": "iPhone 17 Pro Max 256G",
+    "price": 8940,
+    "source": "档口报价",
+    "variant_name": "橙色",
+    "variant": "橙色"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "苹果手机",
+    "category": "苹果手机",
+    "object_name": "iPhone 17 Pro Max 256G",
+    "object": "iPhone 17 Pro Max 256G",
+    "price": 8940,
+    "source": "档口报价",
+    "variant_name": "银色",
+    "variant": "银色"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "泡泡玛特",
+    "category": "泡泡玛特",
+    "object_name": "XG限定",
+    "object": "XG限定",
+    "price": 785,
+    "source": "千岛"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "泡泡玛特",
+    "category": "泡泡玛特",
+    "object_name": "万圣节",
+    "object": "万圣节",
+    "price": 264,
+    "source": "千岛"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "泡泡玛特",
+    "category": "泡泡玛特",
+    "object_name": "嘎子姐",
+    "object": "嘎子姐",
+    "price": 659,
+    "source": "千岛"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "泡泡玛特",
+    "category": "泡泡玛特",
+    "object_name": "大春花",
+    "object": "大春花",
+    "price": 737.65,
+    "source": "千岛"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "泡泡玛特",
+    "category": "泡泡玛特",
+    "object_name": "大甜心",
+    "object": "大甜心",
+    "price": 525,
+    "source": "千岛"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "泡泡玛特",
+    "category": "泡泡玛特",
+    "object_name": "大米兰",
+    "object": "大米兰",
+    "price": 4720,
+    "source": "千岛"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "泡泡玛特",
+    "category": "泡泡玛特",
+    "object_name": "姜饼人",
+    "object": "姜饼人",
+    "price": 1142,
+    "source": "千岛"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "泡泡玛特",
+    "category": "泡泡玛特",
+    "object_name": "小甜心",
+    "object": "小甜心",
+    "price": 188,
+    "source": "千岛"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "泡泡玛特",
+    "category": "泡泡玛特",
+    "object_name": "情人节",
+    "object": "情人节",
+    "price": 2160,
+    "source": "千岛"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "泡泡玛特",
+    "category": "泡泡玛特",
+    "object_name": "拿铁",
+    "object": "拿铁",
+    "price": 2466,
+    "source": "千岛"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "泡泡玛特",
+    "category": "泡泡玛特",
+    "object_name": "星星人礼盒",
+    "object": "星星人礼盒",
+    "price": 1089,
+    "source": "千岛"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "泡泡玛特",
+    "category": "泡泡玛特",
+    "object_name": "晒晒",
+    "object": "晒晒",
+    "price": 350,
+    "source": "千岛"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "泡泡玛特",
+    "category": "泡泡玛特",
+    "object_name": "毛球",
+    "object": "毛球",
+    "price": 280,
+    "source": "千岛"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "泡泡玛特",
+    "category": "泡泡玛特",
+    "object_name": "白裙子",
+    "object": "白裙子",
+    "price": 446,
+    "source": "千岛"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "泡泡玛特",
+    "category": "泡泡玛特",
+    "object_name": "蓝裙子",
+    "object": "蓝裙子",
+    "price": 2075,
+    "source": "千岛"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "泡泡玛特",
+    "category": "泡泡玛特",
+    "object_name": "醒醒",
+    "object": "醒醒",
+    "price": 873,
+    "source": "千岛"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "泡泡玛特",
+    "category": "泡泡玛特",
+    "object_name": "闪闪",
+    "object": "闪闪",
+    "price": 453,
+    "source": "千岛"
+  },
+  {
+    "date": "2026-05-17",
+    "category_name": "泡泡玛特",
+    "category": "泡泡玛特",
+    "object_name": "飞行员",
+    "object": "飞行员",
+    "price": 5011,
+    "source": "千岛"
+  }
+]

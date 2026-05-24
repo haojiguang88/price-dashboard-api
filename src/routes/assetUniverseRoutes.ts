@@ -8,6 +8,7 @@ const router = express.Router();
 const DEFAULT_MIN_FETCH_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const DEFAULT_DAILY_CLOSE_CONCURRENCY = 4;
 const MAX_DAILY_CLOSE_CONCURRENCY = 8;
+const DAILY_CLOSE_STALE_RUNNING_MS = 4 * 60 * 60 * 1000;
 
 const autoUpdateState: {
   running: boolean;
@@ -172,6 +173,22 @@ function getDailyCloseProgressPercent() {
   return Math.min(100, Math.max(0, Math.round(raw)));
 }
 
+function maybeResetStaleDailyCloseUpdateState() {
+  if (!dailyCloseUpdateState.running) return false;
+  const lastTouched = dailyCloseUpdateState.last_updated_at || dailyCloseUpdateState.started_at;
+  const lastTime = lastTouched ? new Date(lastTouched).getTime() : 0;
+  if (!Number.isFinite(lastTime) || lastTime <= 0) return false;
+  if (Date.now() - lastTime < DAILY_CLOSE_STALE_RUNNING_MS) return false;
+
+  dailyCloseUpdateState.running = false;
+  dailyCloseUpdateState.phase = 'stale_reset';
+  dailyCloseUpdateState.phase_label = '超时已重置';
+  dailyCloseUpdateState.finished_at = new Date().toISOString();
+  dailyCloseUpdateState.last_updated_at = dailyCloseUpdateState.finished_at;
+  dailyCloseUpdateState.last_message = `上一次每日收盘更新超过 ${Math.round(DAILY_CLOSE_STALE_RUNNING_MS / 60000)} 分钟没有进度，已自动解除运行锁。`;
+  return true;
+}
+
 function resetDailyCloseUpdateState(runId: string) {
   Object.assign(dailyCloseUpdateState, {
     running: true,
@@ -222,6 +239,7 @@ function applyDailyCloseProgress(event: DailyCloseProgressEvent) {
 }
 
 function publicDailyCloseUpdateState() {
+  maybeResetStaleDailyCloseUpdateState();
   return {
     ...dailyCloseUpdateState,
     percent: getDailyCloseProgressPercent()
@@ -292,6 +310,61 @@ async function resolveDailyCloseTargetTradeDate(db: any, source: string) {
   return latestRegime?.trade_date || null;
 }
 
+async function assertFullUniverseDailyCoverage(db: any, source: string, targetTradeDate: string | null) {
+  if (!targetTradeDate) return null;
+
+  const previousDateRow = await db.get(
+    `SELECT MAX(trade_date) as trade_date
+     FROM financial_daily_prices
+     WHERE source = ?
+       AND asset_type IN ('stock', 'etf')
+       AND trade_date < ?`,
+    [source, targetTradeDate]
+  );
+  const previousTradeDate = previousDateRow?.trade_date || null;
+  if (!previousTradeDate) return null;
+
+  const currentRow = await db.get(
+    `SELECT COUNT(DISTINCT p.symbol || '|' || p.asset_type || '|' || p.source) as count
+     FROM financial_daily_prices p
+     JOIN financial_asset_universe u
+       ON u.symbol = p.symbol
+      AND u.asset_type = p.asset_type
+      AND u.source = p.source
+     WHERE p.source = ?
+       AND p.asset_type IN ('stock', 'etf')
+       AND p.trade_date = ?
+       AND u.enabled = 1`,
+    [source, targetTradeDate]
+  );
+  const previousRow = await db.get(
+    `SELECT COUNT(DISTINCT p.symbol || '|' || p.asset_type || '|' || p.source) as count
+     FROM financial_daily_prices p
+     JOIN financial_asset_universe u
+       ON u.symbol = p.symbol
+      AND u.asset_type = p.asset_type
+      AND u.source = p.source
+     WHERE p.source = ?
+       AND p.asset_type IN ('stock', 'etf')
+       AND p.trade_date = ?
+       AND u.enabled = 1`,
+    [source, previousTradeDate]
+  );
+
+  const currentCount = Number(currentRow?.count || 0);
+  const previousCount = Number(previousRow?.count || 0);
+  if (previousCount <= 0) return { currentCount, previousCount, previousTradeDate, targetTradeDate };
+
+  const minExpected = Math.floor(previousCount * 0.92);
+  if (currentCount < minExpected) {
+    throw new Error(
+      `全市场日线未补齐：${targetTradeDate} 当前只有 ${currentCount} 个个股/ETF，上一交易日 ${previousTradeDate} 有 ${previousCount} 个，未达到 92% 覆盖阈值 ${minExpected}。下游备选池、入场触发和实验预测池已阻止继续滚动。`
+    );
+  }
+
+  return { currentCount, previousCount, previousTradeDate, targetTradeDate };
+}
+
 function prioritizeItemsByLocalFreshness(items: UniverseItem[], targetTradeDate?: string | null) {
   if (!targetTradeDate) return items;
   return [...items].sort((left, right) => {
@@ -304,8 +377,8 @@ function prioritizeItemsByLocalFreshness(items: UniverseItem[], targetTradeDate?
 
 async function refreshUniverseStatus(db: any, id?: number) {
   const items = id
-    ? await db.all(`SELECT id, symbol, source FROM financial_asset_universe WHERE id = ?`, [id])
-    : await db.all(`SELECT id, symbol, source FROM financial_asset_universe`);
+    ? await db.all(`SELECT id, symbol, asset_type, source FROM financial_asset_universe WHERE id = ?`, [id])
+    : await db.all(`SELECT id, symbol, asset_type, source FROM financial_asset_universe`);
 
   for (const item of items) {
     const status = await db.get(
@@ -315,8 +388,8 @@ async function refreshUniverseStatus(db: any, id?: number) {
          MAX(trade_date) as last_trade_date,
          MAX(updated_at) as last_updated
        FROM financial_daily_prices
-       WHERE symbol = ? AND source = ?`,
-      [item.symbol, item.source]
+       WHERE symbol = ? AND asset_type = ? AND source = ?`,
+      [item.symbol, item.asset_type, item.source]
     );
 
     await db.run(
@@ -851,6 +924,12 @@ router.get('/asset-universe', async (req: Request, res: Response) => {
     const offset = (page - 1) * pageSize;
     const sortKey = String(req.query.sort_key || 'symbol');
     const sortDirection = String(req.query.sort_direction || 'asc').toLowerCase() === 'desc' ? 'DESC' : 'ASC';
+    const dropLimitPriority = String(req.query.drop_limit_priority || '').trim() === '1';
+    const limitDownFilter = String(req.query.limit_down_filter || 'all').trim();
+    const effectiveLimitDownFilter = dropLimitPriority && ['latest', 'streak'].includes(limitDownFilter)
+      ? limitDownFilter
+      : 'all';
+    const excludeSt = String(req.query.exclude_st || '').trim() === '1';
 
     const sortColumns: Record<string, string> = {
       symbol: 'symbol',
@@ -882,12 +961,22 @@ router.get('/asset-universe', async (req: Request, res: Response) => {
       params.push(status);
     }
 
+    if (excludeSt) {
+      where.push(`NOT (
+        asset_type = 'stock'
+        AND (
+          UPPER(TRIM(COALESCE(name, ''))) LIKE 'ST%'
+          OR UPPER(TRIM(COALESCE(name, ''))) LIKE '*ST%'
+        )
+      )`);
+    }
+
     if (q) {
       where.push('(symbol LIKE ? OR name LIKE ?)');
       params.push(`%${q}%`, `%${q}%`);
     }
 
-    const groupedSql = `
+    const groupedBaseSql = `
       WITH grouped AS (
         SELECT
            MIN(id) as id,
@@ -915,19 +1004,140 @@ router.get('/asset-universe', async (req: Request, res: Response) => {
          GROUP BY symbol, asset_type, source
       )
     `;
+    const limitDownSignalSql = dropLimitPriority ? `,
+      priced AS (
+        SELECT
+          grouped.*,
+          CASE
+            WHEN grouped.asset_type = 'stock'
+             AND (COALESCE(grouped.name, '') LIKE 'ST%' OR COALESCE(grouped.name, '') LIKE '*ST%')
+            THEN 0.047
+            WHEN grouped.asset_type = 'stock'
+             AND (grouped.symbol LIKE '300%' OR grouped.symbol LIKE '301%' OR grouped.symbol LIKE '688%')
+            THEN 0.19
+            ELSE 0.095
+          END AS limit_down_threshold,
+          grouped.last_trade_date AS latest_price_trade_date,
+          MAX(grouped.last_trade_date) OVER (PARTITION BY grouped.asset_type, grouped.source) AS market_latest_trade_date,
+          (
+            SELECT p.close
+            FROM financial_daily_prices p
+            WHERE p.symbol = grouped.symbol
+              AND p.source = grouped.source
+              AND p.trade_date = grouped.last_trade_date
+            ORDER BY p.trade_date DESC
+            LIMIT 1
+          ) AS latest_close,
+          (
+            SELECT p.close
+            FROM financial_daily_prices p
+            WHERE p.symbol = grouped.symbol
+              AND p.source = grouped.source
+              AND p.trade_date < grouped.last_trade_date
+            ORDER BY p.trade_date DESC
+            LIMIT 1
+          ) AS previous_close,
+          (
+            SELECT p.close
+            FROM financial_daily_prices p
+            WHERE p.symbol = grouped.symbol
+              AND p.source = grouped.source
+              AND p.trade_date < grouped.last_trade_date
+            ORDER BY p.trade_date DESC
+            LIMIT 1 OFFSET 1
+          ) AS close_2_ago,
+          (
+            SELECT p.close
+            FROM financial_daily_prices p
+            WHERE p.symbol = grouped.symbol
+              AND p.source = grouped.source
+              AND p.trade_date < grouped.last_trade_date
+            ORDER BY p.trade_date DESC
+            LIMIT 1 OFFSET 2
+          ) AS close_3_ago,
+          (
+            SELECT p.close
+            FROM financial_daily_prices p
+            WHERE p.symbol = grouped.symbol
+              AND p.source = grouped.source
+              AND p.trade_date < grouped.last_trade_date
+            ORDER BY p.trade_date DESC
+            LIMIT 1 OFFSET 3
+          ) AS close_4_ago
+        FROM grouped
+      ),
+      flagged AS (
+        SELECT
+          priced.*,
+          CASE
+            WHEN previous_close > 0 AND latest_close IS NOT NULL
+            THEN latest_close / previous_close - 1
+            ELSE NULL
+          END AS latest_change_percent,
+          CASE
+            WHEN latest_price_trade_date = market_latest_trade_date
+             AND previous_close > 0
+             AND latest_close / previous_close - 1 <= -limit_down_threshold
+            THEN 1 ELSE 0
+          END AS latest_limit_down,
+          CASE
+            WHEN close_2_ago > 0 AND previous_close / close_2_ago - 1 <= -limit_down_threshold
+            THEN 1 ELSE 0
+          END AS previous_limit_down,
+          CASE
+            WHEN close_3_ago > 0 AND close_2_ago / close_3_ago - 1 <= -limit_down_threshold
+            THEN 1 ELSE 0
+          END AS second_previous_limit_down,
+          CASE
+            WHEN close_4_ago > 0 AND close_3_ago / close_4_ago - 1 <= -limit_down_threshold
+            THEN 1 ELSE 0
+          END AS third_previous_limit_down
+        FROM priced
+      ),
+      enriched AS (
+        SELECT
+          flagged.*,
+          CASE
+            WHEN latest_limit_down = 0 THEN 0
+            WHEN previous_limit_down = 0 THEN 1
+            WHEN second_previous_limit_down = 0 THEN 2
+            WHEN third_previous_limit_down = 0 THEN 3
+            ELSE 4
+          END AS limit_down_streak
+        FROM flagged
+      )
+    ` : '';
+    const groupedSql = dropLimitPriority ? `${groupedBaseSql}${limitDownSignalSql}` : groupedBaseSql;
+    const rowSource = dropLimitPriority ? 'enriched' : 'grouped';
+    const dropLimitPriorityOrder = dropLimitPriority
+      ? `CASE
+           WHEN COALESCE(limit_down_streak, 0) >= 2 THEN 0
+           WHEN COALESCE(latest_limit_down, 0) = 1 THEN 1
+           ELSE 2
+         END ASC,
+         COALESCE(limit_down_streak, 0) DESC,
+         COALESCE(latest_change_percent, 0) ASC,`
+      : '';
+    const limitDownFilterClause = dropLimitPriority && effectiveLimitDownFilter === 'latest'
+      ? 'WHERE COALESCE(latest_limit_down, 0) = 1'
+      : dropLimitPriority && effectiveLimitDownFilter === 'streak'
+        ? 'WHERE COALESCE(limit_down_streak, 0) >= 2'
+        : '';
 
     const totalRow = await db.get(
       `${groupedSql}
        SELECT COUNT(*) AS total
-       FROM grouped`,
+       FROM ${rowSource}
+       ${limitDownFilterClause}`,
       params
     );
 
     const rows = await db.all(
       `${groupedSql}
        SELECT *
-       FROM grouped
-       ORDER BY ${sortColumn} ${sortDirection}, symbol ASC
+       FROM ${rowSource}
+       ${limitDownFilterClause}
+       ORDER BY ${dropLimitPriorityOrder} ${sortColumn} ${sortDirection}, symbol ASC
        LIMIT ? OFFSET ?`,
       [...params, pageSize, offset]
     );
@@ -995,7 +1205,10 @@ router.get('/asset-universe', async (req: Request, res: Response) => {
         },
         sort: {
           sort_key: sortKey,
-          sort_direction: sortDirection.toLowerCase()
+          sort_direction: sortDirection.toLowerCase(),
+          drop_limit_priority: dropLimitPriority,
+          limit_down_filter: effectiveLimitDownFilter,
+          exclude_st: excludeSt
         }
       }
     });
@@ -1264,6 +1477,7 @@ router.get('/asset-universe/daily-close-update/status', async (_req: Request, re
 });
 
 router.post('/asset-universe/daily-close-update', async (req: Request, res: Response) => {
+  maybeResetStaleDailyCloseUpdateState();
   if (dailyCloseUpdateState.running) {
     return res.status(409).json({
       success: false,
@@ -1281,6 +1495,7 @@ router.post('/asset-universe/daily-close-update', async (req: Request, res: Resp
     const activePlanLimit = Math.max(Math.min(Number(req.body.active_plan_limit || 50), 200), 1);
     const candidateLimit = Math.max(Math.min(Number(req.body.candidate_limit || 20), 100), 1);
     const universeLimit = parseUniverseLimit(req.body.universe_limit, null);
+    const waitFullUniverse = req.body.wait_full_universe === true || req.body.waitFullUniverse === true;
     const intervalMs = Math.max(Number(req.body.interval_ms || 1500), 800);
     const concurrency = parseConcurrency(req.body.concurrency);
     const targetTradeDate = await resolveDailyCloseTargetTradeDate(db, source);
@@ -1375,7 +1590,7 @@ router.post('/asset-universe/daily-close-update', async (req: Request, res: Resp
       onProgress: applyDailyCloseProgress
     });
 
-    if (universeLimit === null) {
+    if (universeLimit === null && !waitFullUniverse) {
       const priorityResults = [...activePlanResults, ...candidateResults];
       const prioritySuccessCount = priorityResults.filter((item: any) => item.success && !item.skipped).length;
       const prioritySkippedCount = priorityResults.filter((item: any) => item.skipped).length;
@@ -1402,6 +1617,7 @@ router.post('/asset-universe/daily-close-update', async (req: Request, res: Resp
           candidate_count: candidateResults.length,
           universe_count: null,
           universe_limit: 'all',
+          wait_full_universe: false,
           target_trade_date: targetTradeDate,
           concurrency,
           success_count: prioritySuccessCount,
@@ -1412,6 +1628,13 @@ router.post('/asset-universe/daily-close-update', async (req: Request, res: Resp
           results: priorityResults
         }
       });
+    }
+
+    if (universeLimit === null && waitFullUniverse) {
+      dailyCloseUpdateState.phase = 'full_universe';
+      dailyCloseUpdateState.phase_label = '全市场补齐';
+      dailyCloseUpdateState.last_updated_at = new Date().toISOString();
+      dailyCloseUpdateState.last_message = '日终流水线正在等待全市场补齐完成，补齐后再继续刷新下游流程。';
     }
 
     const universeResult = await processDueAssets({
@@ -1442,6 +1665,9 @@ router.post('/asset-universe/daily-close-update', async (req: Request, res: Resp
     const successCount = allResults.filter((item: any) => item.success && !item.skipped).length;
     const skippedCount = allResults.filter((item: any) => item.skipped).length;
     const failedCount = allResults.filter((item: any) => !item.success && !item.skipped).length;
+    const coverage = universeLimit === null && waitFullUniverse
+      ? await assertFullUniverseDailyCoverage(db, source, targetTradeDate)
+      : null;
     dailyCloseUpdateState.running = false;
     dailyCloseUpdateState.phase = 'completed';
     dailyCloseUpdateState.phase_label = '行情更新完成';
@@ -1457,11 +1683,13 @@ router.post('/asset-universe/daily-close-update', async (req: Request, res: Resp
         candidate_count: candidateResults.length,
         universe_count: universeResult.processed_count,
         universe_limit: universeLimit === null ? 'all' : universeLimit,
+        wait_full_universe: universeLimit === null && waitFullUniverse,
         target_trade_date: targetTradeDate,
         concurrency,
         success_count: successCount,
         skipped_count: skippedCount,
         failed_count: failedCount,
+        coverage,
         results: allResults
       }
     });

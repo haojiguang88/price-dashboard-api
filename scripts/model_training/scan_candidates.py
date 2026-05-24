@@ -10,7 +10,24 @@ import numpy as np
 from predict import MODEL_FEATURES, connect, model_features, pick_artifact
 
 
-def latest_rows(feature_db_path, domain, features, limit):
+def feature_db_latest_trade_date(feature_db_path, domain):
+    conn = connect(feature_db_path)
+    try:
+        row = conn.execute(
+            """
+            SELECT MAX(trade_date) AS latest_trade_date
+            FROM financial_ml_features
+            WHERE asset_type = ?
+              AND trade_date IS NOT NULL
+            """,
+            (domain,),
+        ).fetchone()
+        return row["latest_trade_date"] if row else None
+    finally:
+        conn.close()
+
+
+def latest_rows(feature_db_path, domain, features, limit, trade_date=None):
     conn = connect(feature_db_path)
     try:
         columns = {
@@ -46,6 +63,7 @@ def latest_rows(feature_db_path, domain, features, limit):
                 ROW_NUMBER() OVER (PARTITION BY symbol, asset_type ORDER BY trade_date DESC) AS rn
               FROM financial_ml_features
               WHERE asset_type = ?
+                AND (? IS NULL OR trade_date <= ?)
             )
             SELECT *
             FROM ranked
@@ -53,7 +71,7 @@ def latest_rows(feature_db_path, domain, features, limit):
             ORDER BY symbol
             LIMIT ?
             """,
-            (domain, limit),
+            (domain, trade_date, trade_date, limit),
         ).fetchall()
         matrix = np.asarray([[float(row[feature] or 0) for feature in features] for row in rows], dtype=np.float32)
         return rows, matrix
@@ -68,6 +86,7 @@ def main():
     parser.add_argument("--model-key")
     parser.add_argument("--limit", type=int, default=5000)
     parser.add_argument("--top", type=int, default=30)
+    parser.add_argument("--trade-date")
     args = parser.parse_args()
 
     conn = connect(args.db)
@@ -76,8 +95,15 @@ def main():
         feature_db = artifact["source_feature_db"]
         if not feature_db or not Path(feature_db).exists():
             raise RuntimeError("模型登记里的特征库不存在，不能扫描候选。")
+        latest_feature_trade_date = feature_db_latest_trade_date(feature_db, args.domain)
+        if args.trade_date and (latest_feature_trade_date is None or latest_feature_trade_date < args.trade_date):
+            raise RuntimeError(
+                "模型特征库滞后："
+                f"{args.domain} 特征日 {latest_feature_trade_date or '无'}，当前扫描口径 {args.trade_date}；"
+                "请先刷新训练特征/重新训练后再扫描。"
+            )
         features = model_features(artifact)
-        rows, matrix = latest_rows(feature_db, args.domain, features, args.limit)
+        rows, matrix = latest_rows(feature_db, args.domain, features, args.limit, args.trade_date)
         if len(rows) == 0:
             raise RuntimeError("没有可扫描的最新特征行。")
 
@@ -104,6 +130,8 @@ def main():
                 "domain": args.domain,
                 "modelKey": artifact["model_key"],
                 "modelType": artifact["model_type"],
+                "asOfTradeDate": args.trade_date,
+                "latestFeatureTradeDate": latest_feature_trade_date,
                 "scanned": len(rows),
                 "items": candidates[:args.top],
             },

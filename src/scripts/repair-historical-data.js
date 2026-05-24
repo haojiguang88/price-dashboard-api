@@ -1,8 +1,7 @@
 const sqlite3 = require('sqlite3').verbose();
-const path = require('path');
 
 // 数据库路径
-const dbPath = process.env.DB_PATH || path.join(process.cwd(), 'db', 'price_dashboard_dev.db');
+const dbPath = process.env.DB_PATH || '/Volumes/7100/price-dashboard-data/db/price_dashboard_dev.db';
 
 /**
  * 修复历史数据：关联 sell_records 和 ended_positions

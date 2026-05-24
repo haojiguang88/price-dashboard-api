@@ -2,6 +2,7 @@
 import argparse
 import json
 import math
+import os
 import random
 import shutil
 import sqlite3
@@ -56,6 +57,40 @@ MODEL_FEATURES = [
     "trend_uptrend",
     "trend_downtrend",
     "trend_range",
+    "hs300_ret_20d",
+    "hs300_ret_60d",
+    "hs300_ret_120d",
+    "hs300_distance_ma60",
+    "hs300_drawdown_60d",
+    "relative_ret20_hs300",
+    "relative_ret60_hs300",
+    "relative_ret120_hs300",
+    "market_normal",
+    "market_risk",
+    "market_crash",
+    "market_unknown",
+    "breadth_up_ratio",
+    "breadth_down_ratio",
+    "breadth_limit_up_ratio",
+    "breadth_limit_down_ratio",
+    "breadth_above_ma20_ratio",
+    "breadth_above_ma60_ratio",
+    "breadth_above_ma120_ratio",
+    "breadth_amount_ratio_5_20",
+    "industry_known",
+    "industry_ret_5d",
+    "industry_ret_20d",
+    "industry_ret_60d",
+    "industry_amount_ratio_20",
+    "industry_ret20_rank",
+    "industry_relative_ret20_hs300",
+    "asset_vs_industry_ret20",
+    "etf_route_broad_etf",
+    "etf_route_industry_etf",
+    "etf_route_cross_border_etf",
+    "etf_route_bond_cash_etf",
+    "etf_route_commodity_etf",
+    "etf_route_other",
 ]
 
 MODEL_TARGET_LABEL = "label_structure_safe_20d"
@@ -83,20 +118,51 @@ def update_run(conn, run_id, **fields):
     conn.commit()
 
 
-def update_plan_item(conn, domain, item_key, status, note=None, completed=False):
+def table_exists(conn, table_name):
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
+def has_run_plan_items(conn, run_id):
+    if not table_exists(conn, "model_training_run_plan_items"):
+        return False
+    row = conn.execute(
+        "SELECT COUNT(*) AS count FROM model_training_run_plan_items WHERE run_id = ?",
+        (run_id,),
+    ).fetchone()
+    return bool(row and row["count"])
+
+
+def update_plan_item(conn, domain, item_key, status, note=None, completed=False, run_id=None):
     timestamp = now()
     completed_at = timestamp if completed else None
-    conn.execute(
-        """
-        UPDATE model_training_plan_items
-        SET status = ?,
-            note = COALESCE(?, note),
-            completed_at = ?,
-            updated_at = ?
-        WHERE domain = ? AND item_key = ?
-        """,
-        (status, note, completed_at, timestamp, domain, item_key),
-    )
+    if run_id and has_run_plan_items(conn, run_id):
+        conn.execute(
+            """
+            UPDATE model_training_run_plan_items
+            SET status = ?,
+                note = COALESCE(?, note),
+                completed_at = ?,
+                updated_at = ?
+            WHERE run_id = ? AND domain = ? AND item_key = ?
+            """,
+            (status, note, completed_at, timestamp, run_id, domain, item_key),
+        )
+    else:
+        conn.execute(
+            """
+            UPDATE model_training_plan_items
+            SET status = ?,
+                note = COALESCE(?, note),
+                completed_at = ?,
+                updated_at = ?
+            WHERE domain = ? AND item_key = ?
+            """,
+            (status, note, completed_at, timestamp, domain, item_key),
+        )
     conn.commit()
 
 
@@ -221,147 +287,543 @@ def run_data_audit(conn, domain, output_dir):
     return f"数据体检完成；删除无效行 {deleted}；可用源数据 {remaining} 行。"
 
 
+def latest_covered_trade_date(conn, domain, min_coverage_ratio=0.92):
+    rows = conn.execute(
+        """
+        SELECT trade_date, COUNT(DISTINCT symbol) AS symbol_count
+        FROM financial_daily_prices
+        WHERE asset_type = ?
+          AND close IS NOT NULL
+          AND close > 0
+          AND trade_date IS NOT NULL
+        GROUP BY trade_date
+        ORDER BY trade_date DESC
+        LIMIT 12
+        """,
+        (domain,),
+    ).fetchall()
+    if not rows:
+        return None
+
+    for index, row in enumerate(rows):
+        if index >= len(rows) - 1:
+            return row["trade_date"]
+        previous_count = int(rows[index + 1]["symbol_count"] or 0)
+        current_count = int(row["symbol_count"] or 0)
+        min_expected = math.floor(previous_count * min_coverage_ratio) if previous_count > 0 else 0
+        if min_expected <= 0 or current_count >= min_expected:
+            return row["trade_date"]
+
+    return rows[-1]["trade_date"]
+
+
+def sql_literal(value):
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def cleanup_sqlite_file(path):
+    path = Path(path)
+    for candidate in [
+        path,
+        Path(str(path) + "-journal"),
+        Path(str(path) + "-wal"),
+        Path(str(path) + "-shm"),
+    ]:
+        if candidate.exists():
+            candidate.unlink()
+
+
+def configure_sqlite_work_area(conn, output_path):
+    temp_dir = Path(output_path) / "_sqlite_tmp"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+
+    for key in ("SQLITE_TMPDIR", "TMPDIR", "TEMP", "TMP"):
+        os.environ[key] = str(temp_dir)
+
+    conn.execute("PRAGMA temp_store = FILE")
+    conn.execute("PRAGMA cache_size = -200000")
+    try:
+        conn.execute(f"PRAGMA temp_store_directory = {sql_literal(temp_dir)}")
+    except sqlite3.DatabaseError:
+        pass
+
+    return temp_dir
+
+
+def configure_training_artifact_db(conn, schema_name):
+    conn.execute(f"PRAGMA {schema_name}.synchronous = OFF")
+    conn.execute(f"PRAGMA {schema_name}.journal_mode = OFF")
+
+
+def record_feature_progress(output_dir, step_key, note):
+    progress_path = Path(output_dir) / "feature_table_progress.json"
+    payload = read_json_file(progress_path) if progress_path.exists() else {"steps": []}
+    payload["updated_at"] = now()
+    payload["steps"].append({
+        "step": step_key,
+        "note": note,
+        "completed_at": now(),
+    })
+    write_artifact(output_dir, "feature_table_progress.json", payload)
+
+
+def execute_feature_step(conn, output_dir, step_key, note, sql, params=()):
+    conn.execute(sql, params)
+    conn.commit()
+    record_feature_progress(output_dir, step_key, note)
+
+
 def run_feature_table(conn, domain, output_dir):
     if domain not in ("stock", "etf"):
         raise NotImplementedError("足彩特征表需要用比赛/盘口数据单独生成，不能复用金融日线特征脚本。")
 
+    max_trade_date = latest_covered_trade_date(conn, domain)
+    if not max_trade_date:
+        raise RuntimeError(f"{domain} 没有覆盖合格的交易日，停止生成训练样本表。")
+
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     feature_db_path = output_path / "features.sqlite"
-    if feature_db_path.exists():
-        feature_db_path.unlink()
+    work_db_path = output_path / "features_work.sqlite"
+    cleanup_sqlite_file(feature_db_path)
+    cleanup_sqlite_file(work_db_path)
 
-    conn.execute("PRAGMA temp_store = FILE")
-    conn.execute("PRAGMA cache_size = -200000")
+    temp_dir = configure_sqlite_work_area(conn, output_path)
     conn.execute(f"ATTACH DATABASE ? AS feature_db", (str(feature_db_path),))
+    conn.execute(f"ATTACH DATABASE ? AS feature_work", (str(work_db_path),))
     try:
-        conn.execute(
+        configure_training_artifact_db(conn, "feature_db")
+        configure_training_artifact_db(conn, "feature_work")
+
+        execute_feature_step(
+            conn,
+            output_dir,
+            "price_base",
+            "基础日线滚动窗口表已落盘到外接盘工作库。",
             """
-            CREATE TABLE feature_db.financial_ml_features AS
-            WITH base AS (
+            CREATE TABLE feature_work.price_base AS
+            SELECT
+              symbol,
+              name,
+              market,
+              asset_type,
+              trade_date,
+              open,
+              high,
+              low,
+              close,
+              volume,
+              amount,
+              close / NULLIF(LAG(close, 1) OVER symbol_window, 0) - 1.0 AS ret_1d,
+              close / NULLIF(LAG(close, 5) OVER symbol_window, 0) - 1.0 AS ret_5d,
+              close / NULLIF(LAG(close, 10) OVER symbol_window, 0) - 1.0 AS ret_10d,
+              close / NULLIF(LAG(close, 20) OVER symbol_window, 0) - 1.0 AS ret_20d,
+              close / NULLIF(LAG(close, 60) OVER symbol_window, 0) - 1.0 AS ret_60d,
+              AVG(close) OVER ma5_window AS ma5,
+              AVG(close) OVER ma10_window AS ma10,
+              AVG(close) OVER ma20_window AS ma20,
+              AVG(close) OVER ma60_window AS ma60,
+              AVG(close) OVER ma120_window AS ma120,
+              AVG(volume) OVER ma20_window AS volume_ma20,
+              AVG(amount) OVER amount20_window AS amount_ma20,
+              MIN(low) OVER ma60_window AS low_60,
+              MAX(high) OVER ma60_window AS high_60,
+              MIN(low) OVER ma120_window AS low_120,
+              MAX(high) OVER ma120_window AS high_120,
+              MIN(low) OVER ma20_window AS low_20,
+              MAX(high) OVER ma20_window AS high_20
+            FROM financial_daily_prices
+            WHERE asset_type = ?
+              AND close IS NOT NULL
+              AND close > 0
+              AND trade_date IS NOT NULL
+              AND trade_date <= ?
+            WINDOW
+              symbol_window AS (PARTITION BY symbol, asset_type ORDER BY trade_date),
+              ma5_window AS (PARTITION BY symbol, asset_type ORDER BY trade_date ROWS BETWEEN 4 PRECEDING AND CURRENT ROW),
+              ma10_window AS (PARTITION BY symbol, asset_type ORDER BY trade_date ROWS BETWEEN 9 PRECEDING AND CURRENT ROW),
+              ma20_window AS (PARTITION BY symbol, asset_type ORDER BY trade_date ROWS BETWEEN 19 PRECEDING AND CURRENT ROW),
+              ma60_window AS (PARTITION BY symbol, asset_type ORDER BY trade_date ROWS BETWEEN 59 PRECEDING AND CURRENT ROW),
+              ma120_window AS (PARTITION BY symbol, asset_type ORDER BY trade_date ROWS BETWEEN 119 PRECEDING AND CURRENT ROW),
+              amount20_window AS (PARTITION BY symbol, asset_type ORDER BY trade_date ROWS BETWEEN 19 PRECEDING AND CURRENT ROW)
+            """,
+            (domain, max_trade_date),
+        )
+        conn.execute("CREATE INDEX feature_work.idx_price_base_symbol_date ON price_base(symbol, trade_date)")
+        conn.execute("CREATE INDEX feature_work.idx_price_base_trade_date ON price_base(trade_date)")
+        conn.commit()
+
+        execute_feature_step(
+            conn,
+            output_dir,
+            "price_features",
+            "价格结构特征表已落盘到外接盘工作库。",
+            """
+            CREATE TABLE feature_work.price_features AS
+            SELECT
+              symbol,
+              name,
+              market,
+              asset_type,
+              trade_date,
+              open,
+              high,
+              low,
+              close,
+              volume,
+              amount,
+              ret_1d,
+              ret_5d,
+              ret_10d,
+              ret_20d,
+              ret_60d,
+              ma5,
+              ma10,
+              ma20,
+              ma60,
+              ma120,
+              volume / NULLIF(volume_ma20, 0) AS volume_ratio_20,
+              amount / NULLIF(amount_ma20, 0) AS amount_ratio_20,
+              AVG(ret_1d) OVER vol20_window AS ret_20d_mean,
+              AVG(ret_1d * ret_1d) OVER vol20_window AS ret_20d_sq_mean,
+              AVG(ret_1d) OVER vol60_window AS ret_60d_mean,
+              AVG(ret_1d * ret_1d) OVER vol60_window AS ret_60d_sq_mean,
+              low_20,
+              high_20,
+              low_60,
+              high_60,
+              low_120,
+              high_120,
+              (low_60 + (high_60 - low_60) * 0.20) AS safety_lower,
+              (low_60 + (high_60 - low_60) * 0.45) AS safety_upper,
+              close / NULLIF(ma20, 0) - 1.0 AS distance_ma20,
+              close / NULLIF(ma60, 0) - 1.0 AS distance_ma60,
+              ma20 / NULLIF(LAG(ma20, 5) OVER feature_symbol_window, 0) - 1.0 AS ma20_slope_5d,
+              ma60 / NULLIF(LAG(ma60, 20) OVER feature_symbol_window, 0) - 1.0 AS ma60_slope_20d,
+              close / NULLIF(high_20, 0) - 1.0 AS pullback_from_20d_high,
+              close / NULLIF(high_20, 0) >= 0.995 AS breakout_20d,
+              low_20 / NULLIF(high_20, 0) - 1.0 AS drawdown_20d,
+              low_60 / NULLIF(high_60, 0) - 1.0 AS drawdown_60d,
+              CASE WHEN ret_1d >= 0.095 THEN 1 ELSE 0 END AS limit_up_like,
+              CASE WHEN ret_1d <= -0.095 THEN 1 ELSE 0 END AS limit_down_like,
+              CASE
+                WHEN high_60 > low_60 THEN (close - low_60) / NULLIF(high_60 - low_60, 0)
+                ELSE NULL
+              END AS price_pos_60,
+              CASE
+                WHEN high_120 > low_120 THEN (close - low_120) / NULLIF(high_120 - low_120, 0)
+                ELSE NULL
+              END AS price_pos_120,
+              CASE
+                WHEN high_60 > low_60 THEN (close - (low_60 + (high_60 - low_60) * 0.20)) / NULLIF((high_60 - low_60) * 0.25, 0)
+                ELSE NULL
+              END AS safety_zone_pos,
+              CASE
+                WHEN ma20 > ma60 AND close >= ma20 THEN 'uptrend'
+                WHEN ma20 < ma60 AND close <= ma20 THEN 'downtrend'
+                ELSE 'range'
+              END AS trend_phase,
+              (
+                CASE WHEN ma20 > ma60 THEN 25 ELSE 0 END +
+                CASE WHEN close >= ma20 THEN 20 ELSE 0 END +
+                CASE WHEN ret_20d > 0 THEN 15 ELSE 0 END +
+                CASE WHEN volume_ma20 IS NOT NULL AND volume <= volume_ma20 * 2 THEN 10 ELSE 0 END +
+                CASE WHEN high_60 > low_60 AND close BETWEEN (low_60 + (high_60 - low_60) * 0.20) AND (low_60 + (high_60 - low_60) * 0.45) THEN 30 ELSE 0 END
+              ) AS structure_score
+            FROM feature_work.price_base
+            WINDOW
+              feature_symbol_window AS (PARTITION BY symbol, asset_type ORDER BY trade_date),
+              vol20_window AS (PARTITION BY symbol, asset_type ORDER BY trade_date ROWS BETWEEN 19 PRECEDING AND CURRENT ROW),
+              vol60_window AS (PARTITION BY symbol, asset_type ORDER BY trade_date ROWS BETWEEN 59 PRECEDING AND CURRENT ROW)
+            """,
+        )
+        conn.execute("CREATE INDEX feature_work.idx_price_features_symbol_date ON price_features(symbol, trade_date)")
+        conn.execute("CREATE INDEX feature_work.idx_price_features_trade_date ON price_features(trade_date)")
+        conn.commit()
+
+        execute_feature_step(
+            conn,
+            output_dir,
+            "feature_dates",
+            "特征交易日表已落盘到外接盘工作库。",
+            """
+            CREATE TABLE feature_work.feature_dates AS
+            SELECT DISTINCT trade_date
+            FROM feature_work.price_features
+            """,
+        )
+        conn.execute("CREATE UNIQUE INDEX feature_work.idx_feature_dates_trade_date ON feature_dates(trade_date)")
+        conn.commit()
+
+        execute_feature_step(
+            conn,
+            output_dir,
+            "market_asof",
+            "沪深300和市场状态 as-of 表已落盘到外接盘工作库。",
+            """
+            CREATE TABLE feature_work.market_asof AS
+            WITH
+            hs300_prices AS (
+              SELECT trade_date, close, low, high
+              FROM (
+                SELECT
+                  trade_date,
+                  close,
+                  low,
+                  high,
+                  ROW_NUMBER() OVER (
+                    PARTITION BY trade_date
+                    ORDER BY CASE source WHEN 'tushare' THEN 1 WHEN 'akshare' THEN 2 ELSE 9 END
+                  ) AS source_rank
+                FROM financial_daily_prices
+                WHERE symbol = '000300'
+                  AND asset_type = 'index'
+                  AND close IS NOT NULL
+                  AND close > 0
+                  AND trade_date IS NOT NULL
+                  AND trade_date <= ?
+              )
+              WHERE source_rank = 1
+            ),
+            hs300_base AS (
               SELECT
-                symbol,
-                name,
-                market,
-                asset_type,
                 trade_date,
-                open,
-                high,
-                low,
                 close,
-                volume,
+                close / NULLIF(LAG(close, 20) OVER hs300_window, 0) - 1.0 AS hs300_ret_20d,
+                close / NULLIF(LAG(close, 60) OVER hs300_window, 0) - 1.0 AS hs300_ret_60d,
+                close / NULLIF(LAG(close, 120) OVER hs300_window, 0) - 1.0 AS hs300_ret_120d,
+                close / NULLIF(AVG(close) OVER hs300_ma60_window, 0) - 1.0 AS hs300_distance_ma60,
+                MIN(low) OVER hs300_ma60_window / NULLIF(MAX(high) OVER hs300_ma60_window, 0) - 1.0 AS hs300_drawdown_60d
+              FROM hs300_prices
+              WINDOW
+                hs300_window AS (ORDER BY trade_date),
+                hs300_ma60_window AS (ORDER BY trade_date ROWS BETWEEN 59 PRECEDING AND CURRENT ROW)
+            ),
+            market_table AS (
+              SELECT
+                trade_date,
+                table_regime
+              FROM (
+                SELECT
+                  trade_date,
+                  CASE
+                    WHEN market_regime LIKE 'NORMAL%' THEN 'NORMAL'
+                    WHEN market_regime = 'RISK' THEN 'RISK'
+                    WHEN market_regime IN ('CRASH_WARNING', 'DEEP_CRASH', 'CRASH') THEN 'CRASH'
+                    ELSE 'UNKNOWN'
+                  END AS table_regime,
+                  ROW_NUMBER() OVER (
+                    PARTITION BY trade_date
+                    ORDER BY updated_at DESC, id DESC
+                  ) AS regime_rank
+                FROM financial_market_regime
+                WHERE symbol = '000300'
+              )
+              WHERE regime_rank = 1
+            ),
+            market_context AS (
+              SELECT
+                h.*,
+                COALESCE(
+                  m.table_regime,
+                  CASE
+                    WHEN COALESCE(h.hs300_drawdown_60d, 0) <= -0.15 OR COALESCE(h.hs300_ret_20d, 0) <= -0.12 THEN 'CRASH'
+                    WHEN COALESCE(h.hs300_drawdown_60d, 0) <= -0.10 OR COALESCE(h.hs300_ret_20d, 0) <= -0.08 THEN 'RISK'
+                    WHEN COALESCE(h.hs300_distance_ma60, 0) >= 0 AND COALESCE(h.hs300_ret_20d, 0) > -0.05 THEN 'NORMAL'
+                    ELSE 'UNKNOWN'
+                  END
+                ) AS market_regime_key
+              FROM hs300_base h
+              LEFT JOIN market_table m
+                ON m.trade_date = (
+                  SELECT MAX(m2.trade_date)
+                  FROM market_table m2
+                  WHERE m2.trade_date <= h.trade_date
+                )
+            ),
+            market_asof AS (
+              SELECT
+                fd.trade_date AS feature_trade_date,
+                mc.*
+              FROM feature_work.feature_dates fd
+              LEFT JOIN market_context mc
+                ON mc.trade_date = (
+                  SELECT MAX(mc2.trade_date)
+                  FROM market_context mc2
+                  WHERE mc2.trade_date <= fd.trade_date
+                )
+            )
+            SELECT * FROM market_asof
+            """,
+            (max_trade_date,),
+        )
+        conn.execute("CREATE UNIQUE INDEX feature_work.idx_market_asof_date ON market_asof(feature_trade_date)")
+        conn.commit()
+
+        execute_feature_step(
+            conn,
+            output_dir,
+            "breadth_asof",
+            "市场宽度 as-of 表已落盘到外接盘工作库。",
+            """
+            CREATE TABLE feature_work.breadth_asof AS
+            WITH
+            breadth_context AS (
+              SELECT *
+              FROM financial_market_breadth_daily
+              WHERE market_universe = 'stock_tushare'
+            ),
+            breadth_asof AS (
+              SELECT
+                fd.trade_date AS feature_trade_date,
+                b.*
+              FROM feature_work.feature_dates fd
+              LEFT JOIN breadth_context b
+                ON b.trade_date = (
+                  SELECT MAX(b2.trade_date)
+                  FROM breadth_context b2
+                  WHERE b2.trade_date <= fd.trade_date
+                )
+            )
+            SELECT * FROM breadth_asof
+            """,
+        )
+        conn.execute("CREATE UNIQUE INDEX feature_work.idx_breadth_asof_date ON breadth_asof(feature_trade_date)")
+        conn.commit()
+
+        execute_feature_step(
+            conn,
+            output_dir,
+            "industry_asof",
+            "行业强弱 as-of 表已落盘到外接盘工作库。",
+            """
+            CREATE TABLE feature_work.industry_asof AS
+            WITH
+            industry_base AS (
+              SELECT
+                index_code,
+                trade_date,
+                close,
                 amount,
-                close / NULLIF(LAG(close, 1) OVER symbol_window, 0) - 1.0 AS ret_1d,
-                close / NULLIF(LAG(close, 5) OVER symbol_window, 0) - 1.0 AS ret_5d,
-                close / NULLIF(LAG(close, 10) OVER symbol_window, 0) - 1.0 AS ret_10d,
-                close / NULLIF(LAG(close, 20) OVER symbol_window, 0) - 1.0 AS ret_20d,
-                close / NULLIF(LAG(close, 60) OVER symbol_window, 0) - 1.0 AS ret_60d,
-                AVG(close) OVER ma5_window AS ma5,
-                AVG(close) OVER ma10_window AS ma10,
-                AVG(close) OVER ma20_window AS ma20,
-                AVG(close) OVER ma60_window AS ma60,
-                AVG(close) OVER ma120_window AS ma120,
-                AVG(volume) OVER ma20_window AS volume_ma20,
-                AVG(amount) OVER amount20_window AS amount_ma20,
-                MIN(low) OVER ma60_window AS low_60,
-                MAX(high) OVER ma60_window AS high_60,
-                MIN(low) OVER ma120_window AS low_120,
-                MAX(high) OVER ma120_window AS high_120,
-                MIN(low) OVER ma20_window AS low_20,
-                MAX(high) OVER ma20_window AS high_20
-              FROM financial_daily_prices
-              WHERE asset_type = ?
-                AND close IS NOT NULL
+                close / NULLIF(LAG(close, 5) OVER industry_window, 0) - 1.0 AS industry_ret_5d,
+                close / NULLIF(LAG(close, 20) OVER industry_window, 0) - 1.0 AS industry_ret_20d,
+                close / NULLIF(LAG(close, 60) OVER industry_window, 0) - 1.0 AS industry_ret_60d,
+                amount / NULLIF(AVG(amount) OVER industry_amount20_window, 0) AS industry_amount_ratio_20
+              FROM financial_sw_industry_daily
+              WHERE close IS NOT NULL
                 AND close > 0
                 AND trade_date IS NOT NULL
               WINDOW
-                symbol_window AS (PARTITION BY symbol, asset_type ORDER BY trade_date),
-                ma5_window AS (PARTITION BY symbol, asset_type ORDER BY trade_date ROWS BETWEEN 4 PRECEDING AND CURRENT ROW),
-                ma10_window AS (PARTITION BY symbol, asset_type ORDER BY trade_date ROWS BETWEEN 9 PRECEDING AND CURRENT ROW),
-                ma20_window AS (PARTITION BY symbol, asset_type ORDER BY trade_date ROWS BETWEEN 19 PRECEDING AND CURRENT ROW),
-                ma60_window AS (PARTITION BY symbol, asset_type ORDER BY trade_date ROWS BETWEEN 59 PRECEDING AND CURRENT ROW),
-                ma120_window AS (PARTITION BY symbol, asset_type ORDER BY trade_date ROWS BETWEEN 119 PRECEDING AND CURRENT ROW),
-                amount20_window AS (PARTITION BY symbol, asset_type ORDER BY trade_date ROWS BETWEEN 19 PRECEDING AND CURRENT ROW)
+                industry_window AS (PARTITION BY index_code ORDER BY trade_date),
+                industry_amount20_window AS (PARTITION BY index_code ORDER BY trade_date ROWS BETWEEN 19 PRECEDING AND CURRENT ROW)
             ),
-            features AS (
+            industry_ranked AS (
+              SELECT
+                *,
+                CASE
+                  WHEN industry_count > 1 THEN 1.0 - ((industry_rank - 1.0) / NULLIF(industry_count - 1.0, 0))
+                  ELSE 0.5
+                END AS industry_ret20_rank
+              FROM (
+                SELECT
+                  industry_base.*,
+                  RANK() OVER (PARTITION BY trade_date ORDER BY industry_ret_20d DESC) AS industry_rank,
+                  COUNT(*) OVER (PARTITION BY trade_date) AS industry_count
+                FROM industry_base
+              )
+            ),
+            industry_codes AS (
+              SELECT DISTINCT index_code
+              FROM industry_ranked
+            ),
+            industry_asof AS (
+              SELECT
+                fd.trade_date AS feature_trade_date,
+                ir.*
+              FROM feature_work.feature_dates fd
+              CROSS JOIN industry_codes codes
+              LEFT JOIN industry_ranked ir
+                ON ir.index_code = codes.index_code
+               AND ir.trade_date = (
+                 SELECT MAX(ir2.trade_date)
+                 FROM industry_ranked ir2
+                 WHERE ir2.index_code = codes.index_code
+                   AND ir2.trade_date <= fd.trade_date
+              )
+              WHERE ir.index_code IS NOT NULL
+            )
+            SELECT * FROM industry_asof
+            """,
+        )
+        conn.execute("CREATE INDEX feature_work.idx_industry_asof_date_code ON industry_asof(feature_trade_date, index_code)")
+        conn.commit()
+
+        execute_feature_step(
+            conn,
+            output_dir,
+            "industry_members",
+            "行业成分映射表已复制到外接盘工作库。",
+            """
+            CREATE TABLE feature_work.industry_members AS
+            SELECT symbol, l1_code, in_date, out_date
+            FROM financial_sw_industry_members
+            """,
+        )
+        conn.execute("CREATE INDEX feature_work.idx_industry_members_symbol_dates ON industry_members(symbol, in_date, out_date)")
+        conn.commit()
+
+        execute_feature_step(
+            conn,
+            output_dir,
+            "universe_context",
+            "资产路由表已落盘到外接盘工作库。",
+            """
+            CREATE TABLE feature_work.universe_context AS
+            WITH
+            universe_ranked AS (
               SELECT
                 symbol,
-                name,
-                market,
                 asset_type,
-                trade_date,
-                open,
-                high,
-                low,
-                close,
-                volume,
-                amount,
-                ret_1d,
-                ret_5d,
-                ret_10d,
-                ret_20d,
-                ret_60d,
-                ma5,
-                ma10,
-                ma20,
-                ma60,
-                ma120,
-                volume / NULLIF(volume_ma20, 0) AS volume_ratio_20,
-                amount / NULLIF(amount_ma20, 0) AS amount_ratio_20,
-                AVG(ret_1d) OVER vol20_window AS ret_20d_mean,
-                AVG(ret_1d * ret_1d) OVER vol20_window AS ret_20d_sq_mean,
-                AVG(ret_1d) OVER vol60_window AS ret_60d_mean,
-                AVG(ret_1d * ret_1d) OVER vol60_window AS ret_60d_sq_mean,
-                low_20,
-                high_20,
-                low_60,
-                high_60,
-                low_120,
-                high_120,
-                (low_60 + (high_60 - low_60) * 0.20) AS safety_lower,
-                (low_60 + (high_60 - low_60) * 0.45) AS safety_upper,
-                close / NULLIF(ma20, 0) - 1.0 AS distance_ma20,
-                close / NULLIF(ma60, 0) - 1.0 AS distance_ma60,
-                ma20 / NULLIF(LAG(ma20, 5) OVER feature_symbol_window, 0) - 1.0 AS ma20_slope_5d,
-                ma60 / NULLIF(LAG(ma60, 20) OVER feature_symbol_window, 0) - 1.0 AS ma60_slope_20d,
-                close / NULLIF(high_20, 0) - 1.0 AS pullback_from_20d_high,
-                close / NULLIF(high_20, 0) >= 0.995 AS breakout_20d,
-                low_20 / NULLIF(high_20, 0) - 1.0 AS drawdown_20d,
-                low_60 / NULLIF(high_60, 0) - 1.0 AS drawdown_60d,
-                CASE WHEN ret_1d >= 0.095 THEN 1 ELSE 0 END AS limit_up_like,
-                CASE WHEN ret_1d <= -0.095 THEN 1 ELSE 0 END AS limit_down_like,
-                CASE
-                  WHEN high_60 > low_60 THEN (close - low_60) / NULLIF(high_60 - low_60, 0)
-                  ELSE NULL
-                END AS price_pos_60,
-                CASE
-                  WHEN high_120 > low_120 THEN (close - low_120) / NULLIF(high_120 - low_120, 0)
-                  ELSE NULL
-                END AS price_pos_120,
-                CASE
-                  WHEN high_60 > low_60 THEN (close - (low_60 + (high_60 - low_60) * 0.20)) / NULLIF((high_60 - low_60) * 0.25, 0)
-                  ELSE NULL
-                END AS safety_zone_pos,
-                CASE
-                  WHEN ma20 > ma60 AND close >= ma20 THEN 'uptrend'
-                  WHEN ma20 < ma60 AND close <= ma20 THEN 'downtrend'
-                  ELSE 'range'
-                END AS trend_phase,
-                (
-                  CASE WHEN ma20 > ma60 THEN 25 ELSE 0 END +
-                  CASE WHEN close >= ma20 THEN 20 ELSE 0 END +
-                  CASE WHEN ret_20d > 0 THEN 15 ELSE 0 END +
-                  CASE WHEN volume_ma20 IS NOT NULL AND volume <= volume_ma20 * 2 THEN 10 ELSE 0 END +
-                  CASE WHEN high_60 > low_60 AND close BETWEEN (low_60 + (high_60 - low_60) * 0.20) AND (low_60 + (high_60 - low_60) * 0.45) THEN 30 ELSE 0 END
-                ) AS structure_score
-              FROM base
-              WINDOW
-                feature_symbol_window AS (PARTITION BY symbol, asset_type ORDER BY trade_date),
-                vol20_window AS (PARTITION BY symbol, asset_type ORDER BY trade_date ROWS BETWEEN 19 PRECEDING AND CURRENT ROW),
-                vol60_window AS (PARTITION BY symbol, asset_type ORDER BY trade_date ROWS BETWEEN 59 PRECEDING AND CURRENT ROW)
+                universe_type,
+                ROW_NUMBER() OVER (
+                  PARTITION BY symbol, asset_type
+                  ORDER BY
+                    CASE universe_type
+                      WHEN 'industry_etf' THEN 1
+                      WHEN 'broad_etf' THEN 2
+                      WHEN 'cross_border_etf' THEN 3
+                      WHEN 'bond_cash_etf' THEN 4
+                      WHEN 'commodity_etf' THEN 5
+                      WHEN 'stock_whitelist' THEN 6
+                      WHEN 'hs300_component' THEN 7
+                      WHEN 'full_etf' THEN 8
+                      WHEN 'full_stock' THEN 9
+                      ELSE 99
+                    END
+                ) AS route_rank
+              FROM financial_asset_universe
+              WHERE enabled = 1
+            ),
+            universe_context AS (
+              SELECT symbol, asset_type, universe_type
+              FROM universe_ranked
+              WHERE route_rank = 1
             )
+            SELECT * FROM universe_context
+            """,
+        )
+        conn.execute("CREATE UNIQUE INDEX feature_work.idx_universe_context_symbol_type ON universe_context(symbol, asset_type)")
+        conn.commit()
+
+        execute_feature_step(
+            conn,
+            output_dir,
+            "financial_ml_features",
+            "最终训练特征表已写入 features.sqlite。",
+            """
+            CREATE TABLE feature_db.financial_ml_features AS
             SELECT
-              *,
+              features.*,
               CASE
                 WHEN ret_20d_sq_mean IS NOT NULL AND ret_20d_mean IS NOT NULL
                 THEN sqrt(MAX(ret_20d_sq_mean - ret_20d_mean * ret_20d_mean, 0))
@@ -375,11 +837,74 @@ def run_feature_table(conn, domain, output_dir):
               CASE
                 WHEN safety_zone_pos BETWEEN 0 AND 1 THEN 1
                 ELSE 0
-              END AS in_safety_zone
-            FROM features
+              END AS in_safety_zone,
+              COALESCE(market_asof.hs300_ret_20d, 0) AS hs300_ret_20d,
+              COALESCE(market_asof.hs300_ret_60d, 0) AS hs300_ret_60d,
+              COALESCE(market_asof.hs300_ret_120d, 0) AS hs300_ret_120d,
+              COALESCE(market_asof.hs300_distance_ma60, 0) AS hs300_distance_ma60,
+              COALESCE(market_asof.hs300_drawdown_60d, 0) AS hs300_drawdown_60d,
+              COALESCE(features.ret_20d - market_asof.hs300_ret_20d, 0) AS relative_ret20_hs300,
+              COALESCE(features.ret_60d - market_asof.hs300_ret_60d, 0) AS relative_ret60_hs300,
+              COALESCE((features.close / NULLIF(LAG(features.close, 120) OVER feature_output_window, 0) - 1.0) - market_asof.hs300_ret_120d, 0) AS relative_ret120_hs300,
+              COALESCE(market_asof.market_regime_key, 'UNKNOWN') AS market_regime,
+              CASE WHEN market_asof.market_regime_key = 'NORMAL' THEN 1 ELSE 0 END AS market_normal,
+              CASE WHEN market_asof.market_regime_key = 'RISK' THEN 1 ELSE 0 END AS market_risk,
+              CASE WHEN market_asof.market_regime_key = 'CRASH' THEN 1 ELSE 0 END AS market_crash,
+              CASE WHEN market_asof.market_regime_key IS NULL OR market_asof.market_regime_key = 'UNKNOWN' THEN 1 ELSE 0 END AS market_unknown,
+              COALESCE(breadth_asof.up_ratio, 0) AS breadth_up_ratio,
+              COALESCE(breadth_asof.down_ratio, 0) AS breadth_down_ratio,
+              COALESCE(breadth_asof.limit_up_ratio, 0) AS breadth_limit_up_ratio,
+              COALESCE(breadth_asof.limit_down_ratio, 0) AS breadth_limit_down_ratio,
+              COALESCE(breadth_asof.above_ma20_ratio, 0) AS breadth_above_ma20_ratio,
+              COALESCE(breadth_asof.above_ma60_ratio, 0) AS breadth_above_ma60_ratio,
+              COALESCE(breadth_asof.above_ma120_ratio, 0) AS breadth_above_ma120_ratio,
+              COALESCE(breadth_asof.amount_ratio_5_20, 0) AS breadth_amount_ratio_5_20,
+              CASE WHEN industry_asof.index_code IS NOT NULL THEN 1 ELSE 0 END AS industry_known,
+              COALESCE(industry_asof.industry_ret_5d, 0) AS industry_ret_5d,
+              COALESCE(industry_asof.industry_ret_20d, 0) AS industry_ret_20d,
+              COALESCE(industry_asof.industry_ret_60d, 0) AS industry_ret_60d,
+              COALESCE(industry_asof.industry_amount_ratio_20, 0) AS industry_amount_ratio_20,
+              COALESCE(industry_asof.industry_ret20_rank, 0) AS industry_ret20_rank,
+              COALESCE(industry_asof.industry_ret_20d - market_asof.hs300_ret_20d, 0) AS industry_relative_ret20_hs300,
+              COALESCE(features.ret_20d - industry_asof.industry_ret_20d, 0) AS asset_vs_industry_ret20,
+              CASE WHEN features.asset_type = 'etf' AND universe_context.universe_type = 'broad_etf' THEN 1 ELSE 0 END AS etf_route_broad_etf,
+              CASE WHEN features.asset_type = 'etf' AND universe_context.universe_type = 'industry_etf' THEN 1 ELSE 0 END AS etf_route_industry_etf,
+              CASE WHEN features.asset_type = 'etf' AND universe_context.universe_type = 'cross_border_etf' THEN 1 ELSE 0 END AS etf_route_cross_border_etf,
+              CASE WHEN features.asset_type = 'etf' AND universe_context.universe_type = 'bond_cash_etf' THEN 1 ELSE 0 END AS etf_route_bond_cash_etf,
+              CASE WHEN features.asset_type = 'etf' AND universe_context.universe_type = 'commodity_etf' THEN 1 ELSE 0 END AS etf_route_commodity_etf,
+              CASE
+                WHEN features.asset_type = 'etf'
+                  AND COALESCE(universe_context.universe_type, 'other') NOT IN ('broad_etf', 'industry_etf', 'cross_border_etf', 'bond_cash_etf', 'commodity_etf')
+                THEN 1 ELSE 0
+              END AS etf_route_other
+            FROM feature_work.price_features features
+            LEFT JOIN feature_work.market_asof market_asof
+              ON market_asof.feature_trade_date = features.trade_date
+            LEFT JOIN feature_work.breadth_asof breadth_asof
+              ON breadth_asof.feature_trade_date = features.trade_date
+            LEFT JOIN feature_work.industry_members industry_member
+              ON industry_member.symbol = features.symbol
+             AND features.asset_type = 'stock'
+             AND (
+               industry_member.in_date IS NULL
+               OR industry_member.in_date = ''
+               OR industry_member.in_date <= features.trade_date
+             )
+             AND (
+               industry_member.out_date IS NULL
+               OR industry_member.out_date = ''
+               OR industry_member.out_date >= features.trade_date
+             )
+            LEFT JOIN feature_work.industry_asof industry_asof
+              ON industry_asof.index_code = industry_member.l1_code
+             AND industry_asof.feature_trade_date = features.trade_date
+            LEFT JOIN feature_work.universe_context universe_context
+              ON universe_context.symbol = features.symbol
+             AND universe_context.asset_type = features.asset_type
             WHERE ma60 IS NOT NULL
+            WINDOW
+              feature_output_window AS (PARTITION BY features.symbol, features.asset_type ORDER BY features.trade_date)
             """,
-            (domain,),
         )
         conn.execute("CREATE INDEX feature_db.idx_financial_ml_features_symbol_date ON financial_ml_features(symbol, trade_date)")
         conn.execute("CREATE INDEX feature_db.idx_financial_ml_features_date ON financial_ml_features(trade_date)")
@@ -395,19 +920,32 @@ def run_feature_table(conn, domain, output_dir):
             "symbols": symbol_row["count"],
             "min_trade_date": date_row["min_date"],
             "max_trade_date": date_row["max_date"],
+            "covered_trade_date": max_trade_date,
             "completed_at": now(),
             "feature_table": "financial_ml_features",
+            "work_db": str(work_db_path),
+            "sqlite_temp_dir": str(temp_dir),
         }
         write_artifact(output_dir, "feature_table.json", summary)
         return f"训练样本特征表生成完成；{summary['feature_rows']} 行，{summary['symbols']} 个标的；文件：{feature_db_path}"
     finally:
-        conn.execute("DETACH DATABASE feature_db")
+        for schema_name in ("feature_work", "feature_db"):
+            try:
+                conn.execute(f"DETACH DATABASE {schema_name}")
+            except sqlite3.DatabaseError:
+                pass
         conn.commit()
+        cleanup_sqlite_file(work_db_path)
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 def run_label_table(conn, domain, output_dir):
     if domain not in ("stock", "etf"):
         raise NotImplementedError("足彩标签需要基于比赛结果和盘口结果单独生成，不能复用金融日线标签脚本。")
+
+    max_trade_date = latest_covered_trade_date(conn, domain)
+    if not max_trade_date:
+        raise RuntimeError(f"{domain} 没有覆盖合格的交易日，停止生成训练标签。")
 
     feature_db_path = Path(output_dir) / "features.sqlite"
     if not feature_db_path.exists():
@@ -446,6 +984,7 @@ def run_label_table(conn, domain, output_dir):
                 AND close IS NOT NULL
                 AND close > 0
                 AND trade_date IS NOT NULL
+                AND trade_date <= ?
               WINDOW
                 symbol_window AS (PARTITION BY symbol, asset_type ORDER BY trade_date),
                 drawdown_20_window AS (PARTITION BY symbol, asset_type ORDER BY trade_date ROWS BETWEEN CURRENT ROW AND 20 FOLLOWING),
@@ -498,7 +1037,7 @@ def run_label_table(conn, domain, output_dir):
              AND feat.trade_date = f.trade_date
             WHERE close_fwd_20 IS NOT NULL
             """,
-            (domain,),
+            (domain, max_trade_date),
         )
         conn.execute("CREATE INDEX feature_db.idx_financial_ml_labels_symbol_date ON financial_ml_labels(symbol, trade_date)")
         conn.execute("CREATE INDEX feature_db.idx_financial_ml_labels_date ON financial_ml_labels(trade_date)")
@@ -523,6 +1062,7 @@ def run_label_table(conn, domain, output_dir):
             "feature_db": str(feature_db_path),
             "label_rows": row["count"],
             "positive_counts": dict(positive),
+            "covered_trade_date": max_trade_date,
             "completed_at": now(),
             "label_table": "financial_ml_labels",
         }
@@ -788,6 +1328,18 @@ def fetch_model_rows(conn, split, limit):
         (split,),
     ).fetchone()["count"] or 1
     per_group_limit = max(1000, math.ceil(limit / max(1, year_count * 2)))
+    feature_select_sql = ",\n          ".join(
+        [
+            "CASE WHEN trend_phase = 'uptrend' THEN 1 ELSE 0 END AS trend_uptrend"
+            if feature == "trend_uptrend"
+            else "CASE WHEN trend_phase = 'downtrend' THEN 1 ELSE 0 END AS trend_downtrend"
+            if feature == "trend_downtrend"
+            else "CASE WHEN trend_phase = 'range' THEN 1 ELSE 0 END AS trend_range"
+            if feature == "trend_range"
+            else f"COALESCE({feature}, 0) AS {feature}"
+            for feature in MODEL_FEATURES
+        ]
+    )
     rows = conn.execute(
         f"""
         WITH sampled AS (
@@ -801,32 +1353,7 @@ def fetch_model_rows(conn, split, limit):
             AND {MODEL_TARGET_LABEL} IS NOT NULL
         )
         SELECT
-          COALESCE(ret_5d, 0) AS ret_5d,
-          COALESCE(ret_10d, 0) AS ret_10d,
-          COALESCE(ret_20d, 0) AS ret_20d,
-          COALESCE(ret_60d, 0) AS ret_60d,
-          COALESCE(volume_ratio_20, 0) AS volume_ratio_20,
-          COALESCE(amount_ratio_20, 0) AS amount_ratio_20,
-          COALESCE(price_pos_60, 0) AS price_pos_60,
-          COALESCE(price_pos_120, 0) AS price_pos_120,
-          COALESCE(safety_zone_pos, 0) AS safety_zone_pos,
-          COALESCE(volatility_20, 0) AS volatility_20,
-          COALESCE(volatility_60, 0) AS volatility_60,
-          COALESCE(ma20_slope_5d, 0) AS ma20_slope_5d,
-          COALESCE(ma60_slope_20d, 0) AS ma60_slope_20d,
-          COALESCE(distance_ma20, 0) AS distance_ma20,
-          COALESCE(distance_ma60, 0) AS distance_ma60,
-          COALESCE(drawdown_20d, 0) AS drawdown_20d,
-          COALESCE(drawdown_60d, 0) AS drawdown_60d,
-          COALESCE(breakout_20d, 0) AS breakout_20d,
-          COALESCE(pullback_from_20d_high, 0) AS pullback_from_20d_high,
-          COALESCE(limit_up_like, 0) AS limit_up_like,
-          COALESCE(limit_down_like, 0) AS limit_down_like,
-          COALESCE(in_safety_zone, 0) AS in_safety_zone,
-          COALESCE(structure_score, 0) AS structure_score,
-          CASE WHEN trend_phase = 'uptrend' THEN 1 ELSE 0 END AS trend_uptrend,
-          CASE WHEN trend_phase = 'downtrend' THEN 1 ELSE 0 END AS trend_downtrend,
-          CASE WHEN trend_phase = 'range' THEN 1 ELSE 0 END AS trend_range,
+          {feature_select_sql},
           {MODEL_TARGET_LABEL} AS label
         FROM sampled
         WHERE sample_rank <= ?
@@ -1327,6 +1854,57 @@ def run_backtest_report(conn, domain, output_dir):
             ("year", "strftime('%Y', trade_date)"),
             ("asset_type", "asset_type"),
             ("trend_phase", "COALESCE(trend_phase, 'unknown')"),
+            ("market_regime", "COALESCE(market_regime, 'UNKNOWN')"),
+            (
+                "relative_hs300_bucket",
+                """
+                CASE
+                  WHEN relative_ret20_hs300 >= 0.05 THEN '强于沪深300>=5%'
+                  WHEN relative_ret20_hs300 >= 0.02 THEN '强于沪深3002-5%'
+                  WHEN relative_ret20_hs300 <= -0.05 THEN '弱于沪深300>=5%'
+                  WHEN relative_ret20_hs300 <= -0.02 THEN '弱于沪深3002-5%'
+                  ELSE '贴近沪深300'
+                END
+                """,
+            ),
+            (
+                "breadth_ma60_bucket",
+                """
+                CASE
+                  WHEN breadth_above_ma60_ratio >= 0.60 THEN '广度强'
+                  WHEN breadth_above_ma60_ratio >= 0.40 THEN '广度中性'
+                  WHEN breadth_above_ma60_ratio > 0 THEN '广度弱'
+                  ELSE '广度未知'
+                END
+                """,
+            ),
+            (
+                "industry_strength_bucket",
+                """
+                CASE
+                  WHEN industry_known < 0.5 THEN '行业未知'
+                  WHEN industry_ret20_rank >= 0.80 THEN '行业强势前20%'
+                  WHEN industry_ret20_rank >= 0.60 THEN '行业偏强'
+                  WHEN industry_ret20_rank <= 0.20 THEN '行业弱势后20%'
+                  WHEN industry_ret20_rank <= 0.40 THEN '行业偏弱'
+                  ELSE '行业中性'
+                END
+                """,
+            ),
+            (
+                "etf_route",
+                """
+                CASE
+                  WHEN etf_route_broad_etf >= 0.5 THEN '宽基ETF'
+                  WHEN etf_route_industry_etf >= 0.5 THEN '行业ETF'
+                  WHEN etf_route_cross_border_etf >= 0.5 THEN '跨境ETF'
+                  WHEN etf_route_bond_cash_etf >= 0.5 THEN '债券货币ETF'
+                  WHEN etf_route_commodity_etf >= 0.5 THEN '商品ETF'
+                  WHEN asset_type != 'etf' THEN '非ETF'
+                  ELSE '其他ETF'
+                END
+                """,
+            ),
             (
                 "structure_score_bucket",
                 """
@@ -1388,27 +1966,6 @@ def run_backtest_report(conn, domain, output_dir):
                     AVG(label_fake_breakout_10d) AS fake_breakout_rate_10d
                   FROM feature_db.financial_ml_dataset
                   GROUP BY group_value, dataset_split
-                ),
-                median_values AS (
-                  SELECT
-                    ? AS group_type,
-                    {expression} AS group_value,
-                    dataset_split,
-                    AVG(future_ret_20d) AS median_future_ret_20d
-                  FROM (
-                    SELECT
-                      *,
-                      ROW_NUMBER() OVER (
-                        PARTITION BY {expression}, dataset_split
-                        ORDER BY future_ret_20d
-                      ) AS row_number,
-                      COUNT(*) OVER (
-                        PARTITION BY {expression}, dataset_split
-                      ) AS group_count
-                    FROM feature_db.financial_ml_dataset
-                  )
-                  WHERE row_number IN ((group_count + 1) / 2, (group_count + 2) / 2)
-                  GROUP BY group_value, dataset_split
                 )
                 SELECT
                   g.group_type,
@@ -1419,7 +1976,7 @@ def run_backtest_report(conn, domain, output_dir):
                   g.avg_future_ret_10d,
                   g.avg_future_ret_20d,
                   g.avg_future_ret_60d,
-                  m.median_future_ret_20d,
+                  g.avg_future_ret_20d AS median_future_ret_20d,
                   g.win_rate_5d,
                   g.win_rate_10d_gt_3,
                   g.win_rate_20d_gt_5,
@@ -1431,12 +1988,8 @@ def run_backtest_report(conn, domain, output_dir):
                   g.fake_breakout_rate_10d,
                   g.avg_future_ret_20d / NULLIF(ABS(g.avg_max_drawdown_20d), 0) AS risk_adjusted_20d
                 FROM grouped g
-                LEFT JOIN median_values m
-                  ON m.group_type = g.group_type
-                 AND m.group_value = g.group_value
-                 AND m.dataset_split = g.dataset_split
                 """,
-                (group_type, group_type),
+                (group_type,),
             )
         conn.commit()
 
@@ -1481,6 +2034,7 @@ def run_backtest_report(conn, domain, output_dir):
             "group_types": [group_type for group_type, _ in group_sql],
             "top_validation_groups": [dict(row) for row in top_validation],
             "top_test_groups": [dict(row) for row in top_test],
+            "median_mode": "avg_proxy_to_avoid_full_dataset_window_scan",
             "completed_at": now(),
         }
         write_artifact(output_dir, "backtest_report.json", summary)
@@ -2193,15 +2747,27 @@ def main():
     conn = connect(args.db)
 
     try:
-        items = conn.execute(
-            """
-            SELECT item_key, title
-            FROM model_training_plan_items
-            WHERE domain = ? AND status != 'completed'
-            ORDER BY sort_order ASC
-            """,
-            (args.domain,),
-        ).fetchall()
+        use_run_plan_items = has_run_plan_items(conn, args.run_id)
+        if use_run_plan_items:
+            items = conn.execute(
+                """
+                SELECT item_key, title
+                FROM model_training_run_plan_items
+                WHERE run_id = ? AND domain = ? AND status != 'completed'
+                ORDER BY sort_order ASC
+                """,
+                (args.run_id, args.domain),
+            ).fetchall()
+        else:
+            items = conn.execute(
+                """
+                SELECT item_key, title
+                FROM model_training_plan_items
+                WHERE domain = ? AND status != 'completed'
+                ORDER BY sort_order ASC
+                """,
+                (args.domain,),
+            ).fetchall()
 
         if not items:
             update_run(conn, args.run_id, status="completed", message="训练计划已全部完成", finished_at=now())
@@ -2211,14 +2777,21 @@ def main():
             item_key = item["item_key"]
             title = item["title"]
             update_run(conn, args.run_id, current_item_key=item_key, message=f"流水线执行中：{title}")
-            update_plan_item(conn, args.domain, item_key, "running", note=f"流水线执行中；运行目录：{args.output_dir}")
+            update_plan_item(
+                conn,
+                args.domain,
+                item_key,
+                "running",
+                note=f"流水线执行中；运行目录：{args.output_dir}",
+                run_id=args.run_id,
+            )
 
             try:
                 note = run_step(conn, args.domain, item_key, args.output_dir)
-                update_plan_item(conn, args.domain, item_key, "completed", note=note, completed=True)
+                update_plan_item(conn, args.domain, item_key, "completed", note=note, completed=True, run_id=args.run_id)
             except Exception as exc:
                 message = str(exc)
-                update_plan_item(conn, args.domain, item_key, "failed", note=message)
+                update_plan_item(conn, args.domain, item_key, "failed", note=message, run_id=args.run_id)
                 update_run(conn, args.run_id, status="failed", message=message, finished_at=now())
                 return
 

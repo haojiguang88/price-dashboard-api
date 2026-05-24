@@ -236,7 +236,7 @@ def group_by_season(samples):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--db", default=os.path.join(os.getcwd(), "db", "price_dashboard_dev.db"))
+    parser.add_argument("--db", default=os.environ.get("DB_PATH", "/Volumes/7100/price-dashboard-data/db/price_dashboard_dev.db"))
     parser.add_argument("--league", default="E0")
     parser.add_argument("--test-seasons", type=int, default=4)
     parser.add_argument("--edge", type=float, default=0.03)
