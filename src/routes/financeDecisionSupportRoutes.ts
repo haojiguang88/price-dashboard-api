@@ -13,7 +13,7 @@ import {
 const router = Router();
 
 const DECISION_SUPPORT_RULE_VERSION = 'decision_support_v1.1';
-const MARKET_ADAPTATION_ACCEPTANCE_VERSION = 'market_adaptation_v1.0';
+const MARKET_ADAPTATION_ACCEPTANCE_VERSION = 'market_adaptation_v1.1';
 const MARKET_ADAPTATION_ACCEPTANCE_CACHE_TTL_MS = 60 * 1000;
 let decisionSupportSchemaReady = false;
 let marketAdaptationAcceptanceCache: { key: string; expiresAt: number; data: any } | null = null;
@@ -55,6 +55,11 @@ type MarketAdaptationSample = {
     key: string;
     label: string;
     dedupe: boolean;
+  };
+  opportunityStyle?: {
+    key: string;
+    label: string;
+    tone: 'good' | 'warn' | 'neutral';
   };
   adaptationScore?: number;
 };
@@ -107,6 +112,7 @@ const DECISION_SAMPLE_ADVANCED_STATUSES = new Set([
   'trend_ready',
   'wait_confirmation',
   'plan_ready',
+  'plan_candidate',
   'confirmed',
   'planned'
 ]);
@@ -442,7 +448,7 @@ function summarize(items: any[]) {
     avgRet5: roundMetric(avg(valid5.map(item => item.metrics?.ret5))),
     avgRet10: roundMetric(avg(valid10.map(item => item.metrics?.ret10))),
     avgRet20: roundMetric(avg(valid20.map(item => item.metrics?.ret20))),
-    avgMaxDrawdown20: roundMetric(avg(items.map(item => item.metrics?.maxDrawdown20))),
+    avgMaxDrawdown20: roundMetric(avg(valid20.map(item => item.metrics?.maxDrawdown20))),
     invalidationBreakRate: items.length ? roundMetric(invalidated.length / items.length) : null
   };
 }
@@ -564,7 +570,8 @@ function compactAdaptationExamples(items: MarketAdaptationSample[], limit = 8) {
       ret10: item.metrics?.ret10 ?? null,
       ret20: item.metrics?.ret20 ?? null,
       industry: item.industry || null,
-      exposure: item.exposure || null
+      exposure: item.exposure || null,
+      opportunityStyle: item.opportunityStyle || null
     }));
 }
 
@@ -628,6 +635,14 @@ function buildAdaptationVerdict(
 }
 
 function buildCompositeGateVerdict(before: any, after: any, blocked: any, observe: any, policyKey?: string | null) {
+  if ((blocked?.total || 0) === 0) {
+    return {
+      status: 'no_hard_block_samples',
+      label: '暂无硬封锁样本',
+      note: '当前回测窗口里没有被组合总闸硬封锁真正拦截的样本，不能把前后指标持平解读成规则有效。总闸铁律保留，但这轮只能观察降权/观察条件。'
+    };
+  }
+
   if (policyKey !== 'strict_v1' && (blocked?.evaluable20 || 0) < 20 && (observe?.evaluable20 || 0) >= 20) {
     const observeNotWorse = Number(observe?.avgRet20 ?? 0) >= Number(before?.avgRet20 ?? 0)
       && Number(observe?.winRate20 ?? 0) >= Number(before?.winRate20 ?? 0);
@@ -644,6 +659,30 @@ function buildCompositeGateVerdict(before: any, after: any, blocked: any, observ
         };
   }
   return buildAdaptationVerdict(before, after, { blocked, mode: 'blocked_weaker', min20: 20 });
+}
+
+function buildIndustryStrengthDowngradeVerdict(normal: any, weak: any) {
+  if ((weak?.evaluable20 || 0) < 30) {
+    return {
+      status: 'insufficient',
+      label: '弱行业样本不足',
+      note: `弱行业 20日可验样本 ${weak?.evaluable20 || 0} 条，暂时只能保留降权观察，不能定硬规则。`
+    };
+  }
+
+  const weakClearlyWorse = Number(weak.avgRet20 ?? 0) < Number(normal.avgRet20 ?? 0)
+    && Number(weak.winRate20 ?? 0) <= Number(normal.winRate20 ?? 0);
+  return weakClearlyWorse
+    ? {
+        status: 'supported',
+        label: '降权有效倾向',
+        note: '弱行业组 20日表现弱于强/中行业组，当前样本支持降权观察；仍不作为个股硬拦截。'
+      }
+    : {
+        status: 'needs_review',
+        label: '只能降权观察',
+        note: '弱行业组没有明显更差，不应硬拦截；最多保留优先级降权和人工复核提示。'
+      };
 }
 
 function classifyAcceptanceExposureGroup(input: { symbol?: string; name?: string | null; universe_type?: string | null }) {
@@ -679,6 +718,71 @@ function classifyAcceptanceExposureGroup(input: { symbol?: string; name?: string
     if (pattern.test(normalized)) return { key, label, dedupe: true };
   }
   return { key: `unique:${input.symbol || normalized}`, label: '未归类ETF敞口', dedupe: false };
+}
+
+function classifyAcceptanceOpportunityStyle(sample: MarketAdaptationSample) {
+  const trend = String(sample.trend_phase_code || 'UNKNOWN');
+  const bias60 = Number(sample.bias60 ?? 9);
+  const range20 = Number(sample.range20 ?? 9);
+  const nearSafeZone = bias60 >= -0.02 && bias60 <= 0.08;
+  const notOverheated = range20 <= 0.24;
+
+  if (trend === 'SLOW_GRIND_UP' && nearSafeZone && notOverheated) {
+    return { key: 'slow_grind_attack', label: '慢涨进攻型', tone: 'good' as const };
+  }
+  if (trend === 'BREAKOUT' && nearSafeZone) {
+    return { key: 'controlled_attack', label: '突破试探型', tone: 'warn' as const };
+  }
+  if (['TREND_UP', 'HIGH_BASE'].includes(trend) && bias60 >= 0 && bias60 <= 0.12) {
+    return { key: 'trend_follow', label: '趋势跟随型', tone: 'good' as const };
+  }
+  if (['RECOVERY', 'TREND_TRANSITION', 'REBOUND'].includes(trend)) {
+    return { key: 'repair_confirm', label: '修复确认型', tone: 'warn' as const };
+  }
+  if (['SIDEWAYS', 'CONSOLIDATION'].includes(trend)) {
+    return { key: 'defensive_watch', label: '防守观察型', tone: 'neutral' as const };
+  }
+  return { key: 'risk_or_unknown', label: '风险/未确认型', tone: 'warn' as const };
+}
+
+function buildOpportunityStyleAcceptance(samples: MarketAdaptationSample[]) {
+  const stockSamples = samples
+    .filter(item => item.asset_type === 'stock')
+    .map(item => ({ ...item, opportunityStyle: classifyAcceptanceOpportunityStyle(item) }));
+  const attackKeys = new Set(['slow_grind_attack', 'controlled_attack', 'trend_follow']);
+  const attack = stockSamples.filter(item => attackKeys.has(item.opportunityStyle?.key || ''));
+  const observe = stockSamples.filter(item => !attackKeys.has(item.opportunityStyle?.key || ''));
+  const before = summarizePosterior(stockSamples);
+  const after = summarizePosterior(attack);
+  const blocked = summarizePosterior(observe);
+  const styleOrder = ['slow_grind_attack', 'controlled_attack', 'trend_follow', 'repair_confirm', 'defensive_watch', 'risk_or_unknown'];
+  const buckets = styleOrder
+    .map(key => {
+      const bucketItems = stockSamples.filter(item => item.opportunityStyle?.key === key);
+      const label = bucketItems[0]?.opportunityStyle?.label || key;
+      return {
+        key,
+        label,
+        total: bucketItems.length,
+        summary: summarizePosterior(bucketItems)
+      };
+    })
+    .filter(item => item.total > 0);
+
+  return {
+    key: 'stock_opportunity_style',
+    title: '个股机会风格',
+    beforeLabel: '全部个股候选样本',
+    afterLabel: '体系内进攻风格',
+    blockedLabel: '防守/修复对照',
+    before,
+    after,
+    blocked,
+    delta: comparePosterior(before, after),
+    verdict: buildAdaptationVerdict(before, after, { blocked, mode: 'blocked_weaker', min20: 20 }),
+    buckets,
+    examples: compactAdaptationExamples(attack.sort((a, b) => Number(b.metrics?.ret20 ?? -99) - Number(a.metrics?.ret20 ?? -99)))
+  };
 }
 
 function getAdaptationScore(item: MarketAdaptationSample) {
@@ -1030,13 +1134,13 @@ function buildIndustryStrengthAcceptance(samples: MarketAdaptationSample[]) {
     key: 'stock_industry_strength',
     title: '个股行业强弱',
     beforeLabel: '不看行业强弱',
-    afterLabel: '强/中行业放行',
-    blockedLabel: '弱行业拦截',
+    afterLabel: '强/中行业正常权重',
+    blockedLabel: '弱行业降权观察',
     before,
     after,
     blocked,
     delta: comparePosterior(before, after),
-    verdict: buildAdaptationVerdict(before, after, { blocked, mode: 'blocked_weaker' }),
+    verdict: buildIndustryStrengthDowngradeVerdict(after, blocked),
     buckets: [
       { key: 'strong', label: '强行业', summary: summarizePosterior(strong) },
       { key: 'neutral', label: '中性行业', summary: summarizePosterior(stockSamples.filter(item => item.industry?.bucket === 'neutral')) },
@@ -1183,6 +1287,7 @@ async function buildMarketAdaptationAcceptance(
 
   const sections = [
     buildEarlyWatchAcceptance(samples),
+    buildOpportunityStyleAcceptance(samples),
     buildIndustryStrengthAcceptance(samples),
     buildEtfDedupeAcceptance(samples),
     buildCompositeGateAcceptance(samples, gateMap)
@@ -1611,7 +1716,7 @@ async function syncDecisionSamplesFromSources(db: any, options: { captureSnapsho
        LIMIT 1`,
       [row.id]
     );
-    if (['confirmed', 'planned'].includes(String(row.observation_status)) || hasPlanReadySample?.id) {
+    if (['confirmed', 'plan_candidate', 'planned'].includes(String(row.observation_status)) || hasPlanReadySample?.id) {
       await upsertDecisionSample(db, {
         ...base,
         stageKey: 'plan_ready',
@@ -1676,6 +1781,46 @@ async function syncDecisionSamplesFromSources(db: any, options: { captureSnapsho
 
   const snapshotResult = options.captureSnapshots ? await captureDecisionSampleSnapshots(db) : { processed: 0 };
   return { processed, snapshots: snapshotResult.processed };
+}
+
+async function shouldSyncEntryDecisionSamples(db: any) {
+  await ensureFinanceDecisionSupportSchema(db);
+  const row = await db.get(
+    `SELECT
+       (SELECT COUNT(*)
+        FROM financial_entry_trigger_observations
+        WHERE asset_type IN ('stock', 'etf')) AS observation_count,
+       (SELECT COUNT(*)
+        FROM financial_entry_trigger_observations
+        WHERE asset_type IN ('stock', 'etf')
+          AND observation_status IN ('confirmed', 'plan_candidate', 'planned')) AS plan_ready_observation_count,
+       (SELECT COUNT(*)
+        FROM finance_decision_samples
+        WHERE source_type = 'entry_observation'
+          AND stage_key = 'entry_trigger') AS entry_trigger_sample_count,
+       (SELECT COUNT(*)
+        FROM finance_decision_samples
+        WHERE source_type = 'entry_observation'
+          AND stage_key = 'plan_ready') AS plan_ready_sample_count,
+       (SELECT MAX(updated_at)
+        FROM financial_entry_trigger_observations
+        WHERE asset_type IN ('stock', 'etf')) AS latest_observation_update,
+       (SELECT MAX(last_seen_at)
+        FROM finance_decision_samples
+        WHERE source_type = 'entry_observation'
+          AND stage_key IN ('entry_trigger', 'plan_ready')) AS latest_sample_seen`
+  );
+
+  const observationCount = Number(row?.observation_count || 0);
+  const planReadyObservationCount = Number(row?.plan_ready_observation_count || 0);
+  const entryTriggerSampleCount = Number(row?.entry_trigger_sample_count || 0);
+  const planReadySampleCount = Number(row?.plan_ready_sample_count || 0);
+  const latestObservationUpdate = row?.latest_observation_update ? String(row.latest_observation_update) : null;
+  const latestSampleSeen = row?.latest_sample_seen ? String(row.latest_sample_seen) : null;
+
+  return (observationCount > 0 && entryTriggerSampleCount < observationCount)
+    || (planReadyObservationCount > 0 && planReadySampleCount < planReadyObservationCount)
+    || Boolean(latestObservationUpdate && (!latestSampleSeen || latestObservationUpdate > latestSampleSeen));
 }
 
 async function captureDecisionSampleSnapshots(db: any) {
@@ -2622,6 +2767,92 @@ async function getSampleValidationSnapshots(db: any) {
   return rows.map(compactSampleSnapshotListItem);
 }
 
+async function persistSampleValidationSnapshot(db: any, summary: any) {
+  const qualityGate = buildSampleSnapshotQuality(summary);
+  const snapshotDate = await getFinanceBusinessSnapshotDate(db);
+  if (!qualityGate.canSaveSnapshot) {
+    return {
+      saved: false,
+      snapshotDate,
+      ruleVersion: DECISION_SUPPORT_RULE_VERSION,
+      qualityGate,
+      message: `样本快照未保存：${qualityGate.blockers.join('；')}`
+    };
+  }
+
+  await db.run(
+    `INSERT INTO finance_sample_validation_snapshots
+      (snapshot_date, rule_version, summary_json, updated_at)
+     VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+     ON CONFLICT(snapshot_date, rule_version) DO UPDATE SET
+       summary_json = excluded.summary_json,
+       updated_at = CURRENT_TIMESTAMP`,
+    [snapshotDate, DECISION_SUPPORT_RULE_VERSION, JSON.stringify(compactSnapshotSummary(summary))]
+  );
+
+  return {
+    saved: true,
+    snapshotDate,
+    ruleVersion: DECISION_SUPPORT_RULE_VERSION,
+    qualityGate,
+    message: qualityGate.status === 'warning'
+      ? `当前样本快照已保存，但存在提示：${qualityGate.warnings.join('；')}`
+      : '当前样本快照已保存'
+  };
+}
+
+async function refreshStaleSampleValidationSnapshot(db: any, summary: any) {
+  const snapshotDate = await getFinanceBusinessSnapshotDate(db);
+  const latest = await db.get(
+    `SELECT id, snapshot_date, updated_at
+     FROM finance_sample_validation_snapshots
+     WHERE rule_version = ?
+     ORDER BY snapshot_date DESC, id DESC
+     LIMIT 1`,
+    [DECISION_SUPPORT_RULE_VERSION]
+  );
+  const qualityGate = buildSampleSnapshotQuality(summary);
+  const latestSnapshotDate = latest?.snapshot_date || null;
+  const stale = !latestSnapshotDate || latestSnapshotDate < snapshotDate;
+
+  if (!stale) {
+    return {
+      status: 'fresh',
+      saved: false,
+      snapshotDate,
+      latestSnapshotDate,
+      latestUpdatedAt: latest?.updated_at || null,
+      qualityGate,
+      message: '样本验证快照已是当前业务日。'
+    };
+  }
+
+  if (!qualityGate.canSaveSnapshot) {
+    return {
+      status: 'stale_blocked',
+      saved: false,
+      snapshotDate,
+      latestSnapshotDate,
+      latestUpdatedAt: latest?.updated_at || null,
+      qualityGate,
+      message: `样本验证快照停在 ${latestSnapshotDate || '无'}，但当前质量门不允许自动保存：${qualityGate.blockers.join('；')}`
+    };
+  }
+
+  const saved = await persistSampleValidationSnapshot(db, summary);
+  return {
+    status: 'auto_refreshed',
+    saved: true,
+    snapshotDate,
+    latestSnapshotDate,
+    latestUpdatedAt: latest?.updated_at || null,
+    qualityGate: saved.qualityGate,
+    message: latestSnapshotDate
+      ? `样本验证快照已从 ${latestSnapshotDate} 自动补齐到 ${snapshotDate}。`
+      : `样本验证快照已自动保存到 ${snapshotDate}。`
+  };
+}
+
 function compactDecisionTrackingRecentItem(item: any) {
   const {
     context: _context,
@@ -2926,6 +3157,7 @@ async function buildSampleValidationSummary(
     const item = withCoveredTradeDate(row);
     return compactSample(item, await getForwardMetrics(db, item));
   }));
+  const syncDecisionTracking = options.syncDecisionTracking === true || await shouldSyncEntryDecisionSamples(db);
 
   const enteredCandidates = candidates.filter(item => ['active', 'planned'].includes(String(item.status)));
   const blockedCandidates = candidates.filter(item => String(item.status) === 'expired');
@@ -2979,7 +3211,7 @@ async function buildSampleValidationSummary(
       reviewNeeded: rejectedRows.filter((row: any) => row.decision_quality === 'needs_review' || row.later_status === 'trigger_review').length,
       items: rejectedRows.slice(0, 20)
     },
-    decisionTracking: await getDecisionSampleTrackingSummary(db, { sync: options.syncDecisionTracking === true }),
+    decisionTracking: await getDecisionSampleTrackingSummary(db, { sync: syncDecisionTracking }),
     failureSamples: await getFailureSampleSummary(db),
     signalLifecycles: await buildSignalLifecycleSummary(db),
     snapshots: await getSampleValidationSnapshots(db),
@@ -3365,7 +3597,12 @@ router.post('/asset-routing/batch-confirm', async (req: Request, res: Response) 
 router.get('/sample-validation/summary', async (_req: Request, res: Response) => {
   try {
     const db = await getDb();
-    const data = await buildSampleValidationSummary(db);
+    const data: any = await buildSampleValidationSummary(db);
+    const snapshotFreshness = await refreshStaleSampleValidationSnapshot(db, data);
+    if (snapshotFreshness.saved) {
+      data.snapshots = await getSampleValidationSnapshots(db);
+    }
+    data.snapshotFreshness = snapshotFreshness;
     res.json({ success: true, data: compactSampleValidationSummaryForResponse(data) });
   } catch (error) {
     res.status(500).json({ success: false, message: `获取样本验证失败：${(error as Error).message}` });
@@ -3419,33 +3656,21 @@ router.post('/sample-validation/snapshot', async (_req: Request, res: Response) 
       syncDecisionTracking: true,
       syncFailureSamples: true
     });
-    const qualityGate = buildSampleSnapshotQuality(summary);
-    if (!qualityGate.canSaveSnapshot) {
+    const snapshotResult = await persistSampleValidationSnapshot(db, summary);
+    if (!snapshotResult.saved) {
       return res.status(409).json({
         success: false,
-        message: `样本快照未保存：${qualityGate.blockers.join('；')}`,
-        data: { qualityGate }
+        message: snapshotResult.message,
+        data: { qualityGate: snapshotResult.qualityGate }
       });
     }
-    const snapshotDate = await getFinanceBusinessSnapshotDate(db);
-    await db.run(
-      `INSERT INTO finance_sample_validation_snapshots
-        (snapshot_date, rule_version, summary_json, updated_at)
-       VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-       ON CONFLICT(snapshot_date, rule_version) DO UPDATE SET
-         summary_json = excluded.summary_json,
-         updated_at = CURRENT_TIMESTAMP`,
-      [snapshotDate, DECISION_SUPPORT_RULE_VERSION, JSON.stringify(compactSnapshotSummary(summary))]
-    );
 	    res.json({
 	      success: true,
-	      message: qualityGate.status === 'warning'
-	        ? `今日样本快照已保存，但存在提示：${qualityGate.warnings.join('；')}`
-	        : '今日样本快照已保存',
+	      message: snapshotResult.message,
 	      data: {
-	        snapshotDate,
-	        ruleVersion: DECISION_SUPPORT_RULE_VERSION,
-	        qualityGate,
+	        snapshotDate: snapshotResult.snapshotDate,
+	        ruleVersion: snapshotResult.ruleVersion,
+	        qualityGate: snapshotResult.qualityGate,
 	        snapshots: await getSampleValidationSnapshots(db)
 	      }
 	    });

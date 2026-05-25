@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
-    "start": "node dist/index.js"
+    "start": "node dist/index.js",
+    "restart:local": "sh -c 'port=${PORT:-3001}; pid=$(lsof -tiTCP:$port -sTCP:LISTEN || true); if [ -n \"$pid\" ]; then kill $pid; fi; npm start'"
   },
   "keywords": [
     "price",

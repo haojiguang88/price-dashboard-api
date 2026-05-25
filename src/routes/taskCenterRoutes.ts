@@ -40,6 +40,7 @@ const FINANCE_DAILY_PIPELINE_TASK_KEY = 'finance_daily_pipeline';
 const FINANCE_CANDIDATE_FUNNEL_TASK_KEY = 'finance_candidate_funnel_pipeline';
 const FINANCE_EXPERIMENT_PREDICTION_TASK_KEY = 'finance_experiment_prediction_snapshots';
 const FINANCE_TUSHARE_SUPPLEMENTAL_TASK_KEY = 'finance_tushare_supplemental_update';
+const FINANCE_TUSHARE_FINANCIAL_REPORTS_TASK_KEY = 'finance_tushare_financial_reports_update';
 const DEFAULT_LOCAL_API_TIMEOUT_MS = 90 * 60 * 1000;
 
 function parseConfig(configJson?: string) {
@@ -71,7 +72,9 @@ function getTaskExecutionTimeoutMs(task: TaskRow, config: any) {
           ? 20 * 60 * 1000
           : task.task_key === FINANCE_TUSHARE_SUPPLEMENTAL_TASK_KEY || task.task_type === 'finance_tushare_supplemental_update'
             ? 45 * 60 * 1000
-            : 30 * 60 * 1000;
+            : task.task_key === FINANCE_TUSHARE_FINANCIAL_REPORTS_TASK_KEY || task.task_type === 'finance_tushare_financial_reports_update'
+              ? 90 * 60 * 1000
+              : 30 * 60 * 1000;
   return Math.min(Math.max(Math.floor(raw), 60 * 1000), 6 * 60 * 60 * 1000);
 }
 
@@ -203,7 +206,7 @@ async function getScheduledFunnelSkipReason(db: any, now = new Date()) {
     `SELECT id, started_at
      FROM task_center_runs
      WHERE task_key = ? AND status = 'running'
-     ORDER BY started_at DESC, id DESC
+     ORDER BY datetime(REPLACE(started_at, 'T', ' ')) DESC, id DESC
      LIMIT 1`,
     [FINANCE_DAILY_PIPELINE_TASK_KEY]
   );
@@ -219,7 +222,7 @@ async function getScheduledFunnelSkipReason(db: any, now = new Date()) {
     `SELECT id, status, started_at, finished_at, message
      FROM task_center_runs
      WHERE task_key = ? AND status IN ('success', 'error')
-     ORDER BY started_at DESC, id DESC
+     ORDER BY datetime(REPLACE(started_at, 'T', ' ')) DESC, id DESC
      LIMIT 1`,
     [FINANCE_DAILY_PIPELINE_TASK_KEY]
   );
@@ -252,7 +255,7 @@ async function getScheduledDailyPipelineWaitReason(db: any, now = new Date()) {
     `SELECT id, started_at
      FROM task_center_runs
      WHERE task_key = ? AND status = 'running'
-     ORDER BY started_at DESC, id DESC
+     ORDER BY datetime(REPLACE(started_at, 'T', ' ')) DESC, id DESC
      LIMIT 1`,
     [FINANCE_TUSHARE_SUPPLEMENTAL_TASK_KEY]
   );
@@ -272,7 +275,7 @@ async function getScheduledDailyPipelineWaitReason(db: any, now = new Date()) {
     `SELECT id, status, started_at, finished_at, message
      FROM task_center_runs
      WHERE task_key = ? AND status IN ('success', 'error')
-     ORDER BY started_at DESC, id DESC
+     ORDER BY datetime(REPLACE(started_at, 'T', ' ')) DESC, id DESC
      LIMIT 1`,
     [FINANCE_TUSHARE_SUPPLEMENTAL_TASK_KEY]
   );
@@ -347,7 +350,7 @@ async function expireSupersededScheduledRuns(db: any, taskKey: string, taskName:
      WHERE task_key = ?
        AND status != 'running'
        AND finished_at IS NOT NULL
-     ORDER BY started_at DESC, id DESC
+     ORDER BY datetime(REPLACE(started_at, 'T', ' ')) DESC, id DESC
      LIMIT 1`,
     [taskKey]
   );
@@ -358,7 +361,7 @@ async function expireSupersededScheduledRuns(db: any, taskKey: string, taskName:
     `SELECT id, started_at, result_json
      FROM task_center_runs
      WHERE task_key = ? AND status = 'running'
-     ORDER BY started_at DESC, id DESC`,
+     ORDER BY datetime(REPLACE(started_at, 'T', ' ')) DESC, id DESC`,
     [taskKey]
   );
   const staleRows = runningRows.filter((row: any) => {
@@ -410,7 +413,7 @@ export async function cleanupOrphanedFinanceTaskRunsOnStartup() {
      FROM task_center_runs
      WHERE status = 'running'
        AND task_key IN (${taskKeys.map(() => '?').join(',')})
-     ORDER BY started_at ASC, id ASC`,
+     ORDER BY datetime(REPLACE(started_at, 'T', ' ')) ASC, id ASC`,
     taskKeys
   );
   if (rows.length === 0) return;
@@ -452,7 +455,7 @@ async function getScheduledTaskRunningReason(db: any, task: TaskRow, now = new D
     `SELECT id, started_at
      FROM task_center_runs
      WHERE task_key = ? AND status = 'running'
-     ORDER BY started_at DESC, id DESC
+     ORDER BY datetime(REPLACE(started_at, 'T', ' ')) DESC, id DESC
      LIMIT 1`,
     [task.task_key]
   );
@@ -732,6 +735,51 @@ async function runTushareSupplementalUpdate(config: any) {
       ...parsed,
       market_breadth: marketBreadth
     }
+  };
+}
+
+async function runTushareFinancialReportsUpdate(config: any) {
+  const scriptPath = path.join(__dirname, '../../scripts/finance/fetch_tushare_financial_reports.py');
+  const pythonBin = String(config.python || process.env.PYTHON_BIN || '/usr/bin/python3');
+  const sections = Array.isArray(config.sections)
+    ? config.sections.join(',')
+    : String(config.sections || 'income_vip,balancesheet_vip,cashflow_vip,fina_indicator_vip');
+  const args = [
+    scriptPath,
+    '--db',
+    String(config.db || getDatabasePath()),
+    '--sections',
+    sections,
+    '--period-count',
+    String(Number(config.period_count || 8)),
+    '--limit',
+    String(Number(config.limit || 5000)),
+    '--delay-seconds',
+    String(Number(config.delay_seconds ?? 0.3))
+  ];
+  if (Array.isArray(config.periods) && config.periods.length > 0) {
+    args.push('--periods', config.periods.join(','));
+  } else if (config.periods) {
+    args.push('--periods', String(config.periods));
+  }
+
+  const { stdout, stderr } = await execFileAsync(pythonBin, args, {
+    cwd: path.join(__dirname, '../..'),
+    maxBuffer: 1024 * 1024 * 20,
+    env: process.env
+  });
+  const lines = stdout.trim().split('\n').filter(Boolean);
+  const parsed = JSON.parse(lines[lines.length - 1] || '{}');
+  if (parsed.success === false) {
+    throw new Error(parsed.message || stderr || 'Tushare财报结构化数据补全失败');
+  }
+  const totals = parsed.totals || {};
+  const failureText = parsed.failure_count
+    ? `；部分接口跳过/失败 ${parsed.failure_count} 条`
+    : '';
+  return {
+    message: `Tushare财报结构化补全完成：${parsed.periods?.length || 0} 个报告期，落库 ${parsed.upserted_facts || 0} 条，利润表 ${totals.income_vip || 0}，资产负债表 ${totals.balancesheet_vip || 0}，现金流量表 ${totals.cashflow_vip || 0}，财务指标 ${totals.fina_indicator_vip || 0}${failureText}`,
+    data: parsed
   };
 }
 
@@ -1118,6 +1166,24 @@ async function runPreciousMetalsTrainingPipeline(config: any, db: any) {
     }));
   }
 
+  if (!stopped && config.save_action_samples !== false) {
+    await runStep('save_action_samples', '贵金属动作样本库落库', () => callApi('/api/finance/metals/rule-lab/action-samples/save', {
+      symbol: 'all',
+      limit: replayLimit * symbols.length,
+      saved_from: 'precious_metals_training_pipeline'
+    }));
+  } else if (!stopped) {
+    skipStep('save_action_samples', '贵金属动作样本库落库', '配置 save_action_samples=false，本轮跳过动作样本库。');
+  }
+
+  if (!stopped && config.generate_action_report !== false) {
+    await runStep('metal_action_sample_report', '贵金属动作后验验收报告', () => callApi('/api/finance/metals/rule-lab/action-samples/report/generate', {
+      saved_from: 'precious_metals_training_pipeline'
+    }));
+  } else if (!stopped) {
+    skipStep('metal_action_sample_report', '贵金属动作后验验收报告', '配置 generate_action_report=false，本轮跳过动作后验报告。');
+  }
+
   if (!stopped) {
     await runStep('sample_health', '贵金属样本体检', () => getApi('/api/finance/metals/rule-lab/samples/health?symbol=all'));
   }
@@ -1220,7 +1286,7 @@ async function executeTask(task: TaskRow, triggerType: 'manual' | 'schedule') {
     `SELECT id, started_at
      FROM task_center_runs
      WHERE task_key = ? AND status = 'running'
-     ORDER BY started_at DESC, id DESC
+     ORDER BY datetime(REPLACE(started_at, 'T', ' ')) DESC, id DESC
      LIMIT 1`,
     [task.task_key]
   );
@@ -1392,6 +1458,10 @@ async function executeTask(task: TaskRow, triggerType: 'manual' | 'schedule') {
       const update = await runTushareSupplementalUpdate(config);
       result = update.data;
       message = update.message;
+    } else if (task.task_type === 'finance_tushare_financial_reports_update' || task.task_key === FINANCE_TUSHARE_FINANCIAL_REPORTS_TASK_KEY) {
+      const update = await runTushareFinancialReportsUpdate(config);
+      result = update.data;
+      message = update.message;
     } else if (task.task_type === 'commodity_metals_price_update' || task.task_key === 'commodity_metals_price_update') {
       const update = await runCommodityMetalsPriceUpdate(config);
       result = update.data;
@@ -1550,15 +1620,15 @@ router.get('/task-center/tasks', async (req: Request, res: ExpressResponse) => {
       `SELECT
          t.*,
          COALESCE(
-           (SELECT r.status FROM task_center_runs r WHERE r.task_key = t.task_key ORDER BY r.started_at DESC, r.id DESC LIMIT 1),
+           (SELECT r.status FROM task_center_runs r WHERE r.task_key = t.task_key ORDER BY datetime(REPLACE(r.started_at, 'T', ' ')) DESC, r.id DESC LIMIT 1),
            t.last_status
          ) AS last_status,
          COALESCE(
-           (SELECT r.message FROM task_center_runs r WHERE r.task_key = t.task_key ORDER BY r.started_at DESC, r.id DESC LIMIT 1),
+           (SELECT r.message FROM task_center_runs r WHERE r.task_key = t.task_key ORDER BY datetime(REPLACE(r.started_at, 'T', ' ')) DESC, r.id DESC LIMIT 1),
            t.last_message
          ) AS last_message,
          COALESCE(
-           (SELECT COALESCE(r.finished_at, r.started_at) FROM task_center_runs r WHERE r.task_key = t.task_key ORDER BY r.started_at DESC, r.id DESC LIMIT 1),
+           (SELECT COALESCE(r.finished_at, r.started_at) FROM task_center_runs r WHERE r.task_key = t.task_key ORDER BY datetime(REPLACE(r.started_at, 'T', ' ')) DESC, r.id DESC LIMIT 1),
            t.last_run_at
          ) AS last_run_at
        FROM task_center_tasks t
@@ -1568,10 +1638,10 @@ router.get('/task-center/tasks', async (req: Request, res: ExpressResponse) => {
       compactRuns
         ? `SELECT id, task_id, task_key, trigger_type, status, message, started_at, finished_at
            FROM task_center_runs
-           ORDER BY started_at DESC
+           ORDER BY datetime(REPLACE(started_at, 'T', ' ')) DESC
            LIMIT 30`
         : `SELECT * FROM task_center_runs
-       ORDER BY started_at DESC
+       ORDER BY datetime(REPLACE(started_at, 'T', ' ')) DESC
        LIMIT 30`
     );
     res.json({ success: true, data: { tasks, runs } });
@@ -1626,7 +1696,7 @@ router.delete('/task-center/tasks/:id', async (req: Request, res: ExpressRespons
       `SELECT id, started_at
        FROM task_center_runs
        WHERE task_id = ? AND status = 'running'
-       ORDER BY started_at DESC, id DESC
+       ORDER BY datetime(REPLACE(started_at, 'T', ' ')) DESC, id DESC
        LIMIT 1`,
       [task.id]
     );

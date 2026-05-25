@@ -926,7 +926,7 @@ router.get('/plan/:domain', async (req, res) => {
       `SELECT id, status, started_at
        FROM model_training_runs
        WHERE domain = ?
-       ORDER BY started_at DESC, id DESC
+       ORDER BY datetime(REPLACE(started_at, 'T', ' ')) DESC, id DESC
        LIMIT 1`,
       [domain]
     );
@@ -974,7 +974,7 @@ router.get('/runs/:domain/latest', async (req, res) => {
     const run = await db.get(
       `SELECT * FROM model_training_runs
        WHERE domain = ?
-       ORDER BY started_at DESC, id DESC
+       ORDER BY datetime(REPLACE(started_at, 'T', ' ')) DESC, id DESC
        LIMIT 1`,
       [domain]
     );
@@ -1041,7 +1041,7 @@ router.get('/results/:domain', async (req, res) => {
     const latestRun = await db.get(
       `SELECT * FROM model_training_runs
        WHERE domain = ?
-       ORDER BY started_at DESC, id DESC
+       ORDER BY datetime(REPLACE(started_at, 'T', ' ')) DESC, id DESC
        LIMIT 1`,
       [domain]
     );
@@ -1049,7 +1049,7 @@ router.get('/results/:domain', async (req, res) => {
       `SELECT id, domain, status, output_dir, current_item_key, message, source_row_count, started_at, finished_at
        FROM model_training_runs
        WHERE domain = ?
-       ORDER BY started_at DESC, id DESC
+       ORDER BY datetime(REPLACE(started_at, 'T', ' ')) DESC, id DESC
        LIMIT 6`,
       [domain]
     );
@@ -1101,7 +1101,7 @@ router.get('/explain/:domain', async (req, res) => {
       `SELECT id, domain, status, output_dir, current_item_key, message, source_row_count, started_at, finished_at
        FROM model_training_runs
        WHERE domain = ?
-       ORDER BY started_at DESC, id DESC
+       ORDER BY datetime(REPLACE(started_at, 'T', ' ')) DESC, id DESC
        LIMIT 1`,
       [domain]
     );
@@ -1867,7 +1867,7 @@ router.post('/run/:domain', async (req, res) => {
     const existingRunningRun = await db.get(
       `SELECT * FROM model_training_runs
        WHERE domain = ? AND status = 'running'
-       ORDER BY started_at DESC, id DESC
+       ORDER BY datetime(REPLACE(started_at, 'T', ' ')) DESC, id DESC
        LIMIT 1`,
       [domain]
     );
@@ -1964,7 +1964,7 @@ router.patch('/plan/:domain/:itemKey', async (req, res) => {
       `SELECT id
        FROM model_training_runs
        WHERE domain = ?
-       ORDER BY started_at DESC, id DESC
+       ORDER BY datetime(REPLACE(started_at, 'T', ' ')) DESC, id DESC
        LIMIT 1`,
       [domain]
     );

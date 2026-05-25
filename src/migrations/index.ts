@@ -1577,6 +1577,80 @@ const migrations: Migration[] = [
     `
   },
   {
+    id: '20260524_001_financial_report_structured',
+    name: 'Create Tushare financial report structured facts',
+    sql: `
+      CREATE TABLE IF NOT EXISTS financial_report_structured (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        symbol TEXT NOT NULL,
+        name TEXT,
+        source TEXT NOT NULL DEFAULT 'tushare',
+        end_date TEXT NOT NULL,
+        ann_date TEXT,
+        f_ann_date TEXT,
+        report_type TEXT,
+        comp_type TEXT,
+        total_revenue REAL,
+        revenue REAL,
+        operate_profit REAL,
+        total_profit REAL,
+        net_profit REAL,
+        net_profit_parent REAL,
+        basic_eps REAL,
+        total_assets REAL,
+        total_liab REAL,
+        total_equity REAL,
+        money_cap REAL,
+        inventories REAL,
+        accounts_receiv REAL,
+        contract_liab REAL,
+        n_cashflow_act REAL,
+        c_fr_sale_sg REAL,
+        free_cashflow REAL,
+        roe REAL,
+        grossprofit_margin REAL,
+        netprofit_margin REAL,
+        debt_to_assets REAL,
+        current_ratio REAL,
+        quick_ratio REAL,
+        revenue_yoy REAL,
+        netprofit_yoy REAL,
+        ocf_yoy REAL,
+        ocf_to_net_profit REAL,
+        raw_income_json TEXT,
+        raw_balance_json TEXT,
+        raw_cashflow_json TEXT,
+        raw_indicator_json TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(symbol, source, end_date)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_financial_report_structured_period
+      ON financial_report_structured(end_date DESC, source, symbol);
+
+      CREATE INDEX IF NOT EXISTS idx_financial_report_structured_visible
+      ON financial_report_structured(f_ann_date DESC, ann_date DESC, symbol);
+
+      INSERT OR IGNORE INTO task_center_tasks
+        (task_key, name, domain, task_type, enabled, schedule_time, schedule_days, priority, config_json, last_status, last_message)
+      VALUES
+        (
+          'finance_tushare_financial_reports_update',
+          'Tushare财报结构化补全',
+          'finance',
+          'finance_tushare_financial_reports_update',
+          1,
+          '20:30',
+          'every_day',
+          13,
+          '{"period_count":8,"sections":["income_vip","balancesheet_vip","cashflow_vip","fina_indicator_vip"],"delay_seconds":0.3,"limit":5000}',
+          'pending',
+          '拉取 Tushare 5000积分可用的利润表、资产负债表、现金流量表和财务指标，先落结构化表，研究输入草稿仍需人工确认'
+        );
+    `
+  },
+  {
     id: '20260515_003_rejected_opportunity_review_category',
     name: 'Add review category to rejected opportunities',
     sql: `
@@ -2230,6 +2304,164 @@ const migrations: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_financial_market_regime_trade_date
       ON financial_market_regime(trade_date DESC);
     `
+  },
+  {
+    id: '20260525_001_metal_action_samples',
+    name: 'Create precious metal action samples',
+    sql: `
+      CREATE TABLE IF NOT EXISTS metal_action_samples (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        symbol TEXT NOT NULL,
+        asset_name TEXT,
+        source TEXT,
+        trade_date TEXT NOT NULL,
+        action_version TEXT NOT NULL,
+        source_sample_id INTEGER,
+        source_rule_version TEXT,
+        action_key TEXT NOT NULL,
+        action_label TEXT NOT NULL,
+        action_permission TEXT NOT NULL DEFAULT 'observe',
+        action_reason TEXT,
+        guardrail_key TEXT,
+        guardrail_label TEXT,
+        guardrail_reason TEXT,
+        close REAL,
+        state_code TEXT,
+        state_label TEXT,
+        state_reason TEXT,
+        signal_maturity TEXT,
+        signal_maturity_label TEXT,
+        rule_signal TEXT,
+        rule_action TEXT,
+        rule_action_label TEXT,
+        price_position_code TEXT,
+        price_position_label TEXT,
+        distance_to_ma60 REAL,
+        recent_return_5 REAL,
+        recent_return_20 REAL,
+        drawdown_20 REAL,
+        range_ratio_5 REAL,
+        range_ratio_20 REAL,
+        lower_low INTEGER,
+        abnormal_move INTEGER,
+        daily_return REAL,
+        drop_pct_1d REAL,
+        drop_pct_5d REAL,
+        drop_pct_20d REAL,
+        state_continuation_days INTEGER,
+        safe_confirmation_days INTEGER,
+        safe_zone_days INTEGER,
+        gold_state_code TEXT,
+        gold_state_label TEXT,
+        gold_close REAL,
+        gold_distance_to_ma60 REAL,
+        gold_recent_return_5 REAL,
+        gold_recent_return_20 REAL,
+        gold_safe_confirmation_days INTEGER,
+        silver_state_code TEXT,
+        silver_state_label TEXT,
+        silver_close REAL,
+        silver_distance_to_ma60 REAL,
+        silver_recent_return_5 REAL,
+        silver_recent_return_20 REAL,
+        silver_safe_confirmation_days INTEGER,
+        label_status TEXT,
+        future_rebound_3d INTEGER,
+        future_rebound_5d INTEGER,
+        future_return_3d REAL,
+        future_return_5d REAL,
+        future_return_10d REAL,
+        future_return_20d REAL,
+        future_max_drawdown_20d REAL,
+        break_recent_low_20d INTEGER,
+        survived_3d INTEGER,
+        survived_5d INTEGER,
+        short_lived_signal INTEGER,
+        future_state_3d TEXT,
+        future_state_5d TEXT,
+        future_state_10d TEXT,
+        future_state_20d TEXT,
+        outcome_label TEXT,
+        snapshot_json TEXT NOT NULL,
+        saved_from TEXT NOT NULL DEFAULT 'manual_action_replay',
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(symbol, trade_date, action_version)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_metal_action_samples_scope
+      ON metal_action_samples(symbol, trade_date DESC, action_version);
+
+      CREATE INDEX IF NOT EXISTS idx_metal_action_samples_action
+      ON metal_action_samples(action_key, action_permission, label_status, trade_date DESC);
+
+      CREATE INDEX IF NOT EXISTS idx_metal_action_samples_outcome
+      ON metal_action_samples(symbol, action_key, short_lived_signal, break_recent_low_20d, trade_date DESC);
+    `
+  },
+  {
+    id: '20260525_002_metal_action_sample_reports',
+    name: 'Create precious metal action sample validation reports',
+    sql: `
+      CREATE TABLE IF NOT EXISTS metal_action_sample_reports (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        report_key TEXT NOT NULL,
+        report_date TEXT,
+        action_version TEXT NOT NULL,
+        status TEXT NOT NULL,
+        conclusion_label TEXT,
+        conclusion_text TEXT,
+        metrics_json TEXT,
+        checks_json TEXT,
+        report_json TEXT NOT NULL,
+        saved_from TEXT NOT NULL DEFAULT 'manual_generate',
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_metal_action_sample_reports_scope
+      ON metal_action_sample_reports(report_key, action_version, created_at DESC);
+    `
+  },
+  {
+    id: '20260525_003_normalize_task_timestamps',
+    name: 'Normalize task and training timestamps',
+    run: async (db) => {
+      const normalizeTimestampColumns = async (tableName: string, columnNames: string[]) => {
+        const table = await dbGet<any>(
+          db,
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+          [tableName]
+        );
+        if (!table) return;
+
+        const columns = await dbAll<any>(db, `PRAGMA table_info(${tableName})`);
+        const existingColumns = new Set(columns.map((column: any) => String(column.name)));
+        for (const columnName of columnNames) {
+          if (!existingColumns.has(columnName)) continue;
+          await dbRun(
+            db,
+            `UPDATE ${tableName}
+             SET ${columnName} = strftime('%Y-%m-%dT%H:%M:%fZ', REPLACE(REPLACE(${columnName}, 'T', ' '), 'Z', ''))
+             WHERE ${columnName} IS NOT NULL
+               AND TRIM(${columnName}) != ''
+               AND datetime(REPLACE(REPLACE(${columnName}, 'T', ' '), 'Z', '')) IS NOT NULL
+               AND (${columnName} NOT LIKE '%T%' OR ${columnName} NOT LIKE '%Z')`
+          );
+        }
+      };
+
+      await normalizeTimestampColumns('task_center_runs', ['started_at', 'finished_at', 'created_at']);
+      await normalizeTimestampColumns('task_center_tasks', ['last_run_at', 'next_run_at', 'created_at', 'updated_at']);
+      await normalizeTimestampColumns('model_training_runs', ['started_at', 'finished_at', 'created_at', 'updated_at']);
+      await dbExec(db, `
+        CREATE INDEX IF NOT EXISTS idx_task_center_runs_task_started_at_normalized
+        ON task_center_runs(task_key, started_at DESC, id DESC);
+
+        CREATE INDEX IF NOT EXISTS idx_model_training_runs_domain_started_at_normalized
+        ON model_training_runs(domain, started_at DESC, id DESC);
+      `);
+    }
   }
 ];
 

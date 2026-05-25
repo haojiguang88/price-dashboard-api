@@ -18,6 +18,12 @@ import {
 } from '../services/industryEtfStrengthService';
 import { getLatestCoveredTradeDate, getTradeDateCoverage } from '../utils/financeTradeDate';
 import { getFreshMarketRegime } from '../utils/financeMarketRegime';
+import { calculateMarketRegime, getMarketRegimeShortLabel, type DailyPrice, type MarketRegime } from '../services/financeMarketRegimeCalculator';
+import {
+  buildEntryObservationQueueInfo,
+  compareObservationQueueItems,
+  getEntryObservationQueueActionCode
+} from '../utils/entryObservationQueue';
 import { calculateMetalRegime, filterMetalTradingPrices, getMetalAsset } from './metalRoutes';
 
 const router = Router();
@@ -84,78 +90,6 @@ router.get('/workflow-summary/light', async (_req: Request, res: Response) => {
     });
   }
 });
-
-interface DailyPrice {
-  trade_date: string;
-  open: number;
-  high: number;
-  low: number;
-  close: number;
-  volume: number;
-  amount: number;
-  updated_at?: string;
-}
-
-interface MarketBehaviorTag {
-  code: string;
-  label: string;
-  tone: 'good' | 'warn' | 'risk' | 'neutral';
-  reason: string;
-}
-
-interface MarketRegime {
-  symbol: string;
-  name: string;
-  trade_date: string;
-  close: number;
-  ma20: number | null;
-  ma20_slope: string;
-  ma60: number;
-  ma60_prev: number;
-  ma60_slope: string;
-  ma120: number | null;
-  ma120_prev: number | null;
-  ma120_slope: string;
-  ma250: number | null;
-  ma250_prev: number | null;
-  ma250_slope: string;
-  low_60: number | null;
-  low_120: number | null;
-  cross_count_10: number;
-  above_ma60_days: number;
-  below_ma60_days: number;
-  drawdown_20: number | null;
-  drawdown_60: number | null;
-  drawdown_120: number | null;
-  latest_change: number | null;
-  distance_to_ma60: number;
-  distance_to_ma250: number | null;
-  higher_high: boolean;
-  higher_low: boolean;
-  lower_high: boolean;
-  lower_low: boolean;
-  sideways: boolean;
-  up_days: number;
-  down_days: number;
-  market_regime: string;
-  result_reason: string;
-  entry_permission: string;
-  entry_reason: string;
-  rule_version: string;
-  cycle_layer_version: string;
-  short_state: string;
-  short_label: string;
-  short_reason: string;
-  mid_state: string;
-  mid_label: string;
-  mid_reason: string;
-  long_state: string;
-  long_label: string;
-  long_reason: string;
-  behavior_tags: MarketBehaviorTag[];
-  is_mock?: boolean;
-  source?: string;
-}
 
 interface FetchResult {
   data: DailyPrice[];
@@ -288,7 +222,7 @@ async function expireStaleFinancePipelineRuns(db: any) {
      WHERE task_key = ?
        AND status != 'running'
        AND finished_at IS NOT NULL
-     ORDER BY started_at DESC, id DESC
+     ORDER BY datetime(REPLACE(started_at, 'T', ' ')) DESC, id DESC
      LIMIT 1`,
     [FINANCE_PIPELINE_TASK_KEY]
   );
@@ -299,7 +233,7 @@ async function expireStaleFinancePipelineRuns(db: any) {
     `SELECT id, started_at
      FROM task_center_runs
      WHERE task_key = ? AND status = 'running'
-     ORDER BY started_at DESC, id DESC`,
+     ORDER BY datetime(REPLACE(started_at, 'T', ' ')) DESC, id DESC`,
     [FINANCE_PIPELINE_TASK_KEY]
   );
   const nowMs = Date.now();
@@ -356,7 +290,7 @@ async function buildManualPipelineRunGuard(db: any, force = false) {
     `SELECT id, started_at
      FROM task_center_runs
      WHERE task_key = ? AND status = 'running'
-     ORDER BY started_at DESC, id DESC
+     ORDER BY datetime(REPLACE(started_at, 'T', ' ')) DESC, id DESC
      LIMIT 1`,
     [FINANCE_PIPELINE_TASK_KEY]
   );
@@ -391,7 +325,7 @@ async function buildManualPipelineRunGuard(db: any, force = false) {
     `SELECT id, started_at
      FROM task_center_runs
      WHERE task_key = ? AND status = 'running'
-     ORDER BY started_at DESC, id DESC
+     ORDER BY datetime(REPLACE(started_at, 'T', ' ')) DESC, id DESC
      LIMIT 1`,
     [FINANCE_TUSHARE_SUPPLEMENTAL_TASK_KEY]
   );
@@ -419,7 +353,7 @@ async function buildManualPipelineRunGuard(db: any, force = false) {
       `SELECT id, status, started_at, finished_at, message
        FROM task_center_runs
        WHERE task_key = ? AND status IN ('success', 'error')
-       ORDER BY started_at DESC, id DESC
+       ORDER BY datetime(REPLACE(started_at, 'T', ' ')) DESC, id DESC
        LIMIT 1`,
       [FINANCE_TUSHARE_SUPPLEMENTAL_TASK_KEY]
     );
@@ -443,7 +377,7 @@ async function buildManualPipelineRunGuard(db: any, force = false) {
     `SELECT id, status, started_at, message
      FROM task_center_runs
      WHERE task_key = ?
-     ORDER BY started_at DESC, id DESC
+     ORDER BY datetime(REPLACE(started_at, 'T', ' ')) DESC, id DESC
      LIMIT 1`,
     [FINANCE_PIPELINE_TASK_KEY]
   );
@@ -675,6 +609,39 @@ function compactRunGuardRun(run: any) {
   return safeRun;
 }
 
+async function getDailyPipelineRecovery(db: any, latestDaily: any) {
+  if (!latestDaily || latestDaily.status !== 'error') return null;
+  const boundaryAt = latestDaily.finished_at || latestDaily.started_at;
+  if (!boundaryAt) return null;
+
+  const latestFunnel = await db.get(
+    `SELECT id, task_key, status, message, started_at, finished_at
+     FROM task_center_runs
+     WHERE task_key = ?
+       AND status = 'success'
+       AND datetime(REPLACE(REPLACE(started_at, 'T', ' '), 'Z', '')) >
+           datetime(REPLACE(REPLACE(?, 'T', ' '), 'Z', ''))
+     ORDER BY datetime(REPLACE(started_at, 'T', ' ')) DESC, id DESC
+     LIMIT 1`,
+    [FINANCE_FUNNEL_TASK_KEY, boundaryAt]
+  );
+  if (!latestFunnel) return null;
+
+  const repair = getRecoverableFunnelRepair(latestDaily);
+  const failedLabel = repair?.failed_label || repair?.failed_step || '日终下游步骤';
+  return {
+    status: 'recovered_by_funnel',
+    message: `上次日终停在「${failedLabel}」，但后续入池漏斗已于 ${formatChinaDateTime(latestFunnel.finished_at || latestFunnel.started_at)} 成功补跑；备选池、走势阶段和入场观察可按漏斗补跑结果查看，完整日终仍建议在下一收盘窗口重跑闭环。`,
+    repair,
+    funnel_run: latestFunnel,
+    next_actions: [
+      '若只是查看候选/观察队列，可按后续成功漏斗结果继续看。',
+      '若要刷新模型特征、样本快照和实验预测池，仍应重跑完整日终流水线。',
+      '金融买入计划仍保持人工确认，不因补跑漏斗自动生成或执行。'
+    ]
+  };
+}
+
 async function buildManualFunnelRunGuard(db: any) {
   await expireStaleFinancePipelineRuns(db);
 
@@ -682,7 +649,7 @@ async function buildManualFunnelRunGuard(db: any) {
     `SELECT id, started_at
      FROM task_center_runs
      WHERE task_key = ? AND status = 'running'
-     ORDER BY started_at DESC, id DESC
+     ORDER BY datetime(REPLACE(started_at, 'T', ' ')) DESC, id DESC
      LIMIT 1`,
     [FINANCE_PIPELINE_TASK_KEY]
   );
@@ -699,7 +666,7 @@ async function buildManualFunnelRunGuard(db: any) {
     `SELECT id, started_at
      FROM task_center_runs
      WHERE task_key = ? AND status = 'running'
-     ORDER BY started_at DESC, id DESC
+     ORDER BY datetime(REPLACE(started_at, 'T', ' ')) DESC, id DESC
      LIMIT 1`,
     [FINANCE_FUNNEL_TASK_KEY]
   );
@@ -720,7 +687,7 @@ async function buildManualFunnelRunGuard(db: any) {
     `SELECT id, status, started_at, finished_at, message, result_json
      FROM task_center_runs
      WHERE task_key = ? AND status IN ('success', 'error')
-     ORDER BY started_at DESC, id DESC
+     ORDER BY datetime(REPLACE(started_at, 'T', ' ')) DESC, id DESC
      LIMIT 1`,
     [FINANCE_PIPELINE_TASK_KEY]
   );
@@ -1463,6 +1430,7 @@ function extractDailyChanges(compactResult: any) {
 function getPipelineDailyChangesCacheKey(run: any) {
   return [
     run?.id || '',
+    run?.task_key || '',
     run?.status || '',
     run?.message || '',
     run?.started_at || '',
@@ -1488,6 +1456,7 @@ async function buildWorkflowDailyChanges(db: any, latestPipelineRun: any) {
   const latestPipelineResult = resultRow?.result_json ? compactPipelineResult(resultRow.result_json) : null;
   const dailyChanges = latestPipelineResult ? {
     run_id: latestPipelineRun.id,
+    task_key: latestPipelineRun.task_key,
     status: latestPipelineRun.status,
     message: latestPipelineRun.message,
     started_at: latestPipelineRun.started_at,
@@ -1617,11 +1586,34 @@ async function buildWorkflowLatestEntryObservationRows(db: any) {
   }
 
   const rows = await db.all(
-    `${latestEntryObservationCte}
-     SELECT id, symbol, name, asset_type, source, observation_status,
-            trigger_score, trigger_reason, structure_score, trend_phase_code,
-            close_price, invalidation_line, note, updated_at
-     FROM latest_entry_observations`
+    `${latestEntryObservationCte},
+     latest_signal_lifecycles AS (
+       SELECT *
+       FROM (
+         SELECT l.*,
+                ROW_NUMBER() OVER (
+                  PARTITION BY l.symbol, l.asset_type, l.source
+                  ORDER BY COALESCE(l.latest_check_date, l.updated_at) DESC, l.id DESC
+                ) AS rn
+         FROM financial_signal_lifecycles l
+       )
+       WHERE rn = 1
+     )
+     SELECT o.id, o.symbol, o.name, o.asset_type, o.source, o.observation_status,
+            o.entry_action, o.snapshot_json,
+            o.trigger_score, o.trigger_reason, o.structure_score, o.trend_phase_code,
+            o.close_price, o.invalidation_line, o.note,
+            o.manual_review_action, o.manual_review_label, o.manual_review_note, o.manual_reviewed_at,
+            l.maturity_status AS lifecycle_status,
+            l.maturity_label AS lifecycle_label,
+            l.flip_count AS lifecycle_flip_count,
+            l.consecutive_valid_days AS lifecycle_consecutive_valid_days,
+            o.updated_at
+     FROM latest_entry_observations o
+     LEFT JOIN latest_signal_lifecycles l
+       ON l.symbol = o.symbol
+      AND l.asset_type = o.asset_type
+      AND l.source = o.source`
   );
 
   workflowEntryObservationRowsCache = {
@@ -1829,6 +1821,10 @@ function buildRiskBoardPlanItem(row: any) {
 
 function buildRiskBoardObservationItem(row: any, sourceType: 'plan_ready' | 'entry_watch') {
   const isPlanReady = sourceType === 'plan_ready';
+  const queueInfo = buildEntryObservationQueueInfo(row, parseJsonConfig(row.snapshot_json));
+  const close = Number(row.close_price || 0);
+  const invalidationLine = Number(row.invalidation_line || 0);
+  const observationActionCode = getEntryObservationQueueActionCode(queueInfo, isPlanReady);
   return {
     id: row.id,
     source_type: sourceType,
@@ -1837,23 +1833,42 @@ function buildRiskBoardObservationItem(row: any, sourceType: 'plan_ready' | 'ent
     name: row.name,
     asset_type: row.asset_type,
     status: row.observation_status || (isPlanReady ? 'confirmed' : 'watching'),
-    priority: isPlanReady ? 'high' : 'normal',
-    action_code: isPlanReady ? 'READY_TO_PLAN' : 'WATCH_ENTRY',
-    action_label: isPlanReady ? '待生成计划' : '继续观察触发',
-    action_reason: row.trigger_reason || '等待入场触发条件继续确认',
-    today_permission: isPlanReady ? '可进入计划准备，仍不代表买入' : '今天不动，继续观察',
+    priority: isPlanReady || ['READY_TO_PLAN_AUTO', 'RISK_PRIORITY_RECHECK'].includes(observationActionCode) ? 'high' : 'normal',
+    action_code: observationActionCode,
+    action_label: isPlanReady ? '待生成计划' : queueInfo.observation_queue_label,
+    action_reason: isPlanReady ? row.trigger_reason || '等待生成计划' : queueInfo.observation_queue_reason,
+    today_permission: isPlanReady
+      ? '可进入计划准备，仍不代表买入'
+      : observationActionCode === 'RISK_PRIORITY_RECHECK'
+        ? '高触发但生命周期翻转，不自动进计划，先人工复核'
+        : observationActionCode === 'LIFECYCLE_RECHECK'
+          ? '触发已满足但生命周期未稳定，继续复核'
+          : observationActionCode === 'RISK_HOLD'
+            ? '风险未解除，不进计划'
+        : '今天不动，继续观察',
     need_reduce_or_stop_add: false,
     invalidated: false,
     just_hold: !isPlanReady,
     can_prepare: isPlanReady,
-    close_price: row.close_price || null,
-    invalidation_line: row.invalidation_line || null,
+    close_price: close || null,
+    invalidation_line: invalidationLine || null,
     trigger_score: row.trigger_score,
     structure_score: row.structure_score,
     trend_phase_code: row.trend_phase_code,
+    lifecycle_status: row.lifecycle_status || null,
+    lifecycle_label: row.lifecycle_label || null,
+    manual_review_action: row.manual_review_action || null,
     position_amount: 0,
     updated_at: row.updated_at,
-    path: '/finance/entry-trigger'
+    path: isPlanReady
+      ? '/finance/entry-trigger/plan-ready'
+      : observationActionCode === 'RISK_PRIORITY_RECHECK'
+        ? '/finance/entry-trigger/observations?observation_scope=risk_priority_recheck'
+        : observationActionCode === 'LIFECYCLE_RECHECK'
+          ? '/finance/entry-trigger/observations?observation_scope=lifecycle_recheck'
+          : observationActionCode === 'RISK_HOLD'
+            ? '/finance/entry-trigger/observations?observation_scope=risk_hold'
+            : '/finance/entry-trigger/observations'
   };
 }
 
@@ -2007,8 +2022,7 @@ router.get('/workflow-summary', async (_req: Request, res: Response) => {
          ORDER BY
            CASE COALESCE(s.priority, 'normal') WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END,
            p.is_bought DESC,
-           COALESCE(s.suggestion_date, p.updated_at) DESC
-         LIMIT 12`
+           COALESCE(s.suggestion_date, p.updated_at) DESC`
       )
     ]);
 
@@ -2042,17 +2056,41 @@ router.get('/workflow-summary', async (_req: Request, res: Response) => {
       invalidation_line: row.invalidation_line,
       updated_at: row.updated_at
     });
-    const pickWatchObservation = (row: any) => ({
-      id: row.id,
-      symbol: row.symbol,
-      name: row.name,
-      asset_type: row.asset_type,
-      observation_status: row.observation_status,
-      trigger_score: row.trigger_score,
-      trigger_reason: row.trigger_reason,
-      trend_phase_code: row.trend_phase_code,
-      updated_at: row.updated_at
+    const hydrateWatchObservationQueue = (row: any) => ({
+      ...row,
+      ...buildEntryObservationQueueInfo(row, parseJsonConfig(row.snapshot_json))
     });
+    const getObservationQueuePath = (actionCode: string) => {
+      switch (actionCode) {
+        case 'RISK_PRIORITY_RECHECK':
+          return '/finance/entry-trigger/observations?observation_scope=risk_priority_recheck';
+        case 'LIFECYCLE_RECHECK':
+          return '/finance/entry-trigger/observations?observation_scope=lifecycle_recheck';
+        case 'RISK_HOLD':
+          return '/finance/entry-trigger/observations?observation_scope=risk_hold';
+        default:
+          return '/finance/entry-trigger/observations';
+      }
+    };
+    const pickWatchObservation = (row: any) => {
+      const actionCode = getEntryObservationQueueActionCode(row);
+      return {
+        id: row.id,
+        symbol: row.symbol,
+        name: row.name,
+        asset_type: row.asset_type,
+        observation_status: row.observation_status,
+        trigger_score: row.trigger_score,
+        trigger_reason: row.trigger_reason,
+        trend_phase_code: row.trend_phase_code,
+        updated_at: row.updated_at,
+        label: row.observation_queue_label,
+        detail: row.observation_queue_reason,
+        score: row.trigger_score,
+        priority: actionCode === 'RISK_PRIORITY_RECHECK' || actionCode === 'RISK_HOLD' ? 'high' : 'normal',
+        path: getObservationQueuePath(actionCode)
+      };
+    };
     const latestObservations = latestEntryObservationRows
       .slice()
       .sort(compareUpdatedDesc)
@@ -2101,7 +2139,8 @@ router.get('/workflow-summary', async (_req: Request, res: Response) => {
       .slice(0, 6);
     const watchObservationItems = latestEntryObservationRows
       .filter((row: any) => ['watching', 'plan_candidate'].includes(row.observation_status))
-      .sort((a: any, b: any) => numberValue(b.trigger_score) - numberValue(a.trigger_score) || compareUpdatedDesc(a, b))
+      .map(hydrateWatchObservationQueue)
+      .sort(compareObservationQueueItems)
       .slice(0, 6)
       .map(pickWatchObservation);
     const invalidatedItems = [
@@ -2169,50 +2208,67 @@ router.get('/workflow-summary', async (_req: Request, res: Response) => {
 	      })),
 	      entry_watch: watchObservationItems.map((item: any) => ({
 	        ...item,
-	        path: '/finance/entry-trigger/observations'
+	        path: item.path || '/finance/entry-trigger/observations'
 	      })),
 	      risk_alerts: highPrioritySuggestions,
 	      invalidated: invalidatedItems.map((item: any) => ({
 	        ...item,
 	        path: item.source_type === 'candidate'
 	          ? `/finance/candidate-pool/${item.asset_type === 'etf' ? 'etf' : 'stock'}`
-	          : '/finance/entry-trigger/observations'
+	          : '/finance/entry-trigger/observations?observation_scope=invalidated'
 	      }))
 	    };
 
-    const riskBoardItems = [
+    const allRiskBoardItems = [
       ...activePlanRows.map(buildRiskBoardPlanItem),
-      ...planReadyItems.map((item: any) => buildRiskBoardObservationItem(item, 'plan_ready')),
-      ...watchObservationItems.map((item: any) => buildRiskBoardObservationItem(item, 'entry_watch'))
+      ...planReadyObservationRows.map((item: any) => buildRiskBoardObservationItem(item, 'plan_ready')),
+      ...latestEntryObservationRows
+        .filter((row: any) => row.observation_status === 'watching')
+        .map((item: any) => buildRiskBoardObservationItem(item, 'entry_watch'))
     ].sort((a: any, b: any) => {
       const priority = (item: any) => {
         if (item.invalidated) return 0;
         if (item.need_reduce_or_stop_add) return 1;
-        if (item.can_prepare) return 2;
-        if (item.priority === 'high') return 3;
-        return 4;
+        if (item.action_code === 'RISK_PRIORITY_RECHECK') return 2;
+        if (item.action_code === 'LIFECYCLE_RECHECK') return 3;
+        if (item.action_code === 'RISK_HOLD') return 4;
+        if (item.can_prepare) return 5;
+        if (item.priority === 'high') return 6;
+        return 7;
       };
-      return priority(a) - priority(b);
-    }).slice(0, 18);
+      return priority(a) - priority(b)
+        || Number(b.trigger_score || 0) - Number(a.trigger_score || 0)
+        || rowTime(b.updated_at) - rowTime(a.updated_at)
+        || numberValue(b.id) - numberValue(a.id);
+    });
+    const riskBoardItems = allRiskBoardItems.slice(0, 18);
 
     const riskBoard = {
       summary: {
-        total: riskBoardItems.length,
-        allowed_to_prepare: riskBoardItems.filter((item: any) => item.can_prepare && !item.invalidated).length,
-        reduce_or_stop_add: riskBoardItems.filter((item: any) => item.need_reduce_or_stop_add).length,
-        invalidated: riskBoardItems.filter((item: any) => item.invalidated).length,
-        just_hold: riskBoardItems.filter((item: any) => item.just_hold).length
+        total: allRiskBoardItems.length,
+        allowed_to_prepare: allRiskBoardItems.filter((item: any) => item.can_prepare && !item.invalidated).length,
+        plan_ready_to_prepare: allRiskBoardItems.filter((item: any) => item.can_prepare && !item.invalidated && item.source_type !== 'trade_plan').length,
+        trade_plan_can_prepare: allRiskBoardItems.filter((item: any) => item.can_prepare && !item.invalidated && item.source_type === 'trade_plan').length,
+        reduce_or_stop_add: allRiskBoardItems.filter((item: any) => item.need_reduce_or_stop_add).length,
+        invalidated: allRiskBoardItems.filter((item: any) => item.invalidated).length,
+        high_trigger_recheck: allRiskBoardItems.filter((item: any) => item.action_code === 'RISK_PRIORITY_RECHECK').length,
+        lifecycle_recheck: allRiskBoardItems.filter((item: any) => item.action_code === 'LIFECYCLE_RECHECK').length,
+        risk_hold: allRiskBoardItems.filter((item: any) => item.action_code === 'RISK_HOLD').length,
+        just_hold: allRiskBoardItems.filter((item: any) => ['WATCH_ENTRY', 'WAIT_PULLBACK'].includes(item.action_code)).length,
+        preview_count: riskBoardItems.length
       },
       items: riskBoardItems
     };
 
     const latestPipelineRun = await db.get(
-      `SELECT id, status, message, started_at, finished_at, LENGTH(result_json) AS result_json_size
+      `SELECT id, task_key, status, message, started_at, finished_at, LENGTH(result_json) AS result_json_size
        FROM task_center_runs
-       WHERE task_key = ?
-       ORDER BY started_at DESC, id DESC
+       WHERE task_key IN (?, ?)
+       ORDER BY datetime(REPLACE(COALESCE(finished_at, started_at), 'T', ' ')) DESC,
+                datetime(REPLACE(started_at, 'T', ' ')) DESC,
+                id DESC
        LIMIT 1`,
-      [FINANCE_PIPELINE_TASK_KEY]
+      [FINANCE_PIPELINE_TASK_KEY, FINANCE_FUNNEL_TASK_KEY]
     );
     const dailyChanges = await buildWorkflowDailyChanges(db, latestPipelineRun);
 
@@ -2541,7 +2597,7 @@ router.get('/daily-pipeline/status', async (_req: Request, res: Response) => {
       `SELECT *
        FROM task_center_runs
        WHERE task_key = ?
-       ORDER BY started_at DESC, id DESC
+       ORDER BY datetime(REPLACE(started_at, 'T', ' ')) DESC, id DESC
        LIMIT 1`,
       [FINANCE_PIPELINE_TASK_KEY]
     );
@@ -2549,9 +2605,14 @@ router.get('/daily-pipeline/status', async (_req: Request, res: Response) => {
     if (latestRun?.result_json) {
       latestRun.result = compactPipelineResult(latestRun.result_json);
       latestRun.duration_seconds = getDurationSeconds(latestRun.started_at, latestRun.finished_at);
+      const recovery = await getDailyPipelineRecovery(db, latestRun);
       if (latestRun.status === 'success' && dailyPriceQuality?.status === 'incomplete') {
         latestRun.effective_status = 'stale_success';
         latestRun.effective_message = `最近成功记录对应的行情覆盖不足：${latestPriceTradeDate} 当前 ${dailyPriceQuality.current_count} 个，上一交易日 ${dailyPriceQuality.previous_trade_date} ${dailyPriceQuality.previous_count} 个。`;
+      } else if (recovery) {
+        latestRun.effective_status = recovery.status;
+        latestRun.effective_message = recovery.message;
+        latestRun.recovery = recovery;
       }
       delete latestRun.result_json;
     }
@@ -2597,7 +2658,7 @@ router.get('/daily-pipeline/logs', async (req: Request, res: Response) => {
        FROM task_center_runs r
        LEFT JOIN task_center_tasks t ON t.id = r.task_id
        WHERE r.task_key IN (${placeholders})
-       ORDER BY r.started_at DESC, r.id DESC
+       ORDER BY datetime(REPLACE(r.started_at, 'T', ' ')) DESC, r.id DESC
        LIMIT ?`,
       [...taskKeys, limit]
     );
@@ -2787,7 +2848,7 @@ router.get('/candidate-funnel/status', async (_req: Request, res: Response) => {
       `SELECT *
        FROM task_center_runs
        WHERE task_key = ?
-       ORDER BY started_at DESC, id DESC
+       ORDER BY datetime(REPLACE(started_at, 'T', ' ')) DESC, id DESC
        LIMIT 1`,
       [FINANCE_FUNNEL_TASK_KEY]
     );
@@ -2899,571 +2960,6 @@ router.post('/candidate-funnel/run', async (req: Request, res: Response) => {
     res.status(500).json({ success: false, message });
   }
 });
-
-function roundNumber(value: number | null | undefined, digits = 2): number | null {
-  if (value === null || value === undefined || !Number.isFinite(value)) return null;
-  const factor = 10 ** digits;
-  return Math.round(value * factor) / factor;
-}
-
-function calculateCloseAverage(prices: DailyPrice[], window: number, endExclusive = prices.length): number | null {
-  if (endExclusive < window) return null;
-  const slice = prices.slice(endExclusive - window, endExclusive);
-  if (slice.length < window) return null;
-  return slice.reduce((sum, price) => sum + price.close, 0) / window;
-}
-
-function getSlope(current: number | null, previous: number | null): string {
-  if (current === null || previous === null) return 'unknown';
-  if (current > previous) return 'up';
-  if (current < previous) return 'down';
-  return 'flat';
-}
-
-function percentChange(current: number | null | undefined, previous: number | null | undefined): number | null {
-  if (current === null || current === undefined || previous === null || previous === undefined || previous === 0) return null;
-  return current / previous - 1;
-}
-
-function averageDailyRange(prices: DailyPrice[]): number | null {
-  if (prices.length === 0) return null;
-  const values = prices
-    .map(price => {
-      const close = price.close || 0;
-      if (close <= 0) return null;
-      const high = price.high || price.close;
-      const low = price.low || price.close;
-      return (high - low) / close;
-    })
-    .filter((value): value is number => value !== null && Number.isFinite(value));
-  if (values.length === 0) return null;
-  return values.reduce((sum, value) => sum + value, 0) / values.length;
-}
-
-function countTrailingDirectionDays(prices: DailyPrice[], direction: 'up' | 'down'): number {
-  let count = 0;
-  for (let i = prices.length - 1; i > 0; i--) {
-    const current = prices[i].close;
-    const previous = prices[i - 1].close;
-    if (direction === 'up' && current > previous) {
-      count++;
-      continue;
-    }
-    if (direction === 'down' && current < previous) {
-      count++;
-      continue;
-    }
-    break;
-  }
-  return count;
-}
-
-function getMarketRegimeShortLabel(regime: string): string {
-  switch (regime) {
-    case 'NORMAL': return '中期正常区';
-    case 'NORMAL_CONFIRMED': return '中期正常确认区';
-    case 'RISK': return '中期风险区';
-    case 'CRASH_WARNING': return '中期股灾预警';
-    case 'CRASH': return '中期冻结区';
-    case 'DEEP_CRASH': return '中期深度股灾区';
-    case 'REBUILD_WATCH': return '中期修复观察区';
-    case 'UNKNOWN': return '中期状态未确认';
-    default: return regime;
-  }
-}
-
-function addBehaviorTag(tags: MarketBehaviorTag[], tag: MarketBehaviorTag) {
-  if (!tags.some(item => item.code === tag.code)) {
-    tags.push(tag);
-  }
-}
-
-function calculateMarketRegime(prices: DailyPrice[], isMock: boolean, source: string, symbol = '000300'): MarketRegime {
-  const name = getMarketAssetMeta(symbol).name;
-  const ruleVersion = 'market_regime_v1.1';
-  const cycleLayerVersion = 'market_cycle_layers_v1';
-  
-  if (prices.length < 120) {
-    return {
-      symbol,
-      name,
-      trade_date: prices.length > 0 ? prices[prices.length - 1].trade_date : '',
-      close: prices.length > 0 ? prices[prices.length - 1].close : 0,
-      ma20: null,
-      ma20_slope: 'unknown',
-      ma60: 0,
-      ma60_prev: 0,
-      ma60_slope: 'unknown',
-      ma120: null,
-      ma120_prev: null,
-      ma120_slope: 'unknown',
-      ma250: null,
-      ma250_prev: null,
-      ma250_slope: 'unknown',
-      low_60: null,
-      low_120: null,
-      cross_count_10: 0,
-      above_ma60_days: 0,
-      below_ma60_days: 0,
-      drawdown_20: 0,
-      drawdown_60: 0,
-      drawdown_120: 0,
-      latest_change: null,
-      distance_to_ma60: 0,
-      distance_to_ma250: null,
-      higher_high: false,
-      higher_low: false,
-      lower_high: false,
-      lower_low: false,
-      sideways: false,
-      up_days: 0,
-      down_days: 0,
-      market_regime: 'UNKNOWN',
-      result_reason: '历史数据不足120个交易日，暂无法完整判定股灾分级。',
-      entry_permission: 'OBSERVE_ONLY',
-      entry_reason: '状态不明确，仅观察。',
-      rule_version: ruleVersion,
-      cycle_layer_version: cycleLayerVersion,
-      short_state: 'SHORT_UNKNOWN',
-      short_label: '短期状态未确认',
-      short_reason: '历史数据不足，暂不能识别短期行为。',
-      mid_state: 'UNKNOWN',
-      mid_label: '中期状态未确认',
-      mid_reason: '历史数据不足120个交易日，暂无法完整判定中期总闸。',
-      long_state: 'LONG_UNKNOWN',
-      long_label: '长期牛熊未确认',
-      long_reason: '历史数据不足250个交易日，暂不能用MA250判断长期牛熊。',
-      behavior_tags: [],
-      is_mock: isMock,
-      source
-    };
-  }
-  
-  const latestPrice = prices[prices.length - 1];
-  const close = latestPrice.close;
-  const trade_date = latestPrice.trade_date;
-
-  const ma20 = calculateCloseAverage(prices, 20);
-  const ma20_prev = calculateCloseAverage(prices, 20, prices.length - 1);
-  const ma120 = calculateCloseAverage(prices, 120);
-  const ma120_prev = calculateCloseAverage(prices, 120, prices.length - 1);
-  const ma250 = calculateCloseAverage(prices, 250);
-  const ma250_prev = calculateCloseAverage(prices, 250, prices.length - 1);
-  const ma20_slope = getSlope(ma20, ma20_prev);
-  const ma120_slope = getSlope(ma120, ma120_prev);
-  const ma250_slope = getSlope(ma250, ma250_prev);
-
-  const last60Prices = prices.slice(-60);
-  const ma60 = last60Prices.reduce((sum, p) => sum + p.close, 0) / 60;
-  
-  const prev60Prices = prices.slice(-61, -1);
-  const ma60_prev = prev60Prices.reduce((sum, p) => sum + p.close, 0) / 60;
-  
-  let ma60_slope: string;
-  if (ma60 < ma60_prev) {
-    ma60_slope = 'down';
-  } else if (ma60 > ma60_prev) {
-    ma60_slope = 'up';
-  } else {
-    ma60_slope = 'flat';
-  }
-  
-  const low_60 = Math.min(...last60Prices.map(p => p.close));
-  
-  const last120Prices = prices.slice(-120);
-  const low_120 = Math.min(...last120Prices.map(p => p.close));
-
-  const latest_change = prices.length >= 2 ? percentChange(close, prices[prices.length - 2].close) : null;
-  const return_5d = prices.length >= 6 ? percentChange(close, prices[prices.length - 6].close) : null;
-  
-  const close_20_days_ago = prices.length >= 21 ? prices[prices.length - 21].close : null;
-  const close_60_days_ago = prices.length >= 61 ? prices[prices.length - 61].close : null;
-  const close_120_days_ago = prices.length >= 121 ? prices[prices.length - 121].close : null;
-  
-  const drawdown_20 = close_20_days_ago !== null ? (close / close_20_days_ago) - 1 : null;
-  const drawdown_60 = close_60_days_ago !== null ? (close / close_60_days_ago) - 1 : null;
-  const drawdown_120 = close_120_days_ago !== null ? (close / close_120_days_ago) - 1 : null;
-  
-  const distance_to_ma60 = (close - ma60) / ma60;
-  const distance_to_ma250 = ma250 !== null ? percentChange(close, ma250) : null;
-
-  const last20Prices = prices.slice(-20);
-  const prev20Prices = prices.slice(-40, -20);
-  const last20High = Math.max(...last20Prices.map(price => price.high || price.close));
-  const last20Low = Math.min(...last20Prices.map(price => price.low || price.close));
-  const prev20High = prev20Prices.length === 20 ? Math.max(...prev20Prices.map(price => price.high || price.close)) : null;
-  const prev20Low = prev20Prices.length === 20 ? Math.min(...prev20Prices.map(price => price.low || price.close)) : null;
-  const higher_high = prev20High !== null && last20High > prev20High * 1.005;
-  const higher_low = prev20Low !== null && last20Low > prev20Low * 1.005;
-  const lower_high = prev20High !== null && last20High < prev20High * 0.995;
-  const lower_low = prev20Low !== null && last20Low < prev20Low * 0.995;
-  const range_20d = last20Low > 0 ? (last20High - last20Low) / last20Low : null;
-  const sideways = range_20d !== null && range_20d <= 0.06 && drawdown_20 !== null && Math.abs(drawdown_20) <= 0.025 && !higher_high && !lower_low;
-  const up_days = countTrailingDirectionDays(prices, 'up');
-  const down_days = countTrailingDirectionDays(prices, 'down');
-  const recentRange = averageDailyRange(prices.slice(-5));
-  const previousRange = averageDailyRange(prices.slice(-25, -5));
-  const volatilityExpanding = recentRange !== null && previousRange !== null && recentRange > previousRange * 1.35 && recentRange > 0.015;
-  const volatilityContracting = recentRange !== null && previousRange !== null && recentRange < previousRange * 0.75;
-  
-  const getMA60At = (index: number): number | null => {
-    if (index < 59) return null;
-    const slice = prices.slice(index - 59, index + 1);
-    return slice.reduce((sum, p) => sum + p.close, 0) / 60;
-  };
-  
-  let cross_count_10 = 0;
-  const last10Prices = prices.slice(-10);
-  let prevSide: 'above' | 'below' | null = null;
-  
-  for (let i = 0; i < last10Prices.length; i++) {
-    const globalIndex = prices.length - 10 + i;
-    const dayMA60 = getMA60At(globalIndex);
-    
-    if (dayMA60 === null) continue;
-    
-    let currentSide: 'above' | 'below' | 'equal';
-    if (last10Prices[i].close > dayMA60) {
-      currentSide = 'above';
-    } else if (last10Prices[i].close < dayMA60) {
-      currentSide = 'below';
-    } else {
-      currentSide = 'equal';
-    }
-    
-    if (currentSide !== 'equal') {
-      if (prevSide !== null && prevSide !== currentSide) {
-        cross_count_10++;
-      }
-      prevSide = currentSide;
-    }
-  }
-  
-  let above_ma60_days = 0;
-  for (let i = prices.length - 1; i >= 0; i--) {
-    const dayMA60 = getMA60At(i);
-    if (dayMA60 === null) break;
-    if (prices[i].close > dayMA60) {
-      above_ma60_days++;
-    } else {
-      break;
-    }
-  }
-  
-  let below_ma60_days = 0;
-  for (let i = prices.length - 1; i >= 0; i--) {
-    const dayMA60 = getMA60At(i);
-    if (dayMA60 === null) break;
-    if (prices[i].close < dayMA60) {
-      below_ma60_days++;
-    } else {
-      break;
-    }
-  }
-  
-  let market_regime = 'UNKNOWN';
-  let result_reason = '当前数据不满足明确状态，继续观察。';
-  
-  if ((drawdown_60 !== null && drawdown_60 <= -0.20) || 
-      (drawdown_120 !== null && drawdown_120 <= -0.25) || 
-      distance_to_ma60 <= -0.10) {
-    market_regime = 'DEEP_CRASH';
-    result_reason = '市场进入深度股灾区，极端机会开始出现，但禁止直接抄底，等待安全区 + 结构成立。股灾分级只负责提醒机会和风险，不负责给买点；买点永远由安全区 + 结构成立决定。';
-  } else if ((close < ma60 && ma60 < ma60_prev && drawdown_20 !== null && drawdown_20 <= -0.10) || 
-             (low_120 !== null && close < low_120) || 
-             (drawdown_60 !== null && drawdown_60 <= -0.15)) {
-    market_regime = 'CRASH';
-    result_reason = '市场进入股灾/冻结区，不抄底，等待结构重建。股灾分级只负责提醒机会和风险，不负责给买点；买点永远由安全区 + 结构成立决定。';
-  } else if ((close < ma60 && ma60 < ma60_prev) || 
-             (low_60 !== null && close < low_60) || 
-             (drawdown_20 !== null && drawdown_20 <= -0.08) || 
-             below_ma60_days >= 3) {
-    market_regime = 'CRASH_WARNING';
-    result_reason = '市场进入股灾预警区，开始重点观察，但不抄底，不接飞刀。股灾分级只负责提醒机会和风险，不负责给买点；买点永远由安全区 + 结构成立决定。';
-  } else if ((drawdown_120 !== null && drawdown_120 <= -0.08) && 
-             close > ma60 && 
-             above_ma60_days >= 3) {
-    market_regime = 'REBUILD_WATCH';
-    result_reason = '市场处于修复观察区，短期已站回MA60，但120日跌幅仍较深（-8%以内），不能直接视为正常确认。股灾分级只负责提醒机会和风险，不负责给买点；买点永远由安全区 + 结构成立决定。';
-  } else if (cross_count_10 >= 2 || 
-             (close < ma60 && ma60 >= ma60_prev) || 
-             (drawdown_20 !== null && drawdown_20 <= -0.05 && drawdown_20 > -0.08)) {
-    market_regime = 'RISK';
-    result_reason = '市场处于风险区，只观察，降速，不急于建仓。股灾分级只负责提醒机会和风险，不负责给买点；买点永远由安全区 + 结构成立决定。';
-  } else if (close > ma60 && ma60 >= ma60_prev && above_ma60_days >= 5 && cross_count_10 < 2 && 
-             (drawdown_120 === null || drawdown_120 > -0.08)) {
-    market_regime = 'NORMAL_CONFIRMED';
-    result_reason = '收盘价站上MA60并连续站稳5天，MA60未下弯，120日跌幅已修复至-8%以内，市场进入正常确认区。股灾分级只负责提醒机会和风险，不负责给买点；买点永远由安全区 + 结构成立决定。';
-  } else if (close > ma60 && ma60 >= ma60_prev && cross_count_10 < 2 && 
-             (drawdown_20 === null || drawdown_20 > -0.08) && 
-             (drawdown_60 === null || drawdown_60 > -0.15) &&
-             (drawdown_120 === null || drawdown_120 > -0.08)) {
-    market_regime = 'NORMAL';
-    result_reason = '市场处于正常观察区，可以继续观察个股/ETF结构。股灾分级只负责提醒机会和风险，不负责给买点；买点永远由安全区 + 结构成立决定。';
-  }
-  
-  let entry_permission = 'OBSERVE_ONLY';
-  let entry_reason = '状态不明确，仅观察。';
-  
-  if (market_regime === 'DEEP_CRASH' || market_regime === 'CRASH') {
-    entry_permission = 'FREEZE';
-    entry_reason = '市场冻结，不允许建仓，只观察，等待结构重建。';
-  } else if (market_regime === 'CRASH_WARNING') {
-    entry_permission = 'WATCH_FOR_REBUILD';
-    entry_reason = '股灾预警，等待止跌和结构修复。';
-  } else if (market_regime === 'REBUILD_WATCH') {
-    entry_permission = 'WATCH_FOR_REBUILD';
-    entry_reason = '市场处于深跌后的修复观察区，短期已有反弹，但长周期仍未完全修复，等待结构进一步确认。';
-  } else if (market_regime === 'RISK') {
-    entry_permission = 'OBSERVE_ONLY';
-    entry_reason = '风险区，只观察，不主动扩大仓位。';
-  } else if (market_regime === 'NORMAL' || market_regime === 'NORMAL_CONFIRMED') {
-    entry_permission = 'ALLOW_STRUCTURE_CHECK';
-    entry_reason = '允许进入个股/ETF结构判断，但仍需安全区 + 结构成立 + 失效线。';
-  }
-
-  const behavior_tags: MarketBehaviorTag[] = [];
-  const hasFastUp = latest_change !== null && latest_change >= 0.03;
-  const hasFastDown = latest_change !== null && latest_change <= -0.03;
-  const hasFiveDayFastUp = return_5d !== null && return_5d >= 0.06;
-  const hasFiveDayFastDown = return_5d !== null && return_5d <= -0.06;
-  const isSlowGrindUp = drawdown_20 !== null
-    && drawdown_20 >= 0.02
-    && drawdown_20 <= 0.10
-    && ma20 !== null
-    && close > ma20
-    && ma20_slope !== 'down'
-    && higher_low
-    && !volatilityExpanding;
-  const isSlowBleed = drawdown_20 !== null
-    && drawdown_20 <= -0.025
-    && drawdown_20 >= -0.10
-    && ma20 !== null
-    && (close < ma20 || lower_high)
-    && !hasFastDown
-    && !volatilityExpanding;
-
-  if (hasFastUp) {
-    addBehaviorTag(behavior_tags, { code: 'SURGE', label: '暴涨', tone: 'warn', reason: '单日涨幅达到3%以上，防止情绪追高。' });
-  }
-  if (hasFastDown) {
-    addBehaviorTag(behavior_tags, { code: 'CRASH_DAY', label: '暴跌', tone: 'risk', reason: '单日跌幅达到3%以上，优先观察是否破位。' });
-  }
-  if (hasFiveDayFastUp) {
-    addBehaviorTag(behavior_tags, { code: 'FAST_UP_5D', label: '短期急涨', tone: 'warn', reason: '5日涨幅达到6%以上，注意短线拥挤。' });
-  }
-  if (hasFiveDayFastDown) {
-    addBehaviorTag(behavior_tags, { code: 'FAST_DOWN_5D', label: '短期急跌', tone: 'risk', reason: '5日跌幅达到6%以上，先看风险释放和止跌结构。' });
-  }
-  if (up_days >= 4) {
-    addBehaviorTag(behavior_tags, { code: 'CONSECUTIVE_UP', label: '连续上涨', tone: 'warn', reason: `已连续${up_days}个交易日收盘上涨，短期不宜追。` });
-  }
-  if (down_days >= 4) {
-    addBehaviorTag(behavior_tags, { code: 'CONSECUTIVE_DOWN', label: '连续下跌', tone: 'risk', reason: `已连续${down_days}个交易日收盘下跌，等待止跌确认。` });
-  }
-  if (isSlowGrindUp) {
-    addBehaviorTag(behavior_tags, { code: 'SLOW_GRIND_UP', label: '慢涨', tone: 'good', reason: '20日温和上行，低点抬高且波动未明显放大。' });
-  }
-  if (isSlowBleed) {
-    addBehaviorTag(behavior_tags, { code: 'SLOW_BLEED', label: '阴跌', tone: 'risk', reason: '20日缓慢走弱，价格低于短均线或高点抬低。' });
-  }
-  if (sideways) {
-    addBehaviorTag(behavior_tags, { code: 'SIDEWAYS', label: '横盘震荡', tone: 'neutral', reason: '近20日振幅和涨跌幅都较小，等待方向选择。' });
-  }
-  if (higher_high) {
-    addBehaviorTag(behavior_tags, { code: 'HIGHER_HIGH', label: '高点抬高', tone: 'good', reason: '近20日高点高于前20日，攻击结构有改善。' });
-  }
-  if (higher_low) {
-    addBehaviorTag(behavior_tags, { code: 'HIGHER_LOW', label: '低点抬高', tone: 'good', reason: '近20日低点高于前20日，承接结构有改善。' });
-  }
-  if (lower_high) {
-    addBehaviorTag(behavior_tags, { code: 'LOWER_HIGH', label: '高点抬低', tone: 'risk', reason: '近20日高点低于前20日，反弹高度不足。' });
-  }
-  if (lower_low) {
-    addBehaviorTag(behavior_tags, { code: 'LOWER_LOW', label: '低点抬低', tone: 'risk', reason: '近20日低点低于前20日，防止趋势转弱。' });
-  }
-  if (volatilityExpanding) {
-    addBehaviorTag(behavior_tags, { code: 'VOL_EXPAND', label: '波动放大', tone: 'warn', reason: '近5日平均振幅明显高于前20日，仓位要降速。' });
-  } else if (volatilityContracting) {
-    addBehaviorTag(behavior_tags, { code: 'VOL_CONTRACT', label: '波动收敛', tone: 'neutral', reason: '近5日平均振幅低于前20日，等待突破或回踩确认。' });
-  }
-
-  let short_state = 'SHORT_NEUTRAL';
-  let short_label = '短期中性';
-  let short_reason = '短期行为没有明显极端特征，继续观察。';
-  if (hasFastDown || hasFiveDayFastDown) {
-    short_state = 'SHORT_FAST_DOWN';
-    short_label = '短期急跌';
-    short_reason = '出现单日或5日急跌，先看风险释放和止跌结构。';
-  } else if (hasFastUp || hasFiveDayFastUp) {
-    short_state = 'SHORT_FAST_UP';
-    short_label = '短期急涨';
-    short_reason = '出现单日或5日急涨，防追高，等待回踩不破。';
-  } else if (isSlowBleed) {
-    short_state = 'SHORT_SLOW_BLEED';
-    short_label = '短期阴跌';
-    short_reason = '价格缓慢走弱但未出现极端暴跌，先防慢性破位。';
-  } else if (isSlowGrindUp) {
-    short_state = 'SHORT_SLOW_GRIND_UP';
-    short_label = '短期慢涨';
-    short_reason = '温和上行、低点抬高且波动未失控，短期行为较健康。';
-  } else if (sideways) {
-    short_state = 'SHORT_SIDEWAYS';
-    short_label = '短期横盘震荡';
-    short_reason = '近20日方向不强，等待突破、回踩或跌破后的确认。';
-  } else if (lower_high && lower_low) {
-    short_state = 'SHORT_WEAK';
-    short_label = '短期转弱';
-    short_reason = '高点和低点同时抬低，短期偏弱。';
-  } else if (higher_high && higher_low) {
-    short_state = 'SHORT_UP';
-    short_label = '短期走强';
-    short_reason = '高点和低点同步抬高，短期结构改善。';
-  } else if (up_days >= 4) {
-    short_state = 'SHORT_CONSECUTIVE_UP';
-    short_label = '短期连续上涨';
-    short_reason = `已连续${up_days}个交易日上涨，注意短线追高风险。`;
-  } else if (down_days >= 4) {
-    short_state = 'SHORT_CONSECUTIVE_DOWN';
-    short_label = '短期连续下跌';
-    short_reason = `已连续${down_days}个交易日下跌，等待止跌确认。`;
-  }
-
-  const getMA250At = (index: number): number | null => {
-    if (index < 249) return null;
-    const slice = prices.slice(index - 249, index + 1);
-    return slice.reduce((sum, price) => sum + price.close, 0) / 250;
-  };
-
-  let above_ma250_days = 0;
-  for (let i = prices.length - 1; i >= 0; i--) {
-    const dayMA250 = getMA250At(i);
-    if (dayMA250 === null) break;
-    if (prices[i].close > dayMA250) {
-      above_ma250_days++;
-    } else {
-      break;
-    }
-  }
-
-  let below_ma250_days = 0;
-  for (let i = prices.length - 1; i >= 0; i--) {
-    const dayMA250 = getMA250At(i);
-    if (dayMA250 === null) break;
-    if (prices[i].close < dayMA250) {
-      below_ma250_days++;
-    } else {
-      break;
-    }
-  }
-
-  const ma250_60ago = prices.length >= 310 ? getMA250At(prices.length - 61) : null;
-  const ma250_slope_60 = ma250 !== null && ma250_60ago !== null && ma250_60ago > 0
-    ? ma250 / ma250_60ago - 1
-    : null;
-  const ma250_long_slope =
-    ma250_slope_60 === null ? 'unknown' :
-    ma250_slope_60 >= 0.01 ? 'up' :
-    ma250_slope_60 <= -0.01 ? 'down' :
-    'flat';
-
-  let long_state = 'LONG_UNKNOWN';
-  let long_label = '长期牛熊未确认';
-  let long_reason = '历史数据不足250个交易日，暂不能用MA250判断长期牛熊。';
-  if (ma250 !== null) {
-    const slopeText = ma250_long_slope === 'up' ? '上行' : ma250_long_slope === 'down' ? '下行' : ma250_long_slope === 'flat' ? '走平' : '未知';
-    const ma120Text = ma120_slope === 'up' ? '上行' : ma120_slope === 'down' ? '下行' : ma120_slope === 'flat' ? '走平' : '未知';
-    const distanceText = distance_to_ma250 === null ? '--' : `${(distance_to_ma250 * 100).toFixed(2)}%`;
-    const aboveBuffer = distance_to_ma250 !== null && distance_to_ma250 >= 0.02;
-    const belowBuffer = distance_to_ma250 !== null && distance_to_ma250 <= -0.02;
-    const sustainedAbove = above_ma250_days >= 30;
-    const sustainedBelow = below_ma250_days >= 30;
-    const confirmedBull = aboveBuffer && sustainedAbove && ma250_long_slope !== 'down' && ma120_slope !== 'down';
-    const confirmedBear = belowBuffer && sustainedBelow && ma250_long_slope === 'down' && (ma120_slope === 'down' || lower_high || lower_low);
-    const repairWatch = aboveBuffer && above_ma250_days >= 10 && ma250_long_slope !== 'down' && (ma120_slope !== 'down' || higher_low);
-    const weakenWatch = belowBuffer && below_ma250_days >= 10 && ma250_long_slope !== 'up' && (ma120_slope === 'down' || lower_high || lower_low);
-
-    if (confirmedBull) {
-      long_state = 'LONG_BULL';
-      long_label = '长期牛市';
-      long_reason = `收盘价在MA250上方且偏离 ${distanceText}，已连续站上MA250 ${above_ma250_days} 天，MA250约60日斜率${slopeText}，MA120${ma120Text}，长期背景偏牛。`;
-    } else if (confirmedBear) {
-      long_state = 'LONG_BEAR';
-      long_label = '长期熊市';
-      long_reason = `收盘价在MA250下方且偏离 ${distanceText}，已连续跌破MA250 ${below_ma250_days} 天，MA250约60日斜率${slopeText}，长期背景偏熊。`;
-    } else if (repairWatch) {
-      long_state = 'LONG_BEAR_TO_BULL';
-      long_label = '长期转强观察';
-      long_reason = `收盘价重新站上MA250并偏离 ${distanceText}，已连续站上 ${above_ma250_days} 天，MA250约60日斜率${slopeText}；先记为长期转强观察，不直接等同牛市确认。`;
-    } else if (weakenWatch) {
-      long_state = 'LONG_BULL_TO_BEAR';
-      long_label = '长期转弱观察';
-      long_reason = `收盘价跌破MA250并偏离 ${distanceText}，已连续跌破 ${below_ma250_days} 天，MA250约60日斜率${slopeText}；先记为长期转弱观察，不直接等同熊市确认。`;
-    } else if (close > ma250 && ma250_long_slope !== 'down') {
-      long_state = 'LONG_BULL_PULLBACK';
-      long_label = '长期牛市回撤';
-      long_reason = `价格仍在MA250上方，但连续站上天数/偏离或长期斜率还没满足牛市确认；先按MA250上方震荡或牛市回撤观察。`;
-    } else {
-      long_state = 'LONG_TRANSITION';
-      long_label = '长期均线争夺';
-      long_reason = `价格在MA250附近或长期斜率未确认，当前偏离 ${distanceText}；不把MA250附近来回穿越直接判成牛熊转换。`;
-    }
-  }
-  
-  return {
-    symbol,
-    name,
-    trade_date,
-    close,
-    ma20: roundNumber(ma20, 2),
-    ma20_slope,
-    ma60: Math.round(ma60 * 100) / 100,
-    ma60_prev: Math.round(ma60_prev * 100) / 100,
-    ma60_slope,
-    ma120: roundNumber(ma120, 2),
-    ma120_prev: roundNumber(ma120_prev, 2),
-    ma120_slope,
-    ma250: roundNumber(ma250, 2),
-    ma250_prev: roundNumber(ma250_prev, 2),
-    ma250_slope,
-    low_60: low_60 !== null ? Math.round(low_60 * 100) / 100 : null,
-    low_120: low_120 !== null ? Math.round(low_120 * 100) / 100 : null,
-    cross_count_10,
-    above_ma60_days,
-    below_ma60_days,
-    drawdown_20: drawdown_20 !== null ? Math.round(drawdown_20 * 10000) / 10000 : null,
-    drawdown_60: drawdown_60 !== null ? Math.round(drawdown_60 * 10000) / 10000 : null,
-    drawdown_120: drawdown_120 !== null ? Math.round(drawdown_120 * 10000) / 10000 : null,
-    latest_change: roundNumber(latest_change, 4),
-    distance_to_ma60: Math.round(distance_to_ma60 * 10000) / 10000,
-    distance_to_ma250: roundNumber(distance_to_ma250, 4),
-    higher_high,
-    higher_low,
-    lower_high,
-    lower_low,
-    sideways,
-    up_days,
-    down_days,
-    market_regime,
-    result_reason,
-    entry_permission,
-    entry_reason,
-    rule_version: ruleVersion,
-    cycle_layer_version: cycleLayerVersion,
-    short_state,
-    short_label,
-    short_reason,
-    mid_state: market_regime,
-    mid_label: getMarketRegimeShortLabel(market_regime),
-    mid_reason: result_reason,
-    long_state,
-    long_label,
-    long_reason,
-    behavior_tags,
-    is_mock: isMock,
-    source
-  };
-}
 
 async function saveMarketRegime(regime: MarketRegime): Promise<void> {
   const db = await getDb();

@@ -8,6 +8,7 @@ const router = express.Router();
 const metalTrainingRoot = process.env.MODEL_TRAINING_ROOT || '/Volumes/7100/model-training';
 const metalTrainingPython = process.env.MODEL_TRAINING_PYTHON || path.join(metalTrainingRoot, 'venv', 'bin', 'python');
 const preciousMetalTrainingRoot = path.join(metalTrainingRoot, 'precious-metals');
+const METAL_ACTION_VERSION = 'metal_action_v0.2';
 
 export interface MetalDailyPrice {
   trade_date: string;
@@ -1593,6 +1594,1106 @@ function normalizeGoldModelValidationReportRow(row: any, options: { includeRepor
     conclusion_label: row.conclusion_label,
     conclusion_text: row.conclusion_text,
     metrics: safeJsonParse(row.metrics_json, {}),
+    checks: safeJsonParse(row.checks_json, []),
+    ...(includeReport ? { report: safeJsonParse(row.report_json, null) } : {}),
+    saved_from: row.saved_from,
+    created_at: row.created_at,
+    updated_at: row.updated_at
+  };
+}
+
+async function ensureMetalActionSamplesTable(db: any) {
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS metal_action_samples (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      symbol TEXT NOT NULL,
+      asset_name TEXT,
+      source TEXT,
+      trade_date TEXT NOT NULL,
+      action_version TEXT NOT NULL,
+      source_sample_id INTEGER,
+      source_rule_version TEXT,
+      action_key TEXT NOT NULL,
+      action_label TEXT NOT NULL,
+      action_permission TEXT NOT NULL DEFAULT 'observe',
+      action_reason TEXT,
+      guardrail_key TEXT,
+      guardrail_label TEXT,
+      guardrail_reason TEXT,
+      close REAL,
+      state_code TEXT,
+      state_label TEXT,
+      state_reason TEXT,
+      signal_maturity TEXT,
+      signal_maturity_label TEXT,
+      rule_signal TEXT,
+      rule_action TEXT,
+      rule_action_label TEXT,
+      price_position_code TEXT,
+      price_position_label TEXT,
+      distance_to_ma60 REAL,
+      recent_return_5 REAL,
+      recent_return_20 REAL,
+      drawdown_20 REAL,
+      range_ratio_5 REAL,
+      range_ratio_20 REAL,
+      lower_low INTEGER,
+      abnormal_move INTEGER,
+      daily_return REAL,
+      drop_pct_1d REAL,
+      drop_pct_5d REAL,
+      drop_pct_20d REAL,
+      state_continuation_days INTEGER,
+      safe_confirmation_days INTEGER,
+      safe_zone_days INTEGER,
+      gold_state_code TEXT,
+      gold_state_label TEXT,
+      gold_close REAL,
+      gold_distance_to_ma60 REAL,
+      gold_recent_return_5 REAL,
+      gold_recent_return_20 REAL,
+      gold_safe_confirmation_days INTEGER,
+      silver_state_code TEXT,
+      silver_state_label TEXT,
+      silver_close REAL,
+      silver_distance_to_ma60 REAL,
+      silver_recent_return_5 REAL,
+      silver_recent_return_20 REAL,
+      silver_safe_confirmation_days INTEGER,
+      label_status TEXT,
+      future_rebound_3d INTEGER,
+      future_rebound_5d INTEGER,
+      future_return_3d REAL,
+      future_return_5d REAL,
+      future_return_10d REAL,
+      future_return_20d REAL,
+      future_max_drawdown_20d REAL,
+      break_recent_low_20d INTEGER,
+      survived_3d INTEGER,
+      survived_5d INTEGER,
+      short_lived_signal INTEGER,
+      future_state_3d TEXT,
+      future_state_5d TEXT,
+      future_state_10d TEXT,
+      future_state_20d TEXT,
+      outcome_label TEXT,
+      snapshot_json TEXT NOT NULL,
+      saved_from TEXT NOT NULL DEFAULT 'manual_action_replay',
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(symbol, trade_date, action_version)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_metal_action_samples_scope
+    ON metal_action_samples(symbol, trade_date DESC, action_version);
+
+    CREATE INDEX IF NOT EXISTS idx_metal_action_samples_action
+    ON metal_action_samples(action_key, action_permission, label_status, trade_date DESC);
+
+    CREATE INDEX IF NOT EXISTS idx_metal_action_samples_outcome
+    ON metal_action_samples(symbol, action_key, short_lived_signal, break_recent_low_20d, trade_date DESC);
+  `);
+}
+
+async function ensureMetalActionSampleReportsTable(db: any) {
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS metal_action_sample_reports (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      report_key TEXT NOT NULL,
+      report_date TEXT,
+      action_version TEXT NOT NULL,
+      status TEXT NOT NULL,
+      conclusion_label TEXT,
+      conclusion_text TEXT,
+      metrics_json TEXT,
+      checks_json TEXT,
+      report_json TEXT NOT NULL,
+      saved_from TEXT NOT NULL DEFAULT 'manual_generate',
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_metal_action_sample_reports_scope
+    ON metal_action_sample_reports(report_key, action_version, created_at DESC);
+  `);
+}
+
+function getMetalStateDisplayLabel(stateCode?: string | null) {
+  const labels: Record<string, string> = {
+    RISK: '风险区',
+    REBOUND: '反抽区',
+    LOW_RANGE: '低位区间',
+    REPAIR_WATCH: '修复观察',
+    STRUCTURE_FORMING: '结构形成',
+    SAFE_CANDIDATE: '安全区候选',
+    SAFE_CONFIRMED: '安全区确认',
+    TREND: '趋势运行',
+    OVERHEAT: '过热区',
+    UNKNOWN: '未知'
+  };
+  return labels[String(stateCode || 'UNKNOWN')] || String(stateCode || '未知');
+}
+
+function resolveMetalPricePosition(row: any) {
+  const distance = Number(row.distance_to_ma60);
+  const recent20 = Number(row.recent_return_20);
+  const stateCode = String(row.state_code || '');
+  if (stateCode === 'OVERHEAT' || distance >= 0.12 || recent20 >= 0.12) {
+    return { code: 'HIGH_EXTENSION', label: '高位偏离' };
+  }
+  if (distance >= 0.04) {
+    return { code: 'ABOVE_MA60', label: '均线上方' };
+  }
+  if (distance >= -0.03) {
+    return { code: 'NEAR_MA60', label: '均线附近' };
+  }
+  if (stateCode === 'LOW_RANGE' || distance <= -0.08) {
+    return { code: 'LOW_RANGE', label: '低位区间' };
+  }
+  return { code: 'BELOW_MA60', label: '均线下方' };
+}
+
+function toDropPct(value: any) {
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue) || numericValue >= 0) return 0;
+  return roundNumber(Math.abs(numericValue), 4);
+}
+
+function resolveMetalActionSample(row: any) {
+  const latestChange = Number(row.daily_return);
+  const recent5 = Number(row.recent_return_5);
+  const recent20 = Number(row.recent_return_20);
+  const distance = Number(row.distance_to_ma60);
+  const safeDays = Number(row.safe_confirmation_days || 0);
+  const stateCode = String(row.state_code || '');
+  const noFlyingKnife = Boolean(Number(row.no_flying_knife_blocked || 0));
+  const lowerLow = Boolean(Number(row.lower_low || 0));
+  const abnormalMove = Boolean(Number(row.abnormal_move || 0));
+  const structureConfirmed = (stateCode === 'SAFE_CONFIRMED' || stateCode === 'TREND') && safeDays >= 3;
+  const stableStructure = (stateCode === 'SAFE_CONFIRMED' || stateCode === 'TREND') && safeDays >= 5;
+  const bigDrop = (Number.isFinite(latestChange) && latestChange <= -0.04)
+    || (Number.isFinite(recent5) && recent5 <= -0.08)
+    || (Number.isFinite(recent20) && recent20 <= -0.12);
+  const smallDrop = (Number.isFinite(latestChange) && latestChange < -0.012)
+    || (Number.isFinite(recent5) && recent5 < -0.025);
+  const highExtension = stateCode === 'OVERHEAT'
+    || (Number.isFinite(distance) && distance >= 0.10)
+    || (Number.isFinite(recent20) && recent20 >= 0.10);
+
+  let action = {
+    action_key: 'OBSERVE_ONLY',
+    action_label: '只观察',
+    action_permission: 'observe',
+    action_reason: '未落入明确动作场景，先作为观察样本沉淀。'
+  };
+
+  if (bigDrop) {
+    action = {
+      action_key: 'BIG_DROP_BIG_ADD',
+      action_label: '大跌不补',
+      action_permission: 'blocked',
+      action_reason: '动作验收显示“大跌复核”样本不足且回撤较深；大跌先不补，等低点不再破、波动收敛、结构重建。'
+    };
+  } else if (smallDrop) {
+    const canReviewSmallDrop = structureConfirmed && !noFlyingKnife && !lowerLow && !abnormalMove;
+    action = {
+      action_key: 'SMALL_DROP_SMALL_ADD',
+      action_label: noFlyingKnife ? '小跌不补' : (canReviewSmallDrop ? '小跌复核' : '小跌观察'),
+      action_permission: noFlyingKnife ? 'blocked' : (canReviewSmallDrop ? 'review' : 'observe'),
+      action_reason: canReviewSmallDrop
+        ? '小跌只有在结构已确认、没有低点下移和异常波动时才进入复核；仍不等于自动补仓。'
+        : '小跌样本后验优势不够清楚，默认先观察，不直接补。'
+    };
+  } else if (highExtension) {
+    action = {
+      action_key: 'HIGH_EXTENSION_WATCH',
+      action_label: '高位不追观察',
+      action_permission: 'observe',
+      action_reason: '动作验收显示高位样本存在“可能卖飞”，因此高位只标记不追和观察，不自动高抛。'
+    };
+  } else if (stateCode === 'LOW_RANGE' || stateCode === 'REPAIR_WATCH' || stateCode === 'STRUCTURE_FORMING' || stateCode === 'SAFE_CANDIDATE') {
+    action = {
+      action_key: 'SWING_BUY_DIP',
+      action_label: '波段低吸观察',
+      action_permission: noFlyingKnife ? 'blocked' : 'observe',
+      action_reason: '波段低吸后验质量不差，但仍先作为观察候选，等黄金主锚、结构和安全区共同确认。'
+    };
+  } else if (stableStructure) {
+    action = {
+      action_key: 'STRUCTURE_SAFE_OBSERVE',
+      action_label: '结构成立观察',
+      action_permission: 'review',
+      action_reason: '安全区或趋势状态连续确认5天以上，归入结构成立后的复核场景。'
+    };
+  } else if (structureConfirmed) {
+    action = {
+      action_key: 'STRUCTURE_SAFE_OBSERVE',
+      action_label: '结构成立观察',
+      action_permission: 'observe',
+      action_reason: '结构已连续确认3天但未满5天，先观察防抖，不直接升级为复核。'
+    };
+  } else if (noFlyingKnife) {
+    action = {
+      action_key: 'NO_FLYING_KNIFE',
+      action_label: '不接飞刀',
+      action_permission: 'blocked',
+      action_reason: '风险区、低点下移或波动放大，归入不接飞刀样本。'
+    };
+  }
+
+  const guardrail = noFlyingKnife
+    ? {
+      guardrail_key: 'NO_FLYING_KNIFE',
+      guardrail_label: '不接飞刀',
+      guardrail_reason: '暴跌、低点下移或风险区信号不直接补仓，先等低点不再破、波动收敛、结构重建。'
+    }
+    : { guardrail_key: null, guardrail_label: null, guardrail_reason: null };
+
+  return {
+    ...action,
+    ...guardrail
+  };
+}
+
+function resolveMetalActionOutcome(row: any) {
+  const labelStatus = String(row.label_status || '');
+  const futureReturn20 = Number(row.future_return_20d);
+  const futureReturn5 = Number(row.future_return_5d);
+  const maxDrawdown20 = Number(row.future_max_drawdown_20d);
+  if (labelStatus !== 'complete') return '等待后验';
+  if (Number(row.break_recent_low_20d) === 1 || (Number.isFinite(maxDrawdown20) && maxDrawdown20 <= -0.05)) {
+    return '路径打穿';
+  }
+  if (Number(row.short_lived_signal) === 1) return '短命信号';
+  if (Number.isFinite(futureReturn20) && futureReturn20 > 0 && Number.isFinite(maxDrawdown20) && maxDrawdown20 > -0.05) {
+    return '后验较好';
+  }
+  if (Number.isFinite(futureReturn5) && futureReturn5 > 0) return '短反有效';
+  if (Number.isFinite(futureReturn20) && futureReturn20 <= 0) return '后验偏弱';
+  return '后验中性';
+}
+
+async function buildMetalActionSamples(db: any, options: {
+  symbol?: string;
+  limit?: number | string;
+}) {
+  await ensureMetalActionSamplesTable(db);
+  const actionVersion = METAL_ACTION_VERSION;
+  const symbol = String(options.symbol || 'all').toUpperCase();
+  const maxItems = Math.min(Math.max(Number(options.limit || 1500), 30), 3000);
+  const conditions: string[] = [];
+  const params: any[] = [];
+
+  if (symbol && symbol !== 'ALL') {
+    conditions.push('s.symbol = ?');
+    params.push(symbol);
+  }
+
+  const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+  const rows = await db.all(
+    `SELECT
+      s.*,
+      (SELECT p2.close / p1.close - 1
+       FROM financial_daily_prices p2
+       JOIN financial_daily_prices p1
+         ON p1.symbol = p2.symbol
+        AND p1.source = p2.source
+        AND p1.trade_date = (
+          SELECT MAX(prev.trade_date)
+          FROM financial_daily_prices prev
+          WHERE prev.symbol = p2.symbol
+            AND prev.source = p2.source
+            AND prev.trade_date < p2.trade_date
+        )
+       WHERE p2.symbol = s.symbol
+         AND p2.source = s.source
+         AND p2.trade_date = s.trade_date
+       LIMIT 1) as daily_return,
+      g.state_code as gold_state_code_full,
+      g.state_label as gold_state_label,
+      g.close as gold_close,
+      g.distance_to_ma60 as gold_distance_to_ma60,
+      g.recent_return_5 as gold_recent_return_5,
+      g.recent_return_20 as gold_recent_return_20,
+      g.safe_confirmation_days as gold_safe_confirmation_days,
+      a.state_code as silver_state_code,
+      a.state_label as silver_state_label,
+      a.close as silver_close,
+      a.distance_to_ma60 as silver_distance_to_ma60,
+      a.recent_return_5 as silver_recent_return_5,
+      a.recent_return_20 as silver_recent_return_20,
+      a.safe_confirmation_days as silver_safe_confirmation_days
+     FROM metal_rule_lab_samples s
+     LEFT JOIN metal_rule_lab_samples g
+       ON g.symbol = 'XAUUSD'
+      AND g.trade_date = s.trade_date
+      AND g.rule_version = s.rule_version
+     LEFT JOIN metal_rule_lab_samples a
+       ON a.symbol = 'SGE_AGTD'
+      AND a.trade_date = s.trade_date
+      AND a.rule_version = s.rule_version
+     ${whereClause}
+     ORDER BY s.trade_date DESC, s.id DESC
+     LIMIT ?`,
+    [...params, maxItems]
+  );
+
+  const items = rows.map((row: any) => {
+    const pricePosition = resolveMetalPricePosition(row);
+    const action = resolveMetalActionSample(row);
+    const outcomeLabel = resolveMetalActionOutcome(row);
+    const futureReturn3 = row.future_return_3d === null || row.future_return_3d === undefined ? null : Number(row.future_return_3d);
+    const futureReturn5 = row.future_return_5d === null || row.future_return_5d === undefined ? null : Number(row.future_return_5d);
+
+    return {
+      symbol: row.symbol,
+      asset_name: row.asset_name,
+      source: row.source,
+      trade_date: row.trade_date,
+      action_version: actionVersion,
+      source_sample_id: row.id,
+      source_rule_version: row.rule_version,
+      ...action,
+      close: row.close,
+      state_code: row.state_code,
+      state_label: getMetalStateDisplayLabel(row.state_code),
+      state_reason: row.state_reason,
+      signal_maturity: row.signal_maturity,
+      signal_maturity_label: row.signal_maturity_label,
+      rule_signal: row.rule_signal,
+      rule_action: row.rule_action,
+      rule_action_label: row.rule_action_label,
+      price_position_code: pricePosition.code,
+      price_position_label: pricePosition.label,
+      distance_to_ma60: row.distance_to_ma60,
+      recent_return_5: row.recent_return_5,
+      recent_return_20: row.recent_return_20,
+      drawdown_20: row.drawdown_20,
+      range_ratio_5: row.range_ratio_5,
+      range_ratio_20: row.range_ratio_20,
+      lower_low: row.lower_low,
+      abnormal_move: row.abnormal_move,
+      daily_return: row.daily_return,
+      drop_pct_1d: toDropPct(row.daily_return),
+      drop_pct_5d: toDropPct(row.recent_return_5),
+      drop_pct_20d: toDropPct(row.recent_return_20),
+      state_continuation_days: row.state_continuation_days,
+      safe_confirmation_days: row.safe_confirmation_days,
+      safe_zone_days: row.safe_zone_days,
+      gold_state_code: row.gold_state_code_full || (row.symbol === 'XAUUSD' ? row.state_code : row.gold_state_code),
+      gold_state_label: getMetalStateDisplayLabel(row.gold_state_code_full || (row.symbol === 'XAUUSD' ? row.state_code : row.gold_state_code)),
+      gold_close: row.gold_close ?? (row.symbol === 'XAUUSD' ? row.close : null),
+      gold_distance_to_ma60: row.gold_distance_to_ma60 ?? (row.symbol === 'XAUUSD' ? row.distance_to_ma60 : null),
+      gold_recent_return_5: row.gold_recent_return_5 ?? (row.symbol === 'XAUUSD' ? row.recent_return_5 : null),
+      gold_recent_return_20: row.gold_recent_return_20 ?? (row.symbol === 'XAUUSD' ? row.recent_return_20 : null),
+      gold_safe_confirmation_days: row.gold_safe_confirmation_days ?? (row.symbol === 'XAUUSD' ? row.safe_confirmation_days : null),
+      silver_state_code: row.silver_state_code || (row.symbol === 'SGE_AGTD' ? row.state_code : null),
+      silver_state_label: getMetalStateDisplayLabel(row.silver_state_code || (row.symbol === 'SGE_AGTD' ? row.state_code : null)),
+      silver_close: row.silver_close ?? (row.symbol === 'SGE_AGTD' ? row.close : null),
+      silver_distance_to_ma60: row.silver_distance_to_ma60 ?? (row.symbol === 'SGE_AGTD' ? row.distance_to_ma60 : null),
+      silver_recent_return_5: row.silver_recent_return_5 ?? (row.symbol === 'SGE_AGTD' ? row.recent_return_5 : null),
+      silver_recent_return_20: row.silver_recent_return_20 ?? (row.symbol === 'SGE_AGTD' ? row.recent_return_20 : null),
+      silver_safe_confirmation_days: row.silver_safe_confirmation_days ?? (row.symbol === 'SGE_AGTD' ? row.safe_confirmation_days : null),
+      label_status: row.label_status,
+      future_rebound_3d: futureReturn3 === null ? null : futureReturn3 > 0,
+      future_rebound_5d: futureReturn5 === null ? null : futureReturn5 > 0,
+      future_return_3d: row.future_return_3d,
+      future_return_5d: row.future_return_5d,
+      future_return_10d: row.future_return_10d,
+      future_return_20d: row.future_return_20d,
+      future_max_drawdown_20d: row.future_max_drawdown_20d,
+      break_recent_low_20d: row.break_recent_low_20d,
+      survived_3d: row.survived_3d,
+      survived_5d: row.survived_5d,
+      short_lived_signal: row.short_lived_signal,
+      future_state_3d: row.future_state_3d,
+      future_state_5d: row.future_state_5d,
+      future_state_10d: row.future_state_10d,
+      future_state_20d: row.future_state_20d,
+      outcome_label: outcomeLabel,
+      snapshot_json: JSON.stringify({
+        source_sample_id: row.id,
+        action,
+        price_position: pricePosition,
+        source_sample: row
+      })
+    };
+  });
+
+  return {
+    action_version: actionVersion,
+    symbol,
+    total: items.length,
+    items
+  };
+}
+
+async function saveMetalActionSamples(db: any, payload: Awaited<ReturnType<typeof buildMetalActionSamples>>, savedFrom: string) {
+  await ensureMetalActionSamplesTable(db);
+  let inserted = 0;
+  let updated = 0;
+
+  for (const item of payload.items) {
+    const existing = await db.get(
+      `SELECT id FROM metal_action_samples WHERE symbol = ? AND trade_date = ? AND action_version = ?`,
+      [item.symbol, item.trade_date, item.action_version]
+    );
+
+    await db.run(
+      `INSERT INTO metal_action_samples (
+        symbol, asset_name, source, trade_date, action_version, source_sample_id, source_rule_version,
+        action_key, action_label, action_permission, action_reason, guardrail_key, guardrail_label, guardrail_reason,
+        close, state_code, state_label, state_reason, signal_maturity, signal_maturity_label,
+        rule_signal, rule_action, rule_action_label, price_position_code, price_position_label,
+        distance_to_ma60, recent_return_5, recent_return_20, drawdown_20, range_ratio_5, range_ratio_20,
+        lower_low, abnormal_move, daily_return, drop_pct_1d, drop_pct_5d, drop_pct_20d,
+        state_continuation_days, safe_confirmation_days, safe_zone_days,
+        gold_state_code, gold_state_label, gold_close, gold_distance_to_ma60, gold_recent_return_5,
+        gold_recent_return_20, gold_safe_confirmation_days,
+        silver_state_code, silver_state_label, silver_close, silver_distance_to_ma60, silver_recent_return_5,
+        silver_recent_return_20, silver_safe_confirmation_days,
+        label_status, future_rebound_3d, future_rebound_5d, future_return_3d, future_return_5d,
+        future_return_10d, future_return_20d, future_max_drawdown_20d, break_recent_low_20d,
+        survived_3d, survived_5d, short_lived_signal, future_state_3d, future_state_5d,
+        future_state_10d, future_state_20d, outcome_label, snapshot_json, saved_from
+      ) VALUES (
+        ?, ?, ?, ?, ?, ?, ?,
+        ?, ?, ?, ?, ?, ?, ?,
+        ?, ?, ?, ?, ?, ?,
+        ?, ?, ?, ?, ?,
+        ?, ?, ?, ?, ?, ?,
+        ?, ?, ?, ?, ?, ?,
+        ?, ?, ?,
+        ?, ?, ?, ?, ?,
+        ?, ?,
+        ?, ?, ?, ?, ?,
+        ?, ?,
+        ?, ?, ?, ?, ?,
+        ?, ?, ?, ?,
+        ?, ?, ?, ?, ?,
+        ?, ?, ?, ?, ?
+      )
+      ON CONFLICT(symbol, trade_date, action_version) DO UPDATE SET
+        asset_name = excluded.asset_name,
+        source = excluded.source,
+        source_sample_id = excluded.source_sample_id,
+        source_rule_version = excluded.source_rule_version,
+        action_key = excluded.action_key,
+        action_label = excluded.action_label,
+        action_permission = excluded.action_permission,
+        action_reason = excluded.action_reason,
+        guardrail_key = excluded.guardrail_key,
+        guardrail_label = excluded.guardrail_label,
+        guardrail_reason = excluded.guardrail_reason,
+        close = excluded.close,
+        state_code = excluded.state_code,
+        state_label = excluded.state_label,
+        state_reason = excluded.state_reason,
+        signal_maturity = excluded.signal_maturity,
+        signal_maturity_label = excluded.signal_maturity_label,
+        rule_signal = excluded.rule_signal,
+        rule_action = excluded.rule_action,
+        rule_action_label = excluded.rule_action_label,
+        price_position_code = excluded.price_position_code,
+        price_position_label = excluded.price_position_label,
+        distance_to_ma60 = excluded.distance_to_ma60,
+        recent_return_5 = excluded.recent_return_5,
+        recent_return_20 = excluded.recent_return_20,
+        drawdown_20 = excluded.drawdown_20,
+        range_ratio_5 = excluded.range_ratio_5,
+        range_ratio_20 = excluded.range_ratio_20,
+        lower_low = excluded.lower_low,
+        abnormal_move = excluded.abnormal_move,
+        daily_return = excluded.daily_return,
+        drop_pct_1d = excluded.drop_pct_1d,
+        drop_pct_5d = excluded.drop_pct_5d,
+        drop_pct_20d = excluded.drop_pct_20d,
+        state_continuation_days = excluded.state_continuation_days,
+        safe_confirmation_days = excluded.safe_confirmation_days,
+        safe_zone_days = excluded.safe_zone_days,
+        gold_state_code = excluded.gold_state_code,
+        gold_state_label = excluded.gold_state_label,
+        gold_close = excluded.gold_close,
+        gold_distance_to_ma60 = excluded.gold_distance_to_ma60,
+        gold_recent_return_5 = excluded.gold_recent_return_5,
+        gold_recent_return_20 = excluded.gold_recent_return_20,
+        gold_safe_confirmation_days = excluded.gold_safe_confirmation_days,
+        silver_state_code = excluded.silver_state_code,
+        silver_state_label = excluded.silver_state_label,
+        silver_close = excluded.silver_close,
+        silver_distance_to_ma60 = excluded.silver_distance_to_ma60,
+        silver_recent_return_5 = excluded.silver_recent_return_5,
+        silver_recent_return_20 = excluded.silver_recent_return_20,
+        silver_safe_confirmation_days = excluded.silver_safe_confirmation_days,
+        label_status = excluded.label_status,
+        future_rebound_3d = excluded.future_rebound_3d,
+        future_rebound_5d = excluded.future_rebound_5d,
+        future_return_3d = excluded.future_return_3d,
+        future_return_5d = excluded.future_return_5d,
+        future_return_10d = excluded.future_return_10d,
+        future_return_20d = excluded.future_return_20d,
+        future_max_drawdown_20d = excluded.future_max_drawdown_20d,
+        break_recent_low_20d = excluded.break_recent_low_20d,
+        survived_3d = excluded.survived_3d,
+        survived_5d = excluded.survived_5d,
+        short_lived_signal = excluded.short_lived_signal,
+        future_state_3d = excluded.future_state_3d,
+        future_state_5d = excluded.future_state_5d,
+        future_state_10d = excluded.future_state_10d,
+        future_state_20d = excluded.future_state_20d,
+        outcome_label = excluded.outcome_label,
+        snapshot_json = excluded.snapshot_json,
+        saved_from = excluded.saved_from,
+        updated_at = CURRENT_TIMESTAMP`,
+      [
+        item.symbol,
+        item.asset_name,
+        item.source,
+        item.trade_date,
+        item.action_version,
+        item.source_sample_id,
+        item.source_rule_version,
+        item.action_key,
+        item.action_label,
+        item.action_permission,
+        item.action_reason,
+        item.guardrail_key,
+        item.guardrail_label,
+        item.guardrail_reason,
+        item.close,
+        item.state_code,
+        item.state_label,
+        item.state_reason,
+        item.signal_maturity,
+        item.signal_maturity_label,
+        item.rule_signal,
+        item.rule_action,
+        item.rule_action_label,
+        item.price_position_code,
+        item.price_position_label,
+        item.distance_to_ma60,
+        item.recent_return_5,
+        item.recent_return_20,
+        item.drawdown_20,
+        item.range_ratio_5,
+        item.range_ratio_20,
+        item.lower_low,
+        item.abnormal_move,
+        item.daily_return,
+        item.drop_pct_1d,
+        item.drop_pct_5d,
+        item.drop_pct_20d,
+        item.state_continuation_days,
+        item.safe_confirmation_days,
+        item.safe_zone_days,
+        item.gold_state_code,
+        item.gold_state_label,
+        item.gold_close,
+        item.gold_distance_to_ma60,
+        item.gold_recent_return_5,
+        item.gold_recent_return_20,
+        item.gold_safe_confirmation_days,
+        item.silver_state_code,
+        item.silver_state_label,
+        item.silver_close,
+        item.silver_distance_to_ma60,
+        item.silver_recent_return_5,
+        item.silver_recent_return_20,
+        item.silver_safe_confirmation_days,
+        item.label_status,
+        dbBool(item.future_rebound_3d),
+        dbBool(item.future_rebound_5d),
+        item.future_return_3d,
+        item.future_return_5d,
+        item.future_return_10d,
+        item.future_return_20d,
+        item.future_max_drawdown_20d,
+        item.break_recent_low_20d,
+        item.survived_3d,
+        item.survived_5d,
+        item.short_lived_signal,
+        item.future_state_3d,
+        item.future_state_5d,
+        item.future_state_10d,
+        item.future_state_20d,
+        item.outcome_label,
+        item.snapshot_json,
+        savedFrom
+      ]
+    );
+
+    if (existing) {
+      updated += 1;
+    } else {
+      inserted += 1;
+    }
+  }
+
+  return { inserted, updated, total: payload.items.length };
+}
+
+function normalizeMetalActionReportMetric(row: any, meta: {
+  key: string;
+  label: string;
+  description: string;
+  action_key?: string | null;
+  action_label?: string | null;
+  action_permission?: string | null;
+  symbol?: string | null;
+}) {
+  const totalSamples = Number(row.total_samples || 0);
+  const completeCount = Number(row.complete_label_count || 0);
+  const pendingCount = Number(row.pending_label_count || 0);
+  const survived3 = Number(row.survived_3d_count || 0);
+  const survived5 = Number(row.survived_5d_count || 0);
+  const shortLived = Number(row.short_lived_count || 0);
+  const positive3 = Number(row.positive_3d_count || 0);
+  const positive5 = Number(row.positive_5d_count || 0);
+  const positive10 = Number(row.positive_10d_count || 0);
+  const positive20 = Number(row.positive_20d_count || 0);
+  const breakLow20 = Number(row.break_recent_low_20d_count || 0);
+  const deepDrawdown20 = Number(row.deep_drawdown_20d_count || 0);
+  return {
+    key: meta.key,
+    label: meta.label,
+    description: meta.description,
+    action_key: meta.action_key || null,
+    action_label: meta.action_label || null,
+    action_permission: meta.action_permission || null,
+    symbol: meta.symbol || null,
+    total_samples: totalSamples,
+    complete_label_count: completeCount,
+    pending_label_count: pendingCount,
+    label_coverage_rate: rate(completeCount, totalSamples),
+    survived_3d_count: survived3,
+    survived_3d_rate: rate(survived3, completeCount),
+    survived_5d_count: survived5,
+    survived_5d_rate: rate(survived5, completeCount),
+    short_lived_count: shortLived,
+    short_lived_rate: rate(shortLived, completeCount),
+    positive_3d_count: positive3,
+    positive_3d_rate: rate(positive3, completeCount),
+    positive_5d_count: positive5,
+    positive_5d_rate: rate(positive5, completeCount),
+    positive_10d_count: positive10,
+    positive_10d_rate: rate(positive10, completeCount),
+    positive_20d_count: positive20,
+    positive_20d_rate: rate(positive20, completeCount),
+    break_recent_low_20d_count: breakLow20,
+    break_recent_low_20d_rate: rate(breakLow20, completeCount),
+    deep_drawdown_20d_count: deepDrawdown20,
+    deep_drawdown_20d_rate: rate(deepDrawdown20, completeCount),
+    avg_return_3d: toMetricNumber(row.avg_return_3d),
+    avg_return_5d: toMetricNumber(row.avg_return_5d),
+    avg_return_10d: toMetricNumber(row.avg_return_10d),
+    avg_return_20d: toMetricNumber(row.avg_return_20d),
+    avg_drawdown_20d: toMetricNumber(row.avg_drawdown_20d),
+    min_drawdown_20d: toMetricNumber(row.min_drawdown_20d),
+    avg_drop_pct_1d: toMetricNumber(row.avg_drop_pct_1d),
+    avg_drop_pct_5d: toMetricNumber(row.avg_drop_pct_5d),
+    avg_range_ratio_5: toMetricNumber(row.avg_range_ratio_5),
+    avg_range_ratio_20: toMetricNumber(row.avg_range_ratio_20),
+    avg_safe_confirmation_days: toMetricNumber(row.avg_safe_confirmation_days, 2),
+    latest_trade_date: row.latest_trade_date || null
+  };
+}
+
+async function queryMetalActionReportMetric(db: any, meta: {
+  key: string;
+  label: string;
+  description: string;
+  where: string;
+  params?: any[];
+  action_key?: string | null;
+  action_label?: string | null;
+  action_permission?: string | null;
+  symbol?: string | null;
+}) {
+  const row = await db.get(
+    `SELECT
+      COUNT(*) as total_samples,
+      MAX(trade_date) as latest_trade_date,
+      SUM(CASE WHEN label_status = 'complete' THEN 1 ELSE 0 END) as complete_label_count,
+      SUM(CASE WHEN label_status != 'complete' OR label_status IS NULL THEN 1 ELSE 0 END) as pending_label_count,
+      SUM(CASE WHEN label_status = 'complete' AND survived_3d = 1 THEN 1 ELSE 0 END) as survived_3d_count,
+      SUM(CASE WHEN label_status = 'complete' AND survived_5d = 1 THEN 1 ELSE 0 END) as survived_5d_count,
+      SUM(CASE WHEN label_status = 'complete' AND short_lived_signal = 1 THEN 1 ELSE 0 END) as short_lived_count,
+      SUM(CASE WHEN label_status = 'complete' AND future_return_3d > 0 THEN 1 ELSE 0 END) as positive_3d_count,
+      SUM(CASE WHEN label_status = 'complete' AND future_return_5d > 0 THEN 1 ELSE 0 END) as positive_5d_count,
+      SUM(CASE WHEN label_status = 'complete' AND future_return_10d > 0 THEN 1 ELSE 0 END) as positive_10d_count,
+      SUM(CASE WHEN label_status = 'complete' AND future_return_20d > 0 THEN 1 ELSE 0 END) as positive_20d_count,
+      SUM(CASE WHEN label_status = 'complete' AND break_recent_low_20d = 1 THEN 1 ELSE 0 END) as break_recent_low_20d_count,
+      SUM(CASE WHEN label_status = 'complete' AND future_max_drawdown_20d <= -0.05 THEN 1 ELSE 0 END) as deep_drawdown_20d_count,
+      AVG(CASE WHEN label_status = 'complete' THEN future_return_3d ELSE NULL END) as avg_return_3d,
+      AVG(CASE WHEN label_status = 'complete' THEN future_return_5d ELSE NULL END) as avg_return_5d,
+      AVG(CASE WHEN label_status = 'complete' THEN future_return_10d ELSE NULL END) as avg_return_10d,
+      AVG(CASE WHEN label_status = 'complete' THEN future_return_20d ELSE NULL END) as avg_return_20d,
+      AVG(CASE WHEN label_status = 'complete' THEN future_max_drawdown_20d ELSE NULL END) as avg_drawdown_20d,
+      MIN(CASE WHEN label_status = 'complete' THEN future_max_drawdown_20d ELSE NULL END) as min_drawdown_20d,
+      AVG(drop_pct_1d) as avg_drop_pct_1d,
+      AVG(drop_pct_5d) as avg_drop_pct_5d,
+      AVG(range_ratio_5) as avg_range_ratio_5,
+      AVG(range_ratio_20) as avg_range_ratio_20,
+      AVG(safe_confirmation_days) as avg_safe_confirmation_days
+     FROM metal_action_samples
+     WHERE ${meta.where}`,
+    meta.params || []
+  );
+  return normalizeMetalActionReportMetric(row || {}, meta);
+}
+
+function getMetricNumber(metric: any, key: string): number | null {
+  const value = metric?.[key];
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function buildMetalActionBucketConclusion(metric: any, baseline: any) {
+  const completeCount = Number(metric.complete_label_count || 0);
+  if (completeCount < 20) {
+    return {
+      status: 'insufficient',
+      label: '样本不足',
+      text: `${metric.label} 完整后验样本不足 20 条，先只沉淀，不参与规则修正。`
+    };
+  }
+
+  const avgReturn20 = getMetricNumber(metric, 'avg_return_20d');
+  const avgDrawdown20 = getMetricNumber(metric, 'avg_drawdown_20d');
+  const shortLivedRate = getMetricNumber(metric, 'short_lived_rate');
+  const breakLowRate = getMetricNumber(metric, 'break_recent_low_20d_rate');
+  const deepDrawdownRate = getMetricNumber(metric, 'deep_drawdown_20d_rate');
+  const baselineReturn20 = getMetricNumber(baseline, 'avg_return_20d') || 0;
+  const baselineDrawdown20 = getMetricNumber(baseline, 'avg_drawdown_20d') || 0;
+  const baselineShortRate = getMetricNumber(baseline, 'short_lived_rate') || 0;
+  const baselineBreakLowRate = getMetricNumber(baseline, 'break_recent_low_20d_rate') || 0;
+  const baselineDeepDrawdownRate = getMetricNumber(baseline, 'deep_drawdown_20d_rate') || 0;
+
+  if (metric.action_permission === 'blocked') {
+    const blockLooksUseful = (breakLowRate !== null && breakLowRate >= baselineBreakLowRate + 0.03)
+      || (deepDrawdownRate !== null && deepDrawdownRate >= baselineDeepDrawdownRate + 0.03)
+      || (avgDrawdown20 !== null && avgDrawdown20 <= baselineDrawdown20 - 0.008);
+    return blockLooksUseful
+      ? {
+        status: 'keep_block',
+        label: '拦截保留',
+        text: `${metric.label} 被拦截样本后验风险高于基准，暂时保留拦截口径。`
+      }
+      : {
+        status: 'review_block',
+        label: '拦截待复核',
+        text: `${metric.label} 被拦截样本风险优势不明显，后续规则修正时要单独看。`
+      };
+  }
+
+  if (metric.action_key === 'RANGE_SELL_HIGH') {
+    const sellTooEarly = avgReturn20 !== null && avgReturn20 >= baselineReturn20 + 0.015;
+    return sellTooEarly
+      ? {
+        status: 'risk_of_selling_early',
+        label: '可能卖飞',
+        text: '高抛样本后验仍继续上行，后续规则修正时不能简单看到高位就卖。'
+      }
+      : {
+        status: 'candidate',
+        label: '可继续验收',
+        text: '高抛样本没有明显跑赢基准，后续可继续看回落和回撤证据。'
+      };
+  }
+
+  const cleanerThanBaseline = (shortLivedRate !== null && shortLivedRate <= baselineShortRate - 0.03)
+    || (avgDrawdown20 !== null && avgDrawdown20 >= baselineDrawdown20 + 0.008);
+  const weakAfterAction = (avgReturn20 !== null && avgReturn20 <= 0)
+    || (deepDrawdownRate !== null && deepDrawdownRate >= baselineDeepDrawdownRate + 0.05);
+
+  if (cleanerThanBaseline && !weakAfterAction) {
+    return {
+      status: 'candidate',
+      label: '可保留验收',
+      text: `${metric.label} 后验质量不差，下一步规则修正时可以保留为候选动作。`
+    };
+  }
+  if (weakAfterAction) {
+    return {
+      status: 'downgrade',
+      label: '降级观察',
+      text: `${metric.label} 后验收益或回撤不理想，后续不要直接升级成执行规则。`
+    };
+  }
+  return {
+    status: 'watch',
+    label: '继续观察',
+    text: `${metric.label} 有样本但优势不够清楚，继续等后验和分层。`
+  };
+}
+
+function buildMetalActionReportConclusion(metrics: any[]) {
+  const byKey = new Map(metrics.map(item => [item.key, item]));
+  const baseline = byKey.get('baseline_all') || {};
+  const blocked = byKey.get('blocked_all') || {};
+  const review = byKey.get('review_all') || {};
+  const completeSamples = Number(baseline.complete_label_count || 0);
+  const totalSamples = Number(baseline.total_samples || 0);
+  const labelCoverage = getMetricNumber(baseline, 'label_coverage_rate') || 0;
+  const actionBuckets = metrics.filter(item => String(item.key || '').startsWith('action:'));
+  const usefulBuckets = actionBuckets.filter(item => Number(item.complete_label_count || 0) >= 20);
+  const blockedDrawdown = getMetricNumber(blocked, 'avg_drawdown_20d');
+  const baselineDrawdown = getMetricNumber(baseline, 'avg_drawdown_20d');
+  const blockedBreakLowRate = getMetricNumber(blocked, 'break_recent_low_20d_rate');
+  const baselineBreakLowRate = getMetricNumber(baseline, 'break_recent_low_20d_rate');
+  const blockedDeepDrawdownRate = getMetricNumber(blocked, 'deep_drawdown_20d_rate');
+  const baselineDeepDrawdownRate = getMetricNumber(baseline, 'deep_drawdown_20d_rate');
+  const blockedRiskEvidence = Number(blocked.complete_label_count || 0) >= 30
+    && (
+      (blockedDrawdown !== null && baselineDrawdown !== null && blockedDrawdown <= baselineDrawdown - 0.005)
+      || (blockedBreakLowRate !== null && baselineBreakLowRate !== null && blockedBreakLowRate >= baselineBreakLowRate + 0.05)
+      || (blockedDeepDrawdownRate !== null && baselineDeepDrawdownRate !== null && blockedDeepDrawdownRate >= baselineDeepDrawdownRate + 0.03)
+    );
+
+  const checks = [
+    {
+      key: 'sample_size',
+      label: '动作样本完整后验量',
+      passed: completeSamples >= 1000,
+      actual: { total_samples: totalSamples, complete_samples: completeSamples },
+      threshold: { complete_samples: 1000 },
+      note: '动作报告先看完整后验样本，避免最近未走完20日窗口的样本干扰。'
+    },
+    {
+      key: 'label_coverage',
+      label: '后验覆盖率',
+      passed: labelCoverage >= 0.8,
+      actual: labelCoverage,
+      threshold: 0.8,
+      note: '覆盖率过低时只能做观察，不适合修正规则。'
+    },
+    {
+      key: 'action_bucket_coverage',
+      label: '动作分桶可读性',
+      passed: usefulBuckets.length >= 5,
+      actual: usefulBuckets.length,
+      threshold: 5,
+      note: '至少要有多个动作桶过最小样本线，报告才不是单点结论。'
+    },
+    {
+      key: 'blocked_risk_evidence',
+      label: '拦截样本风险证据',
+      passed: blockedRiskEvidence,
+      actual: {
+        blocked_samples: blocked.complete_label_count || 0,
+        blocked_avg_drawdown_20d: blockedDrawdown,
+        baseline_avg_drawdown_20d: baselineDrawdown,
+        blocked_break_recent_low_20d_rate: blockedBreakLowRate,
+        baseline_break_recent_low_20d_rate: baselineBreakLowRate,
+        blocked_deep_drawdown_20d_rate: blockedDeepDrawdownRate,
+        baseline_deep_drawdown_20d_rate: baselineDeepDrawdownRate
+      },
+      threshold: { min_samples: 30, drawdown_worse_than_baseline: -0.005, break_low_rate_edge: 0.05, deep_drawdown_rate_edge: 0.03 },
+      note: '被挡住的动作如果更容易破近期低点、深回撤或路径更差，说明不接飞刀/拦截层有价值。'
+    },
+    {
+      key: 'review_pool_size',
+      label: '可复核动作池',
+      passed: Number(review.complete_label_count || 0) >= 100,
+      actual: review.complete_label_count || 0,
+      threshold: 100,
+      note: 'review 动作是后面规则修正的主要对象，数量太少就不能急着下结论。'
+    }
+  ];
+
+  const passedCount = checks.filter(item => item.passed).length;
+  let status = 'watch';
+  let label = '继续验收';
+  let text = '动作样本已能生成后验报告，下一步先看动作之间的后验差异，再谈规则修正。';
+
+  if (!checks[0].passed || !checks[1].passed) {
+    status = 'insufficient';
+    label = '后验不足';
+    text = '动作样本库已有数据，但完整后验或覆盖率还不够，先继续沉淀。';
+  } else if (passedCount >= 4) {
+    status = 'ready_for_rule_review';
+    label = '可进入规则复核';
+    text = '动作样本后验覆盖和分桶可读性达标，可以进入下一步“动作规则修正”，但还不进入训练。';
+  } else {
+    status = 'watch';
+    label = '继续验收';
+    text = '动作样本报告可读，但部分分桶或拦截证据还需要继续看，不急着修正规则。';
+  }
+
+  return {
+    status,
+    label,
+    text,
+    metrics: {
+      total_samples: totalSamples,
+      complete_samples: completeSamples,
+      label_coverage_rate: labelCoverage,
+      action_bucket_count: actionBuckets.length,
+      useful_action_bucket_count: usefulBuckets.length,
+      review_complete_samples: review.complete_label_count || 0,
+      blocked_complete_samples: blocked.complete_label_count || 0
+    },
+    checks,
+    next_step: status === 'ready_for_rule_review'
+      ? '下一步只做动作规则修正：保留、降级、拦截、继续观察，不训练模型。'
+      : '继续刷新后验报告，等样本覆盖和分桶证据更稳。'
+  };
+}
+
+async function buildMetalActionSampleValidationReport(db: any) {
+  await ensureMetalActionSamplesTable(db);
+  await ensureMetalActionSampleReportsTable(db);
+  const actionVersionRow = await db.get(
+    `SELECT action_version, MAX(trade_date) as latest_trade_date
+     FROM metal_action_samples
+     GROUP BY action_version
+     ORDER BY latest_trade_date DESC, action_version DESC
+     LIMIT 1`
+  );
+  const actionVersion = actionVersionRow?.action_version || METAL_ACTION_VERSION;
+  const commonParams = [actionVersion];
+  const baseMetrics = await Promise.all([
+    queryMetalActionReportMetric(db, {
+      key: 'baseline_all',
+      label: '全部动作样本',
+      description: '黄金和白银所有动作样本，作为动作后验基准。',
+      where: 'action_version = ?',
+      params: commonParams
+    }),
+    queryMetalActionReportMetric(db, {
+      key: 'review_all',
+      label: '全部可复核动作',
+      description: 'permission=review 的动作，是后面规则修正的主观察池。',
+      where: 'action_version = ? AND action_permission = ?',
+      params: [actionVersion, 'review'],
+      action_permission: 'review'
+    }),
+    queryMetalActionReportMetric(db, {
+      key: 'blocked_all',
+      label: '全部拦截动作',
+      description: 'permission=blocked 的动作，用来验证不接飞刀和拦截是否有价值。',
+      where: 'action_version = ? AND action_permission = ?',
+      params: [actionVersion, 'blocked'],
+      action_permission: 'blocked'
+    }),
+    queryMetalActionReportMetric(db, {
+      key: 'gold_all',
+      label: '黄金动作样本',
+      description: '黄金动作样本整体后验。',
+      where: 'action_version = ? AND symbol = ?',
+      params: [actionVersion, 'XAUUSD'],
+      symbol: 'XAUUSD'
+    }),
+    queryMetalActionReportMetric(db, {
+      key: 'silver_all',
+      label: '白银动作样本',
+      description: '白银动作样本整体后验。',
+      where: 'action_version = ? AND symbol = ?',
+      params: [actionVersion, 'SGE_AGTD'],
+      symbol: 'SGE_AGTD'
+    })
+  ]);
+
+  const actionRows = await db.all(
+    `SELECT action_key, MAX(action_label) as action_label, action_permission
+     FROM metal_action_samples
+     WHERE action_version = ?
+     GROUP BY action_key, action_permission
+     ORDER BY COUNT(*) DESC`,
+    [actionVersion]
+  );
+  const actionMetrics = await Promise.all(actionRows.map((row: any) => queryMetalActionReportMetric(db, {
+    key: `action:${row.action_key}:${row.action_permission}`,
+    label: `${row.action_label} / ${row.action_permission}`,
+    description: `${row.action_label} 动作在 ${row.action_permission} 权限下的后验表现。`,
+    where: 'action_version = ? AND action_key = ? AND action_permission = ?',
+    params: [actionVersion, row.action_key, row.action_permission],
+    action_key: row.action_key,
+    action_label: row.action_label,
+    action_permission: row.action_permission
+  })));
+
+  const symbolRows = await db.all(
+    `SELECT symbol, action_key, MAX(action_label) as action_label, action_permission
+     FROM metal_action_samples
+     WHERE action_version = ?
+     GROUP BY symbol, action_key, action_permission
+     ORDER BY symbol, COUNT(*) DESC`,
+    [actionVersion]
+  );
+  const symbolBreakdown = await Promise.all(symbolRows.map((row: any) => queryMetalActionReportMetric(db, {
+    key: `symbol:${row.symbol}:${row.action_key}:${row.action_permission}`,
+    label: `${row.symbol} / ${row.action_label} / ${row.action_permission}`,
+    description: `${row.symbol} 下 ${row.action_label} 动作的后验表现。`,
+    where: 'action_version = ? AND symbol = ? AND action_key = ? AND action_permission = ?',
+    params: [actionVersion, row.symbol, row.action_key, row.action_permission],
+    symbol: row.symbol,
+    action_key: row.action_key,
+    action_label: row.action_label,
+    action_permission: row.action_permission
+  })));
+
+  const baseline = baseMetrics[0];
+  const actionConclusions = actionMetrics.map(metric => ({
+    ...metric,
+    conclusion: buildMetalActionBucketConclusion(metric, baseline)
+  }));
+  const allMetrics = [...baseMetrics, ...actionConclusions];
+  const conclusion = buildMetalActionReportConclusion(allMetrics);
+  const reportDate = allMetrics
+    .map(item => item.latest_trade_date)
+    .filter(Boolean)
+    .sort()
+    .pop() || null;
+
+  return {
+    report_key: 'metal_action_sample_validation',
+    action_version: actionVersion,
+    generated_at: new Date().toISOString(),
+    report_date: reportDate,
+    no_lookahead_note: '动作分桶只使用样本当日状态和当日前已知信息；未来收益、回撤、破低、短命信号只作为后验标签。',
+    conclusion,
+    metrics: allMetrics,
+    action_conclusions: actionConclusions,
+    symbol_breakdown: symbolBreakdown
+  };
+}
+
+async function persistMetalActionSampleValidationReport(db: any, report: Awaited<ReturnType<typeof buildMetalActionSampleValidationReport>>, savedFrom: string) {
+  await ensureMetalActionSampleReportsTable(db);
+  await db.run(
+    `INSERT INTO metal_action_sample_reports (
+      report_key, report_date, action_version, status, conclusion_label,
+      conclusion_text, metrics_json, checks_json, report_json, saved_from,
+      created_at, updated_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+    [
+      report.report_key,
+      report.report_date,
+      report.action_version,
+      report.conclusion.status,
+      report.conclusion.label,
+      report.conclusion.text,
+      JSON.stringify(report.action_conclusions || []),
+      JSON.stringify(report.conclusion.checks || []),
+      JSON.stringify(report),
+      savedFrom
+    ]
+  );
+}
+
+function normalizeMetalActionSampleReportRow(row: any, options: { includeReport?: boolean } = {}) {
+  if (!row) return null;
+  const includeReport = options.includeReport !== false;
+  return {
+    id: row.id,
+    report_key: row.report_key,
+    report_date: row.report_date,
+    action_version: row.action_version,
+    status: row.status,
+    conclusion_label: row.conclusion_label,
+    conclusion_text: row.conclusion_text,
+    metrics: safeJsonParse(row.metrics_json, []),
     checks: safeJsonParse(row.checks_json, []),
     ...(includeReport ? { report: safeJsonParse(row.report_json, null) } : {}),
     saved_from: row.saved_from,
@@ -3769,6 +4870,233 @@ router.get('/rule-lab/samples', async (req: Request, res: Response) => {
   }
 });
 
+router.post('/rule-lab/action-samples/save', async (req: Request, res: Response) => {
+  try {
+    const db = await getDb();
+    const symbol = String(req.body.symbol || 'all').toUpperCase();
+    const payload = await buildMetalActionSamples(db, {
+      symbol,
+      limit: req.body.limit
+    });
+    const saveResult = await saveMetalActionSamples(db, payload, req.body.saved_from || 'manual_action_replay');
+
+    res.json({
+      success: true,
+      message: `贵金属动作样本已落库：新增 ${saveResult.inserted} 条，更新 ${saveResult.updated} 条`,
+      data: {
+        ...saveResult,
+        symbol,
+        action_version: payload.action_version
+      }
+    });
+  } catch (error) {
+    console.error('Error saving metal action samples:', error);
+    res.status(500).json({
+      success: false,
+      message: `动作样本落库失败: ${(error as Error).message}`
+    });
+  }
+});
+
+router.get('/rule-lab/action-samples', async (req: Request, res: Response) => {
+  try {
+    const db = await getDb();
+    await ensureMetalActionSamplesTable(db);
+    const page = Math.max(Number(req.query.page || 1), 1);
+    const pageSize = Math.min(Math.max(Number(req.query.page_size || 20), 5), 100);
+    const offset = (page - 1) * pageSize;
+    const symbol = String(req.query.symbol || 'all');
+    const actionKey = String(req.query.action_key || '');
+    const actionPermission = String(req.query.action_permission || '');
+    const labelStatus = String(req.query.label_status || '');
+    const requestedActionVersion = String(req.query.action_version || '');
+    const latestVersionRow = await db.get(
+      `SELECT action_version, MAX(trade_date) as latest_trade_date
+       FROM metal_action_samples
+       GROUP BY action_version
+       ORDER BY latest_trade_date DESC, action_version DESC
+       LIMIT 1`
+    );
+    const actionVersion = requestedActionVersion && requestedActionVersion !== 'latest'
+      ? requestedActionVersion
+      : (latestVersionRow?.action_version || METAL_ACTION_VERSION);
+
+    const conditions: string[] = [];
+    const params: any[] = [];
+
+    if (actionVersion && actionVersion !== 'all') {
+      conditions.push('action_version = ?');
+      params.push(actionVersion);
+    }
+    if (symbol && symbol !== 'all') {
+      conditions.push('symbol = ?');
+      params.push(symbol.toUpperCase());
+    }
+    if (actionKey && actionKey !== 'all') {
+      conditions.push('action_key = ?');
+      params.push(actionKey);
+    }
+    if (actionPermission && actionPermission !== 'all') {
+      conditions.push('action_permission = ?');
+      params.push(actionPermission);
+    }
+    if (labelStatus && labelStatus !== 'all') {
+      conditions.push('label_status = ?');
+      params.push(labelStatus);
+    }
+
+    const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    const totalRow = await db.get(
+      `SELECT COUNT(*) as total FROM metal_action_samples ${whereClause}`,
+      params
+    );
+    const items = await db.all(
+      `SELECT
+        id, symbol, asset_name, source, trade_date, action_version, source_sample_id,
+        action_key, action_label, action_permission, action_reason,
+        guardrail_key, guardrail_label, guardrail_reason,
+        close, state_code, state_label, signal_maturity, signal_maturity_label,
+        rule_signal, rule_action, rule_action_label,
+        price_position_code, price_position_label, distance_to_ma60,
+        recent_return_5, recent_return_20, drawdown_20, range_ratio_5, range_ratio_20,
+        daily_return, drop_pct_1d, drop_pct_5d, drop_pct_20d,
+        state_continuation_days, safe_confirmation_days, safe_zone_days,
+        gold_state_code, gold_state_label, gold_close, gold_distance_to_ma60,
+        gold_recent_return_5, gold_recent_return_20, gold_safe_confirmation_days,
+        silver_state_code, silver_state_label, silver_close, silver_distance_to_ma60,
+        silver_recent_return_5, silver_recent_return_20, silver_safe_confirmation_days,
+        label_status, future_rebound_3d, future_rebound_5d,
+        future_return_3d, future_return_5d, future_return_10d, future_return_20d,
+        future_max_drawdown_20d, break_recent_low_20d, survived_3d, survived_5d,
+        short_lived_signal, future_state_3d, future_state_5d, future_state_10d, future_state_20d,
+        outcome_label, saved_from, created_at, updated_at
+       FROM metal_action_samples
+       ${whereClause}
+       ORDER BY trade_date DESC, id DESC
+       LIMIT ? OFFSET ?`,
+      [...params, pageSize, offset]
+    );
+    const summary = await db.get(
+      `SELECT
+        COUNT(*) as total_samples,
+        SUM(CASE WHEN label_status = 'complete' THEN 1 ELSE 0 END) as complete_label_count,
+        SUM(CASE WHEN label_status = 'pending' THEN 1 ELSE 0 END) as pending_label_count,
+        SUM(CASE WHEN action_permission = 'blocked' THEN 1 ELSE 0 END) as blocked_count,
+        SUM(CASE WHEN short_lived_signal = 1 THEN 1 ELSE 0 END) as short_lived_count,
+        SUM(CASE WHEN future_rebound_5d = 1 THEN 1 ELSE 0 END) as rebound_5d_count,
+        AVG(CASE WHEN label_status = 'complete' THEN future_return_20d ELSE NULL END) as avg_return_20d,
+        AVG(CASE WHEN label_status = 'complete' THEN future_max_drawdown_20d ELSE NULL END) as avg_drawdown_20d
+       FROM metal_action_samples
+       ${whereClause}`,
+      params
+    );
+    const buckets = await db.all(
+      `SELECT
+        action_key,
+        MAX(action_label) as action_label,
+        MAX(action_permission) as sample_permission,
+        COUNT(*) as total_samples,
+        SUM(CASE WHEN label_status = 'complete' THEN 1 ELSE 0 END) as complete_label_count,
+        SUM(CASE WHEN action_permission = 'blocked' THEN 1 ELSE 0 END) as blocked_count,
+        SUM(CASE WHEN short_lived_signal = 1 THEN 1 ELSE 0 END) as short_lived_count,
+        SUM(CASE WHEN future_rebound_5d = 1 THEN 1 ELSE 0 END) as rebound_5d_count,
+        AVG(CASE WHEN label_status = 'complete' THEN future_return_20d ELSE NULL END) as avg_return_20d,
+        AVG(CASE WHEN label_status = 'complete' THEN future_max_drawdown_20d ELSE NULL END) as avg_drawdown_20d
+       FROM metal_action_samples
+       ${whereClause}
+       GROUP BY action_key
+       ORDER BY total_samples DESC`,
+      params
+    );
+
+    res.json({
+      success: true,
+      data: {
+        items,
+        summary,
+        buckets: buckets.map((row: any) => ({
+          action_key: row.action_key,
+          action_label: row.action_label,
+          sample_permission: row.sample_permission,
+          total_samples: Number(row.total_samples || 0),
+          complete_label_count: Number(row.complete_label_count || 0),
+          blocked_count: Number(row.blocked_count || 0),
+          short_lived_count: Number(row.short_lived_count || 0),
+          rebound_5d_count: Number(row.rebound_5d_count || 0),
+          avg_return_20d: toMetricNumber(row.avg_return_20d),
+          avg_drawdown_20d: toMetricNumber(row.avg_drawdown_20d)
+        })),
+        pagination: {
+          page,
+          page_size: pageSize,
+          total: totalRow?.total || 0,
+          total_pages: Math.ceil((totalRow?.total || 0) / pageSize)
+        },
+        action_version: actionVersion
+      }
+    });
+  } catch (error) {
+    console.error('Error getting metal action samples:', error);
+    res.status(500).json({
+      success: false,
+      message: `获取贵金属动作样本失败: ${(error as Error).message}`
+    });
+  }
+});
+
+router.get('/rule-lab/action-samples/report', async (req: Request, res: Response) => {
+  try {
+    const db = await getDb();
+    const includeDetail = String(req.query.detail || '') === 'full';
+    const report = await buildMetalActionSampleValidationReport(db);
+    const latestSaved = await db.get(
+      `SELECT id, report_key, report_date, action_version, status,
+              conclusion_label, conclusion_text, metrics_json, checks_json,
+              report_json, saved_from, created_at, updated_at
+       FROM metal_action_sample_reports
+       WHERE report_key = 'metal_action_sample_validation'
+       ORDER BY id DESC
+       LIMIT 1`
+    );
+
+    res.json({
+      success: true,
+      data: {
+        report,
+        latest_saved: normalizeMetalActionSampleReportRow(latestSaved, { includeReport: includeDetail })
+      }
+    });
+  } catch (error) {
+    console.error('Error getting metal action sample validation report:', error);
+    res.status(500).json({
+      success: false,
+      message: `获取贵金属动作后验报告失败: ${(error as Error).message}`
+    });
+  }
+});
+
+router.post('/rule-lab/action-samples/report/generate', async (req: Request, res: Response) => {
+  try {
+    const db = await getDb();
+    const report = await buildMetalActionSampleValidationReport(db);
+    await persistMetalActionSampleValidationReport(db, report, req.body?.saved_from || 'manual_generate');
+
+    res.json({
+      success: true,
+      message: `贵金属动作后验报告已生成：${report.conclusion.label}`,
+      data: {
+        report
+      }
+    });
+  } catch (error) {
+    console.error('Error generating metal action sample validation report:', error);
+    res.status(500).json({
+      success: false,
+      message: `生成贵金属动作后验报告失败: ${(error as Error).message}`
+    });
+  }
+});
+
 router.get('/rule-lab/gold-rule-report', async (_req: Request, res: Response) => {
   try {
     const db = await getDb();
@@ -3840,7 +5168,7 @@ router.get('/rule-lab/training/pipeline-status', async (req: Request, res: Respo
       `SELECT id, task_key, trigger_type, status, started_at, finished_at, message, result_json
        FROM task_center_runs
        WHERE task_key = ?
-       ORDER BY started_at DESC, id DESC
+       ORDER BY datetime(REPLACE(started_at, 'T', ' ')) DESC, id DESC
        LIMIT 1`,
       [taskKey]
     );
@@ -3848,7 +5176,7 @@ router.get('/rule-lab/training/pipeline-status', async (req: Request, res: Respo
       `SELECT id, trigger_type, status, started_at, finished_at, message
        FROM task_center_runs
        WHERE task_key = ?
-       ORDER BY started_at DESC, id DESC
+       ORDER BY datetime(REPLACE(started_at, 'T', ' ')) DESC, id DESC
        LIMIT 8`,
       [taskKey]
     );

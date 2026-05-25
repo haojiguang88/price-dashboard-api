@@ -234,7 +234,7 @@ async function getRunningExperimentTrainingRun(db: any, key: ExperimentKey | 'al
      FROM model_training_runs
      WHERE status = 'running'
        AND domain IN (${placeholders})
-     ORDER BY started_at DESC, id DESC
+     ORDER BY datetime(REPLACE(started_at, 'T', ' ')) DESC, id DESC
      LIMIT 1`,
     domains
   );
@@ -1160,7 +1160,7 @@ async function getExperimentModelSummary(db: any, key: ExperimentKey) {
     `SELECT id, domain, status, output_dir, message, source_row_count, started_at, finished_at, updated_at
      FROM model_training_runs
      WHERE domain = ?
-     ORDER BY started_at DESC, id DESC
+     ORDER BY datetime(REPLACE(started_at, 'T', ' ')) DESC, id DESC
      LIMIT 1`,
     [domain]
   );
