@@ -1077,6 +1077,48 @@ function normalizeSilverFxBucketRow(row: any) {
   };
 }
 
+function normalizeSilverDollarBucketRow(row: any) {
+  const signalCandidates = Number(row.signal_candidate_count || 0);
+  const completeLabels = Number(row.complete_label_count || 0);
+  const signalShortLived = Number(row.signal_short_lived_count || 0);
+
+  return {
+    segment_code: row.segment_code || 'UNKNOWN',
+    segment_label: getSilverSegmentMeta(row.segment_code || 'UNKNOWN').label,
+    dollar_state: row.dollar_state || '无美元',
+    dollar_tailwind_for_silver: row.dollar_tailwind_for_silver || '无美元',
+    complete_label_count: completeLabels,
+    signal_candidate_count: signalCandidates,
+    signal_short_lived_count: signalShortLived,
+    signal_short_lived_rate: signalCandidates ? roundNumber(signalShortLived / signalCandidates, 4) : 0,
+    avg_return_20d: toMetricNumber(row.avg_return_20d),
+    avg_drawdown_20d: toMetricNumber(row.avg_drawdown_20d),
+    signal_avg_return_20d: signalCandidates ? toMetricNumber(row.signal_avg_return_20d) : null,
+    signal_avg_drawdown_20d: signalCandidates ? toMetricNumber(row.signal_avg_drawdown_20d) : null
+  };
+}
+
+function normalizeSilverRealRateBucketRow(row: any) {
+  const signalCandidates = Number(row.signal_candidate_count || 0);
+  const completeLabels = Number(row.complete_label_count || 0);
+  const signalShortLived = Number(row.signal_short_lived_count || 0);
+
+  return {
+    segment_code: row.segment_code || 'UNKNOWN',
+    segment_label: getSilverSegmentMeta(row.segment_code || 'UNKNOWN').label,
+    real_yield_state: row.real_yield_state || '无实际利率',
+    real_rate_tailwind_for_gold: row.real_rate_tailwind_for_gold || '无实际利率',
+    complete_label_count: completeLabels,
+    signal_candidate_count: signalCandidates,
+    signal_short_lived_count: signalShortLived,
+    signal_short_lived_rate: signalCandidates ? roundNumber(signalShortLived / signalCandidates, 4) : 0,
+    avg_return_20d: toMetricNumber(row.avg_return_20d),
+    avg_drawdown_20d: toMetricNumber(row.avg_drawdown_20d),
+    signal_avg_return_20d: signalCandidates ? toMetricNumber(row.signal_avg_return_20d) : null,
+    signal_avg_drawdown_20d: signalCandidates ? toMetricNumber(row.signal_avg_drawdown_20d) : null
+  };
+}
+
 function normalizeLatestFxRow(row: any) {
   if (!row) return null;
   return {
@@ -1088,6 +1130,35 @@ function normalizeLatestFxRow(row: any) {
     usd_cny_change_20d: toMetricNumber(row.usd_cny_change_20d),
     cny_state: row.cny_state,
     fx_tailwind_for_silver: row.fx_tailwind_for_silver
+  };
+}
+
+function normalizeLatestMetalMacroRow(row: any) {
+  if (!row) return null;
+  return {
+    trade_date: row.trade_date,
+    source: row.source,
+    usd_cnh_mid: toMetricNumber(row.usd_cnh_mid, 6),
+    usd_cnh_change_5d: toMetricNumber(row.usd_cnh_change_5d),
+    usd_cnh_change_20d: toMetricNumber(row.usd_cnh_change_20d),
+    cny_state: row.cny_state,
+    fx_tailwind_for_silver: row.fx_tailwind_for_silver,
+    dxy_proxy: toMetricNumber(row.dxy_proxy, 4),
+    dxy_proxy_change_5d: toMetricNumber(row.dxy_proxy_change_5d),
+    dxy_proxy_change_20d: toMetricNumber(row.dxy_proxy_change_20d),
+    dollar_state: row.dollar_state,
+    dollar_tailwind_for_gold: row.dollar_tailwind_for_gold,
+    dollar_tailwind_for_silver: row.dollar_tailwind_for_silver,
+    us10y_yield: toMetricNumber(row.us10y_yield, 4),
+    us10y_change_5d: toMetricNumber(row.us10y_change_5d),
+    us10y_change_20d: toMetricNumber(row.us10y_change_20d),
+    us10y_state: row.us10y_state,
+    rate_tailwind_for_gold: row.rate_tailwind_for_gold,
+    us10y_real_yield: toMetricNumber(row.us10y_real_yield, 4),
+    real_yield_change_5d: toMetricNumber(row.real_yield_change_5d),
+    real_yield_change_20d: toMetricNumber(row.real_yield_change_20d),
+    real_yield_state: row.real_yield_state,
+    real_rate_tailwind_for_gold: row.real_rate_tailwind_for_gold
   };
 }
 
@@ -1146,6 +1217,13 @@ function normalizeSilverValidationCase(row: any) {
     usd_cny_mid: toMetricNumber(row.usd_cny_mid, 6),
     usd_cny_change_5d: toMetricNumber(row.usd_cny_change_5d),
     usd_cny_change_20d: toMetricNumber(row.usd_cny_change_20d),
+    dxy_proxy: toMetricNumber(row.dxy_proxy, 4),
+    dollar_state: row.dollar_state || null,
+    dollar_tailwind_for_silver: row.dollar_tailwind_for_silver || null,
+    us10y_yield: toMetricNumber(row.us10y_yield, 4),
+    us10y_real_yield: toMetricNumber(row.us10y_real_yield, 4),
+    real_yield_state: row.real_yield_state || null,
+    real_rate_tailwind_for_gold: row.real_rate_tailwind_for_gold || null,
     safe_confirmation_days: Number(row.safe_confirmation_days || 0),
     signal_maturity_label: row.signal_maturity_label,
     future_return_20d: toMetricNumber(row.future_return_20d),
@@ -3022,8 +3100,8 @@ function runMetalScoringWorker(symbol: string, caseLimit: number): Promise<any> 
     let stderr = '';
     const timeout = setTimeout(() => {
       child.kill();
-      reject(new Error('贵金属模型评分超过 60 秒未返回，已中断本次请求。'));
-    }, 60000);
+      reject(new Error('贵金属模型评分超过 3 分钟未返回，已中断本次请求。'));
+    }, 180000);
 
     child.stdout.on('data', chunk => {
       stdout += chunk.toString();
@@ -4544,12 +4622,31 @@ router.get('/rule-lab/silver-validation', async (req: Request, res: Response) =>
       SELECT
         ${silverSegmentCase} as segment_code,
         s.*,
-        fx.usd_cny_mid,
-        fx.usd_cny_change_5d,
-        fx.usd_cny_change_20d,
-        fx.cny_state,
-        fx.fx_tailwind_for_silver
+        COALESCE(mf.usd_cnh_mid, fx.usd_cny_mid) as usd_cny_mid,
+        COALESCE(mf.usd_cnh_change_5d, fx.usd_cny_change_5d) as usd_cny_change_5d,
+        COALESCE(mf.usd_cnh_change_20d, fx.usd_cny_change_20d) as usd_cny_change_20d,
+        COALESCE(mf.cny_state, fx.cny_state) as cny_state,
+        COALESCE(mf.fx_tailwind_for_silver, fx.fx_tailwind_for_silver) as fx_tailwind_for_silver,
+        mf.dxy_proxy,
+        mf.dxy_proxy_change_5d,
+        mf.dxy_proxy_change_20d,
+        mf.dollar_state,
+        mf.dollar_tailwind_for_gold,
+        mf.dollar_tailwind_for_silver,
+        mf.us10y_yield,
+        mf.us10y_change_5d,
+        mf.us10y_change_20d,
+        mf.us10y_state,
+        mf.rate_tailwind_for_gold,
+        mf.us10y_real_yield,
+        mf.real_yield_change_5d,
+        mf.real_yield_change_20d,
+        mf.real_yield_state,
+        mf.real_rate_tailwind_for_gold
       FROM metal_rule_lab_samples s
+      LEFT JOIN metal_macro_factors mf
+        ON mf.trade_date = s.trade_date
+       AND mf.source = 'tushare_macro'
       LEFT JOIN fx_daily_rates fx
         ON fx.trade_date = s.trade_date
        AND fx.ts_code = 'USDCNH.FXCM'
@@ -4657,8 +4754,78 @@ router.get('/rule-lab/silver-validation', async (req: Request, res: Response) =>
           WHEN '中性' THEN 2
           WHEN '逆风' THEN 3
           ELSE 4
-        END`,
+       END`,
       [drawdownLine, drawdownLine]
+    );
+
+    const dollarBucketRows = await db.all(
+      `${segmentedCte}
+       SELECT
+        segment_code,
+        COALESCE(dollar_state, '无美元') as dollar_state,
+        COALESCE(dollar_tailwind_for_silver, '无美元') as dollar_tailwind_for_silver,
+        SUM(CASE WHEN label_status = 'complete' THEN 1 ELSE 0 END) as complete_label_count,
+        SUM(CASE WHEN label_status = 'complete' AND rule_signal = 'SIGNAL_CANDIDATE' THEN 1 ELSE 0 END) as signal_candidate_count,
+        SUM(CASE WHEN label_status = 'complete' AND rule_signal = 'SIGNAL_CANDIDATE' AND short_lived_signal = 1 THEN 1 ELSE 0 END) as signal_short_lived_count,
+        AVG(CASE WHEN label_status = 'complete' THEN future_return_20d ELSE NULL END) as avg_return_20d,
+        AVG(CASE WHEN label_status = 'complete' THEN future_max_drawdown_20d ELSE NULL END) as avg_drawdown_20d,
+        AVG(CASE WHEN label_status = 'complete' AND rule_signal = 'SIGNAL_CANDIDATE' THEN future_return_20d ELSE NULL END) as signal_avg_return_20d,
+        AVG(CASE WHEN label_status = 'complete' AND rule_signal = 'SIGNAL_CANDIDATE' THEN future_max_drawdown_20d ELSE NULL END) as signal_avg_drawdown_20d
+       FROM segmented
+       WHERE label_status = 'complete'
+       GROUP BY segment_code, dollar_tailwind_for_silver, dollar_state
+       ORDER BY
+        CASE segment_code
+          WHEN 'GOLD_PASS_SILVER_SIGNAL' THEN 1
+          WHEN 'GOLD_NOT_STABLE_BLOCK' THEN 2
+          WHEN 'GOLD_PASS_NO_SIGNAL' THEN 3
+          ELSE 4
+        END,
+        CASE dollar_tailwind_for_silver
+          WHEN '顺风' THEN 1
+          WHEN '中性' THEN 2
+          WHEN '逆风' THEN 3
+          ELSE 4
+        END`
+    );
+
+    const realRateBucketRows = await db.all(
+      `${segmentedCte}
+       SELECT
+        segment_code,
+        COALESCE(real_yield_state, '无实际利率') as real_yield_state,
+        COALESCE(real_rate_tailwind_for_gold, '无实际利率') as real_rate_tailwind_for_gold,
+        SUM(CASE WHEN label_status = 'complete' THEN 1 ELSE 0 END) as complete_label_count,
+        SUM(CASE WHEN label_status = 'complete' AND rule_signal = 'SIGNAL_CANDIDATE' THEN 1 ELSE 0 END) as signal_candidate_count,
+        SUM(CASE WHEN label_status = 'complete' AND rule_signal = 'SIGNAL_CANDIDATE' AND short_lived_signal = 1 THEN 1 ELSE 0 END) as signal_short_lived_count,
+        AVG(CASE WHEN label_status = 'complete' THEN future_return_20d ELSE NULL END) as avg_return_20d,
+        AVG(CASE WHEN label_status = 'complete' THEN future_max_drawdown_20d ELSE NULL END) as avg_drawdown_20d,
+        AVG(CASE WHEN label_status = 'complete' AND rule_signal = 'SIGNAL_CANDIDATE' THEN future_return_20d ELSE NULL END) as signal_avg_return_20d,
+        AVG(CASE WHEN label_status = 'complete' AND rule_signal = 'SIGNAL_CANDIDATE' THEN future_max_drawdown_20d ELSE NULL END) as signal_avg_drawdown_20d
+       FROM segmented
+       WHERE label_status = 'complete'
+       GROUP BY segment_code, real_rate_tailwind_for_gold, real_yield_state
+       ORDER BY
+        CASE segment_code
+          WHEN 'GOLD_PASS_SILVER_SIGNAL' THEN 1
+          WHEN 'GOLD_NOT_STABLE_BLOCK' THEN 2
+          WHEN 'GOLD_PASS_NO_SIGNAL' THEN 3
+          ELSE 4
+        END,
+        CASE real_rate_tailwind_for_gold
+          WHEN '顺风' THEN 1
+          WHEN '中性' THEN 2
+          WHEN '逆风' THEN 3
+          ELSE 4
+        END`
+    );
+
+    const latestMacro = await db.get(
+      `SELECT *
+       FROM metal_macro_factors
+       WHERE source = 'tushare_macro'
+       ORDER BY trade_date DESC
+       LIMIT 1`
     );
 
     const latestFx = await db.get(
@@ -4680,11 +4847,29 @@ router.get('/rule-lab/silver-validation', async (req: Request, res: Response) =>
        FROM segmented`
     );
 
+    const macroCoverage = await db.get(
+      `${segmentedCte}
+       SELECT
+        COUNT(*) as total_samples,
+        SUM(CASE WHEN usd_cny_mid IS NOT NULL THEN 1 ELSE 0 END) as fx_matched_samples,
+        SUM(CASE WHEN dxy_proxy IS NOT NULL THEN 1 ELSE 0 END) as dxy_matched_samples,
+        SUM(CASE WHEN us10y_yield IS NOT NULL THEN 1 ELSE 0 END) as us10y_matched_samples,
+        SUM(CASE WHEN us10y_real_yield IS NOT NULL THEN 1 ELSE 0 END) as real_yield_matched_samples,
+        SUM(CASE WHEN label_status = 'complete' THEN 1 ELSE 0 END) as complete_label_count,
+        SUM(CASE WHEN label_status = 'complete' AND usd_cny_mid IS NOT NULL THEN 1 ELSE 0 END) as fx_matched_complete_count,
+        SUM(CASE WHEN label_status = 'complete' AND dxy_proxy IS NOT NULL THEN 1 ELSE 0 END) as dxy_matched_complete_count,
+        SUM(CASE WHEN label_status = 'complete' AND us10y_yield IS NOT NULL THEN 1 ELSE 0 END) as us10y_matched_complete_count,
+        SUM(CASE WHEN label_status = 'complete' AND us10y_real_yield IS NOT NULL THEN 1 ELSE 0 END) as real_yield_matched_complete_count
+       FROM segmented`
+    );
+
     const caseSelect = `SELECT
         ? as case_type,
         id, trade_date, close, state_code, state_label, rule_action, rule_action_label,
         rule_signal, segment_code, gold_state_code, safe_confirmation_days, signal_maturity_label,
         cny_state, fx_tailwind_for_silver, usd_cny_mid, usd_cny_change_5d, usd_cny_change_20d,
+        dxy_proxy, dollar_state, dollar_tailwind_for_silver,
+        us10y_yield, us10y_real_yield, real_yield_state, real_rate_tailwind_for_gold,
         future_return_20d, future_max_drawdown_20d, survived_5d, short_lived_signal
        FROM segmented`;
     const caseQueries = [
@@ -4751,7 +4936,9 @@ router.get('/rule-lab/silver-validation', async (req: Request, res: Response) =>
         },
         no_training_note: '白银当前只做分层验收：黄金通过后的主样本、黄金未稳拦截样本、黄金通过但白银未触发的对照样本。暂不启动白银训练。',
         fx_note: '汇率字段来自 Tushare USDCNH.FXCM，按 bid/ask close 计算离岸人民币市场中间价；这里只作为白银分层辅助风向，不给入场权限。',
+        macro_note: '宏观字段来自 Tushare：USDCNH、FXCM合成美元指数代理、美国10年期国债收益率、美国10年期实际收益率。这里只做分层验收和模型辅助特征，不给入场权限。',
         latest_fx: normalizeLatestFxRow(latestFx),
+        latest_macro: normalizeLatestMetalMacroRow(latestMacro),
         fx_coverage: {
           total_samples: Number(fxCoverage?.total_samples || 0),
           matched_samples: Number(fxCoverage?.matched_samples || 0),
@@ -4761,9 +4948,29 @@ router.get('/rule-lab/silver-validation', async (req: Request, res: Response) =>
             ? roundNumber(Number(fxCoverage?.matched_samples || 0) / Number(fxCoverage?.total_samples || 0), 4)
             : 0
         },
+        macro_coverage: {
+          total_samples: Number(macroCoverage?.total_samples || 0),
+          complete_label_count: Number(macroCoverage?.complete_label_count || 0),
+          fx_matched_samples: Number(macroCoverage?.fx_matched_samples || 0),
+          dxy_matched_samples: Number(macroCoverage?.dxy_matched_samples || 0),
+          us10y_matched_samples: Number(macroCoverage?.us10y_matched_samples || 0),
+          real_yield_matched_samples: Number(macroCoverage?.real_yield_matched_samples || 0),
+          fx_matched_complete_count: Number(macroCoverage?.fx_matched_complete_count || 0),
+          dxy_matched_complete_count: Number(macroCoverage?.dxy_matched_complete_count || 0),
+          us10y_matched_complete_count: Number(macroCoverage?.us10y_matched_complete_count || 0),
+          real_yield_matched_complete_count: Number(macroCoverage?.real_yield_matched_complete_count || 0),
+          dxy_matched_rate: Number(macroCoverage?.total_samples || 0)
+            ? roundNumber(Number(macroCoverage?.dxy_matched_samples || 0) / Number(macroCoverage?.total_samples || 0), 4)
+            : 0,
+          real_yield_matched_rate: Number(macroCoverage?.total_samples || 0)
+            ? roundNumber(Number(macroCoverage?.real_yield_matched_samples || 0) / Number(macroCoverage?.total_samples || 0), 4)
+            : 0
+        },
         conclusion: buildSilverLayerConclusion(segmentRows),
         segments: segmentRows.map(normalizeSilverValidationRow),
         fx_buckets: fxBucketRows.map(normalizeSilverFxBucketRow),
+        dollar_buckets: dollarBucketRows.map(normalizeSilverDollarBucketRow),
+        real_rate_buckets: realRateBucketRows.map(normalizeSilverRealRateBucketRow),
         yearly: yearRows.map(normalizeSilverValidationYearRow),
         action_buckets: actionBuckets,
         cases

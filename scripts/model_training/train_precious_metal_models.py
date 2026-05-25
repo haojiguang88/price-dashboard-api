@@ -57,6 +57,15 @@ NUMERIC_FEATURES = [
     "safe_confirmation_days",
     "safe_zone_days",
     "no_flying_knife_blocked",
+    "dxy_proxy",
+    "dxy_proxy_change_5d",
+    "dxy_proxy_change_20d",
+    "us10y_yield",
+    "us10y_change_5d",
+    "us10y_change_20d",
+    "us10y_real_yield",
+    "real_yield_change_5d",
+    "real_yield_change_20d",
 ]
 
 CATEGORICAL_FEATURES = [
@@ -67,6 +76,12 @@ CATEGORICAL_FEATURES = [
     "cycle_label",
     "signal_maturity",
     "rule_action",
+    "dollar_state",
+    "dollar_tailwind_for_gold",
+    "us10y_state",
+    "rate_tailwind_for_gold",
+    "real_yield_state",
+    "real_rate_tailwind_for_gold",
 ]
 
 MODEL_KEYS = ("logistic_regression", "random_forest", "lightgbm_model")
@@ -187,21 +202,36 @@ def load_rows(conn, symbol):
     if not config:
         raise RuntimeError(f"{symbol} 暂不进入模型训练；白银先做黄金主锚分层。")
 
+    where_clause = (
+        config["sample_where"]
+        .replace("symbol", "s.symbol")
+        .replace("label_status", "s.label_status")
+        .replace("rule_signal", "s.rule_signal")
+    )
     rows = conn.execute(
         f"""
         SELECT
-          id, symbol, asset_name, source, trade_date, close,
-          state_code, short_label, mid_label, long_label, cycle_label,
-          distance_to_ma60, recent_return_5, recent_return_20, drawdown_20,
-          range_ratio_5, range_ratio_20, lower_low, abnormal_move,
-          behavior_tags_json, state_continuation_days, safe_confirmation_days,
-          safe_zone_days, signal_maturity, no_flying_knife_blocked,
-          rule_signal, rule_action, future_return_5d, future_return_20d,
-          future_max_drawdown_20d, break_recent_low_20d, survived_3d,
-          survived_5d, short_lived_signal
-        FROM metal_rule_lab_samples
-        WHERE {config["sample_where"]}
-        ORDER BY trade_date ASC
+          s.id, s.symbol, s.asset_name, s.source, s.trade_date, s.close,
+          s.state_code, s.short_label, s.mid_label, s.long_label, s.cycle_label,
+          s.distance_to_ma60, s.recent_return_5, s.recent_return_20, s.drawdown_20,
+          s.range_ratio_5, s.range_ratio_20, s.lower_low, s.abnormal_move,
+          s.behavior_tags_json, s.state_continuation_days, s.safe_confirmation_days,
+          s.safe_zone_days, s.signal_maturity, s.no_flying_knife_blocked,
+          s.rule_signal, s.rule_action, s.future_return_5d, s.future_return_20d,
+          s.future_max_drawdown_20d, s.break_recent_low_20d, s.survived_3d,
+          s.survived_5d, s.short_lived_signal,
+          mf.dxy_proxy, mf.dxy_proxy_change_5d, mf.dxy_proxy_change_20d,
+          mf.dollar_state, mf.dollar_tailwind_for_gold,
+          mf.us10y_yield, mf.us10y_change_5d, mf.us10y_change_20d,
+          mf.us10y_state, mf.rate_tailwind_for_gold,
+          mf.us10y_real_yield, mf.real_yield_change_5d, mf.real_yield_change_20d,
+          mf.real_yield_state, mf.real_rate_tailwind_for_gold
+        FROM metal_rule_lab_samples s
+        LEFT JOIN metal_macro_factors mf
+          ON mf.trade_date = s.trade_date
+         AND mf.source = 'tushare_macro'
+        WHERE {where_clause}
+        ORDER BY s.trade_date ASC
         """
     ).fetchall()
     return [dict(row) for row in rows]

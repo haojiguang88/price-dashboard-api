@@ -2172,7 +2172,7 @@ const migrations: Migration[] = [
           '18:10',
           'every_day',
           38,
-          '{"symbols":["XAUUSD","SGE_AGTD"],"refresh_prices":true,"refresh_fx":true,"replay_limit":1500,"train_gold":true,"train_silver_if_gate_pass":false,"silver_gate":{"min_main_signal_count":300,"min_block_signal_count":300,"min_short_lived_edge":0.03,"min_drawdown_edge":0.005,"min_fx_coverage":0.8}}',
+          '{"symbols":["XAUUSD","SGE_AGTD"],"refresh_prices":true,"refresh_fx":true,"refresh_macro":true,"replay_limit":1500,"train_gold":true,"train_silver_if_gate_pass":false,"silver_gate":{"min_main_signal_count":300,"min_block_signal_count":300,"min_short_lived_edge":0.03,"min_drawdown_edge":0.005,"min_fx_coverage":0.8}}',
           'pending',
           '独立贵金属训练流水线：更新行情/汇率、回放落库、白银分层验收、黄金训练；白银必须过训练闸门才允许后续辅助模型训练'
         );
@@ -2183,7 +2183,7 @@ const migrations: Migration[] = [
           schedule_time = CASE WHEN schedule_time IS NULL OR schedule_time = '' THEN '18:10' ELSE schedule_time END,
           schedule_days = CASE WHEN schedule_days IS NULL OR schedule_days = '' THEN 'every_day' ELSE schedule_days END,
           config_json = CASE
-            WHEN config_json IS NULL OR config_json = '{}' OR config_json = '' THEN '{"symbols":["XAUUSD","SGE_AGTD"],"refresh_prices":true,"refresh_fx":true,"replay_limit":1500,"train_gold":true,"train_silver_if_gate_pass":false,"silver_gate":{"min_main_signal_count":300,"min_block_signal_count":300,"min_short_lived_edge":0.03,"min_drawdown_edge":0.005,"min_fx_coverage":0.8}}'
+            WHEN config_json IS NULL OR config_json = '{}' OR config_json = '' THEN '{"symbols":["XAUUSD","SGE_AGTD"],"refresh_prices":true,"refresh_fx":true,"refresh_macro":true,"replay_limit":1500,"train_gold":true,"train_silver_if_gate_pass":false,"silver_gate":{"min_main_signal_count":300,"min_block_signal_count":300,"min_short_lived_edge":0.03,"min_drawdown_edge":0.005,"min_fx_coverage":0.8}}'
             ELSE config_json
           END,
           last_message = CASE
@@ -2462,6 +2462,87 @@ const migrations: Migration[] = [
         ON model_training_runs(domain, started_at DESC, id DESC);
       `);
     }
+  },
+  {
+    id: '20260525_004_metal_macro_factors',
+    name: 'Create precious metal macro factors',
+    sql: `
+      CREATE TABLE IF NOT EXISTS metal_macro_factors (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        trade_date TEXT NOT NULL,
+        source TEXT NOT NULL DEFAULT 'tushare_macro',
+        usd_cnh_mid REAL,
+        usd_cnh_change_5d REAL,
+        usd_cnh_change_20d REAL,
+        cny_state TEXT,
+        fx_tailwind_for_silver TEXT,
+        dxy_proxy REAL,
+        dxy_proxy_source TEXT,
+        dxy_proxy_change_5d REAL,
+        dxy_proxy_change_20d REAL,
+        dollar_state TEXT,
+        dollar_tailwind_for_gold TEXT,
+        dollar_tailwind_for_silver TEXT,
+        us10y_yield REAL,
+        us10y_change_5d REAL,
+        us10y_change_20d REAL,
+        us10y_state TEXT,
+        rate_tailwind_for_gold TEXT,
+        us10y_real_yield REAL,
+        real_yield_change_5d REAL,
+        real_yield_change_20d REAL,
+        real_yield_state TEXT,
+        real_rate_tailwind_for_gold TEXT,
+        raw_fx_json TEXT,
+        raw_rate_json TEXT,
+        raw_real_rate_json TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(trade_date, source)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_metal_macro_factors_date
+      ON metal_macro_factors(trade_date DESC, source);
+
+      CREATE INDEX IF NOT EXISTS idx_metal_macro_factors_states
+      ON metal_macro_factors(fx_tailwind_for_silver, dollar_tailwind_for_gold, real_rate_tailwind_for_gold, trade_date DESC);
+
+      INSERT OR IGNORE INTO task_center_tasks
+        (task_key, name, domain, task_type, enabled, schedule_time, schedule_days, priority, config_json, last_status, last_message)
+      VALUES
+        (
+          'metal_macro_factors_update',
+          '贵金属宏观因子更新',
+          'metals',
+          'metal_macro_factors_update',
+          1,
+          '17:30',
+          'every_day',
+          37,
+          '{"source":"tushare_macro"}',
+          'pending',
+          '每天从 Tushare 拉取 USDCNH、合成美元指数代理、美国10Y和美国10Y实际利率，生成贵金属顺逆风标签'
+        );
+
+      UPDATE task_center_tasks
+      SET name = '贵金属宏观因子更新',
+          domain = 'metals',
+          task_type = 'metal_macro_factors_update',
+          enabled = 1,
+          schedule_time = CASE WHEN schedule_time IS NULL OR schedule_time = '' THEN '17:30' ELSE schedule_time END,
+          schedule_days = CASE WHEN schedule_days IS NULL OR schedule_days = '' THEN 'every_day' ELSE schedule_days END,
+          priority = 37,
+          config_json = CASE
+            WHEN config_json IS NULL OR config_json = '{}' OR config_json = '' THEN '{"source":"tushare_macro"}'
+            ELSE config_json
+          END,
+          last_message = CASE
+            WHEN last_status IS NULL OR last_status = 'pending' THEN '每天从 Tushare 拉取 USDCNH、合成美元指数代理、美国10Y和美国10Y实际利率，生成贵金属顺逆风标签'
+            ELSE last_message
+          END,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE task_key = 'metal_macro_factors_update';
+    `
   }
 ];
 

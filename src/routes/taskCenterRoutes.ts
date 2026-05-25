@@ -950,6 +950,40 @@ async function runFxDailyRatesUpdate(config: any) {
   };
 }
 
+async function runMetalMacroFactorsUpdate(config: any) {
+  const scriptPath = path.join(__dirname, '../../scripts/finance/fetch_metal_macro_factors.py');
+  const pythonBin = String(config.python || process.env.PYTHON_BIN || '/usr/bin/python3');
+  const args = [
+    scriptPath,
+    '--db',
+    String(config.db || getDatabasePath()),
+    '--source',
+    String(config.source || 'tushare_macro')
+  ];
+  if (config.start_date) args.push('--start-date', String(config.start_date));
+  if (config.end_date) args.push('--end-date', String(config.end_date));
+  if (config.dry_run) args.push('--dry-run');
+
+  const { stdout, stderr } = await execFileAsync(pythonBin, args, {
+    cwd: path.join(__dirname, '../..'),
+    maxBuffer: 1024 * 1024 * 20,
+    env: process.env
+  });
+  const lines = stdout.trim().split('\n').filter(Boolean);
+  const parsed = JSON.parse(lines[lines.length - 1] || '{}');
+  if (parsed.success === false) {
+    throw new Error(parsed.message || stderr || '贵金属宏观因子更新失败');
+  }
+
+  const latest = parsed.latest
+    ? `；最新 ${parsed.latest.trade_date}，汇率${parsed.latest.fx_tailwind_for_silver || '未知'}，美元${parsed.latest.dollar_tailwind_for_gold || '未知'}，实际利率${parsed.latest.real_rate_tailwind_for_gold || '未知'}`
+    : '';
+  return {
+    message: `${parsed.message || '贵金属宏观因子更新完成'}${latest}`,
+    data: parsed
+  };
+}
+
 function toFiniteNumber(value: any, fallback: number | null = null) {
   const numeric = Number(value);
   return Number.isFinite(numeric) ? numeric : fallback;
@@ -1155,6 +1189,12 @@ async function runPreciousMetalsTrainingPipeline(config: any, db: any) {
     await runStep('refresh_fx_rates', '更新USD/CNY汇率辅助', () => runFxDailyRatesUpdate(config.fx || config));
   } else if (!stopped) {
     skipStep('refresh_fx_rates', '更新USD/CNY汇率辅助', '配置 refresh_fx=false，本轮跳过汇率更新。');
+  }
+
+  if (!stopped && config.refresh_macro !== false) {
+    await runStep('refresh_metal_macro_factors', '更新贵金属宏观因子', () => runMetalMacroFactorsUpdate(config.macro || config));
+  } else if (!stopped) {
+    skipStep('refresh_metal_macro_factors', '更新贵金属宏观因子', '配置 refresh_macro=false，本轮跳过宏观因子更新。');
   }
 
   for (const symbol of symbols) {
@@ -1480,6 +1520,10 @@ async function executeTask(task: TaskRow, triggerType: 'manual' | 'schedule') {
       message = update.message;
     } else if (task.task_type === 'fx_daily_rates_update' || task.task_key === 'fx_daily_rates_update') {
       const update = await runFxDailyRatesUpdate(config);
+      result = update.data;
+      message = update.message;
+    } else if (task.task_type === 'metal_macro_factors_update' || task.task_key === 'metal_macro_factors_update') {
+      const update = await runMetalMacroFactorsUpdate(config);
       result = update.data;
       message = update.message;
     } else if (task.task_type === 'precious_metals_training_pipeline' || task.task_key === 'precious_metals_training_pipeline') {
