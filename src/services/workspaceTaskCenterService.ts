@@ -4,9 +4,10 @@ import { WorkspaceCenterError } from "./workspaceCenterErrors";
 
 export const getScopedTaskFilter = (id: string, workspaceInput: unknown) => {
   const workspace = normalizeWorkspace(workspaceInput);
+  if (!workspace) throw new WorkspaceCenterError(400, "缺少有效工作区");
   return {
-    whereClause: workspace ? "id = ? AND workspace = ?" : "id = ?",
-    params: workspace ? [id, workspace] : [id],
+    whereClause: "id = ? AND workspace = ?",
+    params: [id, workspace],
     workspace
   };
 };
@@ -19,15 +20,15 @@ export const getTaskCenterSnapshot = async (workspaceInput: unknown, compactInpu
     `SELECT
        t.*,
        COALESCE(
-         (SELECT r.status FROM task_center_runs r WHERE r.task_key = t.task_key ORDER BY datetime(REPLACE(r.started_at, 'T', ' ')) DESC, r.id DESC LIMIT 1),
+         (SELECT r.status FROM task_center_runs r WHERE r.task_key = t.task_key AND r.workspace = t.workspace ORDER BY datetime(REPLACE(r.started_at, 'T', ' ')) DESC, r.id DESC LIMIT 1),
          t.last_status
        ) AS last_status,
        COALESCE(
-         (SELECT r.message FROM task_center_runs r WHERE r.task_key = t.task_key ORDER BY datetime(REPLACE(r.started_at, 'T', ' ')) DESC, r.id DESC LIMIT 1),
+         (SELECT r.message FROM task_center_runs r WHERE r.task_key = t.task_key AND r.workspace = t.workspace ORDER BY datetime(REPLACE(r.started_at, 'T', ' ')) DESC, r.id DESC LIMIT 1),
          t.last_message
        ) AS last_message,
        COALESCE(
-         (SELECT COALESCE(r.finished_at, r.started_at) FROM task_center_runs r WHERE r.task_key = t.task_key ORDER BY datetime(REPLACE(r.started_at, 'T', ' ')) DESC, r.id DESC LIMIT 1),
+         (SELECT COALESCE(r.finished_at, r.started_at) FROM task_center_runs r WHERE r.task_key = t.task_key AND r.workspace = t.workspace ORDER BY datetime(REPLACE(r.started_at, 'T', ' ')) DESC, r.id DESC LIMIT 1),
          t.last_run_at
        ) AS last_run_at
      FROM task_center_tasks t
@@ -124,10 +125,10 @@ export const deleteTaskCenterTask = async (id: string, workspaceInput: unknown) 
   const running = await db.get(
     `SELECT id, started_at
      FROM task_center_runs
-     WHERE task_id = ? AND status = 'running'
+     WHERE task_id = ? AND status = 'running' AND workspace = ?
      ORDER BY datetime(REPLACE(started_at, 'T', ' ')) DESC, id DESC
      LIMIT 1`,
-    [task.id]
+    [task.id, task.workspace]
   );
   if (running) throw new WorkspaceCenterError(409, "任务正在执行中，完成后再删除");
 
@@ -136,12 +137,12 @@ export const deleteTaskCenterTask = async (id: string, workspaceInput: unknown) 
   try {
     const runResult = await db.run(
       `DELETE FROM task_center_runs
-       WHERE task_id = ? OR task_key = ?`,
-      [task.id, task.task_key]
+       WHERE (task_id = ? OR task_key = ?) AND workspace = ?`,
+      [task.id, task.task_key, task.workspace]
     );
     runsDeleted = Number(runResult?.changes || 0);
 
-    await db.run("DELETE FROM task_center_tasks WHERE id = ?", [task.id]);
+    await db.run("DELETE FROM task_center_tasks WHERE id = ? AND workspace = ?", [task.id, task.workspace]);
     await db.run("COMMIT");
   } catch (error) {
     await db.run("ROLLBACK");
