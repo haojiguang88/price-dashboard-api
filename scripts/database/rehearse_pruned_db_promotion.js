@@ -166,7 +166,7 @@ promote_one() {
 }
 
 echo "Before running this script:"
-echo "  1. Stop platform API/frontend launchd services."
+echo "  1. Stop business/trading API/frontend launchd services."
 echo "  2. Confirm no writer is using the stable split DB targets."
 echo "  3. Confirm the pruned report was regenerated after stopping writers."
 
