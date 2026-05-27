@@ -8,7 +8,10 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 
-DEFAULT_DB_PATH = "/Volumes/7100/price-dashboard-data/db/price_dashboard_dev.db"
+DEFAULT_DB_PATH = os.environ.get(
+    "BUSINESS_DB_PATH",
+    os.environ.get("DB_PATH", "/Volumes/7100/price-dashboard-data/db/price_dashboard_business_dev.db"),
+)
 DEFAULT_TS_CODE = "USDCNH.FXCM"
 DEFAULT_SOURCE = "tushare_fxcm"
 DEFAULT_START_DATE = "20200101"

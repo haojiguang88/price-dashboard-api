@@ -347,7 +347,13 @@ def upsert_facts(conn, facts):
 
 def main():
     parser = argparse.ArgumentParser(description="Fetch Tushare structured financial reports into local SQLite.")
-    parser.add_argument("--db", default=os.environ.get("DB_PATH", "/Volumes/7100/price-dashboard-data/db/price_dashboard_dev.db"))
+    parser.add_argument(
+        "--db",
+        default=os.environ.get(
+            "BUSINESS_DB_PATH",
+            os.environ.get("DB_PATH", "/Volumes/7100/price-dashboard-data/db/price_dashboard_business_dev.db"),
+        ),
+    )
     parser.add_argument("--sections", default=DEFAULT_SECTIONS)
     parser.add_argument("--periods", default=None, help="Comma separated report periods, e.g. 20250331,20250630")
     parser.add_argument("--period-count", type=int, default=8)

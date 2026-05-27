@@ -16,7 +16,10 @@ CATEGORY_NAME = "泡泡玛特"
 SOURCE_NAME = "千岛"
 SEARCH_URL = "https://oia.qiandao.com/search"
 SPU_URL = "https://oia.qiandao.com/spu"
-DEFAULT_DB_PATH = "/Volumes/7100/price-dashboard-data/db/price_dashboard_dev.db"
+DEFAULT_DB_PATH = os.environ.get(
+    "BUSINESS_DB_PATH",
+    os.environ.get("DB_PATH", "/Volumes/7100/price-dashboard-data/db/price_dashboard_business_dev.db"),
+)
 
 HEADERS = {
     "User-Agent": (

@@ -1,9 +1,9 @@
 import sqlite3 from "sqlite3";
 import { open, Database } from "sqlite";
 
-const DEFAULT_DATABASE_PATH = "/Volumes/7100/price-dashboard-data/db/price_dashboard_dev.db";
+const BUSINESS_DATABASE_PATH = "/Volumes/7100/price-dashboard-data/db/price_dashboard_business_dev.db";
 
-export const getDatabasePath = () => process.env.DB_PATH || DEFAULT_DATABASE_PATH;
+export const getDatabasePath = () => process.env.BUSINESS_DB_PATH || BUSINESS_DATABASE_PATH;
 
 const dbPath = getDatabasePath();
 
@@ -20,7 +20,10 @@ const initDatabase = async (db: Database) => {
       await db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definition}`);
     }
   };
+
+  const shouldInitializeBusinessTables = true;
   
+  if (shouldInitializeBusinessTables) {
   await db.exec("CREATE TABLE IF NOT EXISTS price_records (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT NOT NULL, category TEXT NOT NULL, object_name TEXT NOT NULL, variant TEXT, price REAL NOT NULL, source TEXT, note TEXT, track TEXT, type TEXT DEFAULT 'manual', market_type_preset TEXT DEFAULT 'standard', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)");
   await db.exec("CREATE TABLE IF NOT EXISTS categories (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)");
   await db.exec("CREATE TABLE IF NOT EXISTS objects (id INTEGER PRIMARY KEY AUTOINCREMENT, category_id INTEGER NOT NULL, name TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE CASCADE, UNIQUE(category_id, name))");
@@ -44,9 +47,14 @@ const initDatabase = async (db: Database) => {
   await db.exec("CREATE TABLE IF NOT EXISTS follows (id INTEGER PRIMARY KEY AUTOINCREMENT, category_id INTEGER NOT NULL, object_id INTEGER NOT NULL, variant_id INTEGER NOT NULL DEFAULT 0 CHECK (TRIM(CAST(variant_id AS TEXT)) != '' AND TRIM(CAST(variant_id AS TEXT)) NOT GLOB '*[^0-9]*'), category_name TEXT NOT NULL, object_name TEXT NOT NULL, variant_name TEXT NOT NULL, track TEXT, type TEXT DEFAULT 'manual', market_type_preset TEXT DEFAULT 'standard', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(category_id, object_id, variant_id), FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE CASCADE, FOREIGN KEY (object_id) REFERENCES objects(id) ON DELETE CASCADE)");
 
   await db.exec("CREATE TABLE IF NOT EXISTS watchlist_items (id INTEGER PRIMARY KEY AUTOINCREMENT, category_id INTEGER NOT NULL, object_id INTEGER NOT NULL, variant_id INTEGER NOT NULL, status TEXT NOT NULL, priority TEXT NOT NULL, reason TEXT NOT NULL, watch_points TEXT, risks TEXT, note TEXT, track TEXT, type TEXT DEFAULT 'manual', market_type_preset TEXT DEFAULT 'standard', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE CASCADE, FOREIGN KEY (object_id) REFERENCES objects(id) ON DELETE CASCADE)");
+  }
 
-  await db.exec("CREATE TABLE IF NOT EXISTS manual_todos (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, priority TEXT NOT NULL, status TEXT NOT NULL, due_date TEXT, note TEXT, track TEXT, type TEXT DEFAULT 'manual', market_type_preset TEXT DEFAULT 'standard', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)");
+  await db.exec("CREATE TABLE IF NOT EXISTS manual_todos (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, priority TEXT NOT NULL, status TEXT NOT NULL, due_date TEXT, note TEXT, domain TEXT NOT NULL DEFAULT 'business', workspace TEXT NOT NULL DEFAULT 'business', track TEXT, type TEXT DEFAULT 'manual', market_type_preset TEXT DEFAULT 'standard', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)");
+  await ensureColumn("manual_todos", "domain", "TEXT NOT NULL DEFAULT 'business'");
+  await ensureColumn("manual_todos", "workspace", "TEXT NOT NULL DEFAULT 'business'");
+  await db.exec("CREATE INDEX IF NOT EXISTS idx_manual_todos_workspace_status ON manual_todos(workspace, status, updated_at DESC)");
 
+  if (shouldInitializeBusinessTables) {
   await db.exec("CREATE TABLE IF NOT EXISTS ended_positions (id INTEGER PRIMARY KEY AUTOINCREMENT, source_id TEXT, category_name TEXT NOT NULL, object_name TEXT NOT NULL, variant_name TEXT, quantity INTEGER NOT NULL, amount REAL NOT NULL, cost REAL NOT NULL, profit REAL NOT NULL, sell_date TEXT NOT NULL, buy_date TEXT NOT NULL, holding_period TEXT, note TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)");
 
   await db.exec("CREATE TABLE IF NOT EXISTS sell_records (id INTEGER PRIMARY KEY AUTOINCREMENT, source_id TEXT, category_name TEXT NOT NULL, object_name TEXT NOT NULL, variant_name TEXT, quantity INTEGER NOT NULL, price REAL NOT NULL, amount REAL NOT NULL, cost REAL NOT NULL, profit REAL NOT NULL, sell_date TEXT NOT NULL, buy_date TEXT NOT NULL, holding_period TEXT, note TEXT, batch_id TEXT, position_id TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)");
@@ -75,12 +83,18 @@ const initDatabase = async (db: Database) => {
   await ensureColumn("speculation_cycle_events", "bid_price_band", "TEXT");
   await db.exec("CREATE INDEX IF NOT EXISTS idx_speculation_cycle_records_pattern ON speculation_cycle_records(cycle_pattern, cycle_stage, category_name)");
   await db.exec("CREATE INDEX IF NOT EXISTS idx_speculation_cycle_events_cycle_time ON speculation_cycle_events(cycle_id, record_time)");
+  }
 
   await db.exec("CREATE TABLE IF NOT EXISTS analysis_annotations (id INTEGER PRIMARY KEY AUTOINCREMENT, module TEXT NOT NULL, entity_type TEXT NOT NULL, entity_key TEXT NOT NULL, annotation_key TEXT NOT NULL, annotation_value TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(module, entity_type, entity_key, annotation_key))");
   await db.exec("CREATE INDEX IF NOT EXISTS idx_analysis_annotations_scope ON analysis_annotations(module, entity_type, annotation_key)");
-  await db.exec("CREATE TABLE IF NOT EXISTS audit_logs (id TEXT PRIMARY KEY, timestamp TEXT NOT NULL, module TEXT NOT NULL, action TEXT NOT NULL, target TEXT NOT NULL, status TEXT NOT NULL, detail TEXT, entity_id TEXT, path TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)");
+  await db.exec("CREATE TABLE IF NOT EXISTS audit_logs (id TEXT PRIMARY KEY, timestamp TEXT NOT NULL, module TEXT NOT NULL, action TEXT NOT NULL, target TEXT NOT NULL, status TEXT NOT NULL, detail TEXT, entity_id TEXT, path TEXT, domain TEXT NOT NULL DEFAULT 'business', workspace TEXT NOT NULL DEFAULT 'business', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)");
+  await ensureColumn("audit_logs", "domain", "TEXT NOT NULL DEFAULT 'business'");
+  await ensureColumn("audit_logs", "workspace", "TEXT NOT NULL DEFAULT 'business'");
   await db.exec("CREATE INDEX IF NOT EXISTS idx_audit_logs_timestamp ON audit_logs(timestamp DESC)");
   await db.exec("CREATE INDEX IF NOT EXISTS idx_audit_logs_module ON audit_logs(module, action, status)");
+  await db.exec("CREATE INDEX IF NOT EXISTS idx_audit_logs_workspace_timestamp ON audit_logs(workspace, timestamp DESC, created_at DESC)");
+  await db.exec("CREATE TABLE IF NOT EXISTS workspace_tags (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, domain TEXT NOT NULL DEFAULT 'business', workspace TEXT NOT NULL DEFAULT 'business', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(workspace, name))");
+  await db.exec("CREATE INDEX IF NOT EXISTS idx_workspace_tags_workspace_name ON workspace_tags(workspace, name)");
   await db.exec("CREATE TABLE IF NOT EXISTS user_preferences (id INTEGER PRIMARY KEY AUTOINCREMENT, user_key TEXT NOT NULL DEFAULT 'default', preference_key TEXT NOT NULL, preference_value TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(user_key, preference_key))");
   await db.exec("CREATE INDEX IF NOT EXISTS idx_user_preferences_user_key ON user_preferences(user_key, preference_key)");
 

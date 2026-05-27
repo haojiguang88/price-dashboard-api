@@ -13,7 +13,10 @@ LIST_URL = "https://xcx1406.ycdongxu.com/index.php/Api/user/newphone"
 DETAIL_URL = "https://xcx1406.ycdongxu.com/index.php/Api/user/getprices"
 CATEGORY_NAME = "游戏机"
 SOURCE_NAME = "档口报价"
-DEFAULT_DB_PATH = "/Volumes/7100/price-dashboard-data/db/price_dashboard_dev.db"
+DEFAULT_DB_PATH = os.environ.get(
+    "BUSINESS_DB_PATH",
+    os.environ.get("DB_PATH", "/Volumes/7100/price-dashboard-data/db/price_dashboard_business_dev.db"),
+)
 
 BASE_PARAMS = {
     "appId": "wxa77a15b31af3c425",

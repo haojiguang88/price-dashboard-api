@@ -5,64 +5,24 @@ import express from "express";
 import cors from "cors";
 import getDb, { getDatabasePath } from "./config/database";
 import { runMigrations } from "./migrations";
-import priceRoutes from "./routes/priceRoutes";
-import masterDataRoutes from "./routes/masterDataRoutes";
-import positionRoutes from "./routes/positionRoutes";
-import followRoutes from "./routes/followRoutes";
-import planRoutes from "./routes/planRoutes";
-import watchlistRoutes from "./routes/watchlistRoutes";
-import todoCenterRoutes from "./routes/todoCenterRoutes";
-import eventRecordsRoutes from "./routes/eventRecordsRoutes";
-import opinionRecordsRoutes from "./routes/opinionRecordsRoutes";
-import missedProjectsRoutes from "./routes/missedProjectsRoutes";
-import tradeReviewsRoutes from "./routes/tradeReviewsRoutes";
-import treeHangingCasesRoutes from "./routes/treeHangingCasesRoutes";
-import marketReviewsRoutes from "./routes/marketReviewsRoutes";
-import ruleExperiencesRoutes from "./routes/ruleExperiencesRoutes";
-import originalPriceRecordsRoutes from "./routes/originalPriceRecordsRoutes";
-import annualPlansRoutes from "./routes/annualPlansRoutes";
-import annualPlanItemsRoutes from "./routes/annualPlanItemsRoutes";
-import annualPlanItemChangesRoutes from "./routes/annualPlanItemChangesRoutes";
-import endedPositionsRoutes from "./routes/endedPositionsRoutes";
-import sellRecordsRoutes from "./routes/sellRecordsRoutes";
-import dashboardRoutes from "./routes/dashboardRoutes";
-import monitorRulesRoutes from "./routes/monitorRulesRoutes";
-import abnormalMonitorRoutes from "./routes/abnormalMonitorRoutes";
-import volatilityAnalysisRoutes from "./routes/volatilityAnalysisRoutes";
-import elasticityAnalysisRoutes from "./routes/elasticityAnalysisRoutes";
-import riskControlRoutes from "./routes/riskControlRoutes";
-import financeRoutes from "./routes/financeRoutes";
-import assetStructureRoutes from "./routes/assetStructureRoutes";
-import metalRoutes from "./routes/metalRoutes";
-import trendPhaseRoutes from "./routes/trendPhaseRoutes";
-import candidatePoolRoutes from "./routes/candidatePoolRoutes";
-import assetUniverseRoutes from "./routes/assetUniverseRoutes";
-import taskCenterRoutes, { cleanupOrphanedFinanceTaskRunsOnStartup, startTaskCenterScheduler } from "./routes/taskCenterRoutes";
-import financialTradePlanRoutes from "./routes/financialTradePlanRoutes";
-import footballLotteryRoutes from "./routes/footballLotteryRoutes";
-import modelTrainingRoutes from "./routes/modelTrainingRoutes";
-import analysisAnnotationRoutes from "./routes/analysisAnnotationRoutes";
-import auditLogRoutes from "./routes/auditLogRoutes";
-import userPreferenceRoutes from "./routes/userPreferenceRoutes";
-import rejectedOpportunitiesRoutes from "./routes/rejectedOpportunitiesRoutes";
-import financeDecisionSupportRoutes from "./routes/financeDecisionSupportRoutes";
-import speculationCycleRoutes from "./routes/speculationCycleRoutes";
-import financeSignalLifecycleRoutes from "./routes/financeSignalLifecycleRoutes";
-import productSupplyEventsRoutes from "./routes/productSupplyEventsRoutes";
-import financeExperimentRoutes from "./routes/financeExperimentRoutes";
-import financeResearchInputRoutes from "./routes/financeResearchInputRoutes";
+import { cleanupTaskCenterStartupState, startTaskCenterScheduler } from "./services/taskCenterScheduler";
+import { registerApiRoutes } from "./routes/apiRouteRegistry";
 
 const app = express();
+const appWorkspace = "business";
 const port = process.env.PORT || 3001;
 
 // 配置 CORS
+const configuredCorsOrigins = String(process.env.CORS_ORIGINS || "")
+  .split(",")
+  .map(origin => origin.trim())
+  .filter(Boolean);
+
 const allowedLocalOrigins = new Set([
   "http://localhost:5173",
   "http://127.0.0.1:5173",
   "http://[::1]:5173",
-  "http://localhost:5174",
-  "http://127.0.0.1:5174",
-  "http://[::1]:5174"
+  ...configuredCorsOrigins
 ]);
 
 app.use(cors({
@@ -76,52 +36,7 @@ app.use(cors({
 }));
 
 app.use(express.json({ limit: "20mb" }));
-app.use("/api", priceRoutes);
-app.use("/api", masterDataRoutes);
-app.use("/api", positionRoutes);
-app.use("/api", followRoutes);
-app.use("/api", planRoutes);
-app.use("/api", watchlistRoutes);
-app.use("/api", todoCenterRoutes);
-app.use("/api", eventRecordsRoutes);
-app.use("/api", opinionRecordsRoutes);
-app.use("/api", missedProjectsRoutes);
-app.use("/api", tradeReviewsRoutes);
-app.use("/api", treeHangingCasesRoutes);
-app.use("/api", marketReviewsRoutes);
-app.use("/api", ruleExperiencesRoutes);
-app.use("/api", originalPriceRecordsRoutes);
-app.use("/api", annualPlansRoutes);
-app.use("/api", annualPlanItemsRoutes);
-app.use("/api", annualPlanItemChangesRoutes);
-app.use("/api", endedPositionsRoutes);
-app.use("/api", sellRecordsRoutes);
-app.use("/api/dashboard", dashboardRoutes);
-app.use("/api/monitor-rules", monitorRulesRoutes);
-app.use("/api/abnormal-monitor", abnormalMonitorRoutes);
-app.use("/api/volatility-analysis", volatilityAnalysisRoutes);
-app.use("/api/elasticity-analysis", elasticityAnalysisRoutes);
-app.use("/api/risk", riskControlRoutes);
-app.use("/api/finance", financeRoutes);
-app.use("/api/finance/assets", assetStructureRoutes);
-app.use("/api/finance/metals", metalRoutes);
-app.use("/api/finance/trend-phase", trendPhaseRoutes);
-app.use("/api/finance", candidatePoolRoutes);
-app.use("/api/finance", assetUniverseRoutes);
-app.use("/api/finance", financialTradePlanRoutes);
-app.use("/api/finance", financeDecisionSupportRoutes);
-app.use("/api/finance", financeSignalLifecycleRoutes);
-app.use("/api/finance", financeExperimentRoutes);
-app.use("/api/finance", financeResearchInputRoutes);
-app.use("/api", taskCenterRoutes);
-app.use("/api/football-lottery", footballLotteryRoutes);
-app.use("/api/model-training", modelTrainingRoutes);
-app.use("/api", analysisAnnotationRoutes);
-app.use("/api", auditLogRoutes);
-app.use("/api", userPreferenceRoutes);
-app.use("/api", rejectedOpportunitiesRoutes);
-app.use("/api", speculationCycleRoutes);
-app.use("/api", productSupplyEventsRoutes);
+registerApiRoutes(app);
 
 app.get("/db-test", async (req, res) => {
   try {
@@ -135,13 +50,14 @@ app.get("/db-test", async (req, res) => {
 });
 
 app.get("/", (req, res) => {
-  res.json({ message: "Price Dashboard API", status: "running", version: "1.0.0" });
+  res.json({ message: "Price Dashboard API", status: "running", version: "1.0.0", app_workspace: appWorkspace });
 });
 
 app.get("/health", (req, res) => {
   const dbPath = getDatabasePath();
   res.json({
     status: "healthy",
+    app_workspace: appWorkspace,
     db_path: dbPath,
     external_storage: dbPath.startsWith("/Volumes/")
   });
@@ -157,7 +73,7 @@ const initDatabase = async () => {
     const dbPath = getDatabasePath();
     await runMigrations(dbPath);
     console.log("Migrations executed successfully");
-    await cleanupOrphanedFinanceTaskRunsOnStartup();
+    await cleanupTaskCenterStartupState();
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     console.error("Failed to initialize database:", errorMessage);

@@ -1,11 +1,101 @@
 // 迁移管理模块
 
+type MigrationScope = 'business' | 'trading' | 'shared';
+
 interface Migration {
   id: string;
   name: string;
+  scope?: MigrationScope;
   sql?: string;
   run?: (db: any) => Promise<void>;
 }
+
+const APP_MIGRATION_SCOPE: Exclude<MigrationScope, 'shared'> = 'business';
+
+const sharedMigrationIds = new Set([
+  '20260501_007',
+  '20260507_001',
+  '20260507_002',
+  '20260507_003',
+  '20260525_003_normalize_task_timestamps',
+  '20260525_005_shared_table_workspaces',
+  '20260525_006_audit_log_workspaces',
+  '20260526_001_workspace_tags'
+]);
+
+const businessMigrationIdPrefixes = [
+  '20260416',
+  '20260417',
+  '20260418',
+  '20260423',
+  '20260424',
+  '20260425',
+  '20260507_004',
+  '20260507_006',
+  '20260512_002',
+  '20260512_003',
+  '20260515_003',
+  '20260516_001',
+  '20260516_002',
+  '20260516_003',
+  '20260516_004'
+];
+
+const tradingMigrationIdPrefixes = [
+  '20260501',
+  '20260503',
+  '20260504',
+  '20260506_002',
+  '20260506_003',
+  '20260507_005',
+  '20260512_001',
+  '20260513',
+  '20260514',
+  '20260515_001',
+  '20260515_002',
+  '20260517',
+  '20260518',
+  '20260519',
+  '20260520',
+  '20260522',
+  '20260523',
+  '20260524',
+  '20260525_001',
+  '20260525_002',
+  '20260525_004'
+];
+
+const businessMigrationPattern = /(original price|annual plan|monitor rule|abnormal monitor|position|sell_record|supply|product|commodity|iphone|pop mart|video game|rejected opportunities|risk control|record tables)/i;
+const tradingMigrationPattern = /\b(finance|financial|tushare|trend phase|candidate pool|asset universe|entry trigger|trade plans|stock|etf|fx daily|precious metal|gold|metal_)/i;
+
+const startsWithAny = (value: string, prefixes: string[]) => (
+  prefixes.some(prefix => value.startsWith(prefix))
+);
+
+const getMigrationText = (migration: Migration) => [
+  migration.id,
+  migration.name,
+  migration.sql || '',
+  migration.run ? String(migration.run) : ''
+].join('\n');
+
+const inferMigrationScope = (migration: Migration): MigrationScope => {
+  if (migration.scope) return migration.scope;
+  if (sharedMigrationIds.has(migration.id)) return 'shared';
+  if (startsWithAny(migration.id, businessMigrationIdPrefixes)) return 'business';
+  if (startsWithAny(migration.id, tradingMigrationIdPrefixes)) return 'trading';
+
+  const migrationText = getMigrationText(migration);
+  if (businessMigrationPattern.test(migrationText)) return 'business';
+  if (tradingMigrationPattern.test(migrationText)) return 'trading';
+  console.warn(`Migration ${migration.id} has no explicit scope; treating it as shared. Add scope before changing this migration.`);
+  return 'shared';
+};
+
+const shouldRunMigration = (migration: Migration) => {
+  const scope = inferMigrationScope(migration);
+  return scope === 'shared' || scope === APP_MIGRATION_SCOPE;
+};
 
 // 迁移列表
 const migrations: Migration[] = [
@@ -1651,6 +1741,34 @@ const migrations: Migration[] = [
     `
   },
   {
+    id: '20260525_001_finance_research_pdf_extractions',
+    name: 'Create finance research announcement PDF extractions',
+    sql: `
+      CREATE TABLE IF NOT EXISTS finance_research_pdf_extractions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        research_input_id INTEGER NOT NULL,
+        symbol TEXT NOT NULL,
+        source_url TEXT NOT NULL,
+        source_hash TEXT NOT NULL,
+        cache_path TEXT,
+        status TEXT NOT NULL,
+        section_business TEXT,
+        section_operations TEXT,
+        section_risks TEXT,
+        extracted_chars INTEGER,
+        extracted_pages INTEGER,
+        warning_json TEXT,
+        error_message TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(research_input_id, source_hash)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_finance_research_pdf_extractions_symbol
+      ON finance_research_pdf_extractions(symbol, updated_at DESC);
+    `
+  },
+  {
     id: '20260515_003_rejected_opportunity_review_category',
     name: 'Add review category to rejected opportunities',
     sql: `
@@ -2543,6 +2661,197 @@ const migrations: Migration[] = [
           updated_at = CURRENT_TIMESTAMP
       WHERE task_key = 'metal_macro_factors_update';
     `
+  },
+  {
+    id: '20260525_005_shared_table_workspaces',
+    name: 'Add workspace boundary to shared task and todo tables',
+    run: async (db: any) => {
+      await ensureMigrationColumn(db, 'task_center_tasks', 'workspace', "TEXT NOT NULL DEFAULT 'platform'");
+      await ensureMigrationColumn(db, 'task_center_runs', 'domain', 'TEXT');
+      await ensureMigrationColumn(db, 'task_center_runs', 'workspace', "TEXT NOT NULL DEFAULT 'platform'");
+      await ensureMigrationColumn(db, 'manual_todos', 'domain', "TEXT NOT NULL DEFAULT 'business'");
+      await ensureMigrationColumn(db, 'manual_todos', 'workspace', "TEXT NOT NULL DEFAULT 'business'");
+
+      await dbExec(db, `
+        UPDATE task_center_tasks
+        SET workspace = CASE
+          WHEN lower(COALESCE(domain, '')) IN ('finance', 'metals', 'stock', 'etf')
+            OR lower(COALESCE(task_key, '')) LIKE 'finance_%'
+            OR lower(COALESCE(task_type, '')) LIKE 'finance_%'
+            OR lower(COALESCE(task_key, '')) IN ('metals_daily_update', 'fx_daily_rates_update', 'metal_macro_factors_update', 'precious_metals_training_pipeline')
+            THEN 'trading'
+          WHEN lower(COALESCE(domain, '')) IN ('business', 'price', 'commodity')
+            OR lower(COALESCE(task_key, '')) IN ('iphone_price_update', 'video_game_machine_price_update', 'popmart_price_update', 'commodity_metals_price_update')
+            OR lower(COALESCE(task_type, '')) LIKE 'commodity_%'
+            THEN 'business'
+          ELSE 'platform'
+        END
+        WHERE workspace IS NULL OR workspace = '' OR workspace = 'platform';
+
+        UPDATE task_center_runs
+        SET domain = (
+              SELECT t.domain
+              FROM task_center_tasks t
+              WHERE t.id = task_center_runs.task_id
+              LIMIT 1
+            ),
+            workspace = (
+              SELECT t.workspace
+              FROM task_center_tasks t
+              WHERE t.id = task_center_runs.task_id
+              LIMIT 1
+            )
+        WHERE EXISTS (
+          SELECT 1 FROM task_center_tasks t WHERE t.id = task_center_runs.task_id
+        );
+
+        UPDATE task_center_runs
+        SET domain = (
+              SELECT t.domain
+              FROM task_center_tasks t
+              WHERE t.task_key = task_center_runs.task_key
+              LIMIT 1
+            ),
+            workspace = (
+              SELECT t.workspace
+              FROM task_center_tasks t
+              WHERE t.task_key = task_center_runs.task_key
+              LIMIT 1
+            )
+        WHERE EXISTS (
+          SELECT 1 FROM task_center_tasks t WHERE t.task_key = task_center_runs.task_key
+        )
+          AND (domain IS NULL OR domain = '' OR workspace IS NULL OR workspace = '' OR workspace = 'platform');
+
+        UPDATE task_center_runs
+        SET domain = CASE
+          WHEN lower(COALESCE(task_key, '')) LIKE 'finance_%' THEN 'finance'
+          WHEN lower(COALESCE(task_key, '')) LIKE 'metal_%'
+            OR lower(COALESCE(task_key, '')) LIKE 'metals_%'
+            OR lower(COALESCE(task_key, '')) LIKE 'precious_metals_%' THEN 'metals'
+          WHEN lower(COALESCE(task_key, '')) LIKE 'commodity_%'
+            OR lower(COALESCE(task_key, '')) IN ('iphone_price_update', 'video_game_machine_price_update', 'popmart_price_update') THEN 'price'
+          ELSE 'platform'
+        END
+        WHERE domain IS NULL OR domain = '';
+
+        UPDATE task_center_runs
+        SET workspace = CASE
+          WHEN lower(COALESCE(domain, '')) IN ('finance', 'metals', 'stock', 'etf')
+            OR lower(COALESCE(task_key, '')) LIKE 'finance_%'
+            OR lower(COALESCE(task_key, '')) LIKE 'metal_%'
+            OR lower(COALESCE(task_key, '')) LIKE 'metals_%'
+            OR lower(COALESCE(task_key, '')) LIKE 'precious_metals_%'
+            THEN 'trading'
+          WHEN lower(COALESCE(domain, '')) IN ('business', 'price', 'commodity')
+            OR lower(COALESCE(task_key, '')) IN ('iphone_price_update', 'video_game_machine_price_update', 'popmart_price_update', 'commodity_metals_price_update')
+            OR lower(COALESCE(task_key, '')) LIKE 'commodity_%'
+            THEN 'business'
+          ELSE 'platform'
+        END
+        WHERE workspace IS NULL OR workspace = '' OR workspace = 'platform';
+
+        UPDATE manual_todos
+        SET workspace = CASE
+          WHEN lower(COALESCE(title, '') || ' ' || COALESCE(note, '')) LIKE '%etf%'
+            OR COALESCE(title, '') || ' ' || COALESCE(note, '') LIKE '%金融%'
+            OR COALESCE(title, '') || ' ' || COALESCE(note, '') LIKE '%股票%'
+            OR COALESCE(title, '') || ' ' || COALESCE(note, '') LIKE '%A股%'
+            OR COALESCE(title, '') || ' ' || COALESCE(note, '') LIKE '%入场%'
+            OR COALESCE(title, '') || ' ' || COALESCE(note, '') LIKE '%模型%'
+            OR COALESCE(title, '') || ' ' || COALESCE(note, '') LIKE '%信号%'
+            OR COALESCE(title, '') || ' ' || COALESCE(note, '') LIKE '%白银%'
+            OR COALESCE(title, '') || ' ' || COALESCE(note, '') LIKE '%黄金%'
+            OR COALESCE(title, '') || ' ' || COALESCE(note, '') LIKE '%贵金属%'
+            OR lower(COALESCE(title, '') || ' ' || COALESCE(note, '')) LIKE '%tushare%'
+            OR lower(COALESCE(title, '') || ' ' || COALESCE(note, '')) LIKE '%lof%'
+            THEN 'trading'
+          ELSE 'business'
+        END
+        WHERE workspace IS NULL OR workspace = '' OR workspace = 'business';
+
+        UPDATE manual_todos
+        SET domain = CASE
+          WHEN workspace = 'trading' THEN 'finance'
+          WHEN domain IS NULL OR domain = '' THEN 'business'
+          ELSE domain
+        END;
+
+        CREATE INDEX IF NOT EXISTS idx_task_center_tasks_workspace_schedule
+        ON task_center_tasks(workspace, enabled, schedule_time, priority);
+
+        CREATE INDEX IF NOT EXISTS idx_task_center_runs_workspace_started
+        ON task_center_runs(workspace, started_at DESC, id DESC);
+
+        CREATE INDEX IF NOT EXISTS idx_manual_todos_workspace_status
+        ON manual_todos(workspace, status, updated_at DESC);
+      `);
+    }
+  },
+  {
+    id: '20260525_006_audit_log_workspaces',
+    name: 'Add workspace boundary to audit logs',
+    run: async (db: any) => {
+      await ensureMigrationColumn(db, 'audit_logs', 'domain', "TEXT NOT NULL DEFAULT 'business'");
+      await ensureMigrationColumn(db, 'audit_logs', 'workspace', "TEXT NOT NULL DEFAULT 'business'");
+
+      await dbExec(db, `
+        UPDATE audit_logs
+        SET workspace = CASE
+          WHEN lower(COALESCE(path, '')) LIKE '/finance%'
+            OR lower(COALESCE(path, '')) LIKE '/model-training%'
+            OR lower(COALESCE(path, '')) LIKE '/experiments%'
+            OR COALESCE(module, '') LIKE '%金融%'
+            OR COALESCE(module, '') LIKE '%模型%'
+            OR COALESCE(target, '') LIKE '%金融%'
+            OR COALESCE(target, '') LIKE '%入池%'
+            OR COALESCE(target, '') LIKE '%贵金属%'
+            THEN 'trading'
+          WHEN lower(COALESCE(path, '')) LIKE '/price%'
+            OR lower(COALESCE(path, '')) LIKE '/plan%'
+            OR lower(COALESCE(path, '')) LIKE '/position%'
+            OR lower(COALESCE(path, '')) LIKE '/risk-control%'
+            OR lower(COALESCE(path, '')) LIKE '/review%'
+            OR lower(COALESCE(path, '')) LIKE '/rules%'
+            OR COALESCE(module, '') LIKE '%商品%'
+            OR COALESCE(module, '') LIKE '%价格%'
+            OR COALESCE(target, '') LIKE '%iPhone%'
+            OR COALESCE(target, '') LIKE '%Pop Mart%'
+            THEN 'business'
+          ELSE workspace
+        END
+        WHERE workspace IS NULL OR workspace = '' OR workspace = 'business';
+
+        UPDATE audit_logs
+        SET domain = CASE
+          WHEN workspace = 'trading' THEN 'finance'
+          WHEN workspace = 'platform' THEN 'platform'
+          ELSE 'business'
+        END
+        WHERE domain IS NULL OR domain = '' OR domain = 'business';
+
+        CREATE INDEX IF NOT EXISTS idx_audit_logs_workspace_timestamp
+        ON audit_logs(workspace, timestamp DESC, created_at DESC);
+      `);
+    }
+  },
+  {
+    id: '20260526_001_workspace_tags',
+    name: 'Create workspace scoped tags',
+    sql: `
+      CREATE TABLE IF NOT EXISTS workspace_tags (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        domain TEXT NOT NULL DEFAULT 'business',
+        workspace TEXT NOT NULL DEFAULT 'business',
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(workspace, name)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_workspace_tags_workspace_name
+      ON workspace_tags(workspace, name);
+    `
   }
 ];
 
@@ -2607,6 +2916,14 @@ function dbClose(db: any): Promise<void> {
 }
 
 const quoteMigrationIdentifier = (value: string) => `"${value.replace(/"/g, '""')}"`;
+
+async function ensureMigrationColumn(db: any, tableName: string, column: string, definition: string): Promise<void> {
+  const columns = await dbAll<any>(db, `PRAGMA table_info(${quoteMigrationIdentifier(tableName)})`);
+  const exists = columns.some((item: any) => String(item.name) === column);
+  if (!exists) {
+    await dbExec(db, `ALTER TABLE ${quoteMigrationIdentifier(tableName)} ADD COLUMN ${quoteMigrationIdentifier(column)} ${definition}`);
+  }
+}
 
 async function ensurePredictionSnapshotMigrationColumn(db: any, column: string, definition: string): Promise<void> {
   const columns = await dbAll<any>(db, `PRAGMA table_info(finance_experiment_prediction_snapshots)`);
@@ -2824,6 +3141,13 @@ export async function runMigrations(dbPath: string): Promise<void> {
       const row = await dbGet(db, 'SELECT id FROM migrations WHERE id = ?', [migration.id]);
       if (row) {
         console.log(`Migration ${migration.id} already executed, skipping`);
+        continue;
+      }
+
+      if (!shouldRunMigration(migration)) {
+        const scope = inferMigrationScope(migration);
+        console.log(`Migration ${migration.id} is ${scope}-only, skipped for ${APP_MIGRATION_SCOPE}`);
+        await dbRun(db, 'INSERT INTO migrations (id, name) VALUES (?, ?)', [migration.id, `[skipped:${APP_MIGRATION_SCOPE}] ${migration.name}`]);
         continue;
       }
 

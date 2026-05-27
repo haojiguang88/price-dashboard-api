@@ -678,7 +678,13 @@ def fetch_sw_daily(conn, pro, trade_date):
 
 def main():
     parser = argparse.ArgumentParser(description="Fetch Tushare supplemental finance data into local SQLite.")
-    parser.add_argument("--db", default=os.environ.get("DB_PATH", "/Volumes/7100/price-dashboard-data/db/price_dashboard_dev.db"))
+    parser.add_argument(
+        "--db",
+        default=os.environ.get(
+            "BUSINESS_DB_PATH",
+            os.environ.get("DB_PATH", "/Volumes/7100/price-dashboard-data/db/price_dashboard_business_dev.db"),
+        ),
+    )
     parser.add_argument("--days", type=int, default=60)
     parser.add_argument("--start-date", default=None)
     parser.add_argument("--end-date", default=None)

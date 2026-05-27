@@ -11,7 +11,10 @@ import requests
 
 API_URL = "https://www.dehuangshop.com/goods/getGoldAndSilver"
 SOURCE_NAME = "德璜小程序贵金属"
-DEFAULT_DB_PATH = "/Volumes/7100/price-dashboard-data/db/price_dashboard_dev.db"
+DEFAULT_DB_PATH = os.environ.get(
+    "BUSINESS_DB_PATH",
+    os.environ.get("DB_PATH", "/Volumes/7100/price-dashboard-data/db/price_dashboard_business_dev.db"),
+)
 
 HEADERS = {
     "User-Agent": (

@@ -5,14 +5,18 @@ import sys
 
 from fetch_asset_universe import classify_etf_universe_types
 
-DEFAULT_DB_PATH = "/Volumes/7100/price-dashboard-data/db/price_dashboard_dev.db"
+DEFAULT_DB_PATH = os.environ.get(
+    "BUSINESS_DB_PATH",
+    os.environ.get("DB_PATH", "/Volumes/7100/price-dashboard-data/db/price_dashboard_business_dev.db"),
+)
 
 
 def main():
     db_path = (
         sys.argv[1]
         if len(sys.argv) > 1
-        else os.environ.get("DB_PATH")
+        else os.environ.get("BUSINESS_DB_PATH")
+        or os.environ.get("DB_PATH")
         or DEFAULT_DB_PATH
     )
 
