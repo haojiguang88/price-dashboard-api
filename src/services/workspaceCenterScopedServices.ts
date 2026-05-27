@@ -72,7 +72,7 @@ export interface ScopedWorkspaceCenterServices {
   taskCenter: ScopedWorkspaceTaskCenterService;
 }
 
-export const createWorkspaceTodoService = (workspace: WorkspaceKey): ScopedWorkspaceTodoService => ({
+const createWorkspaceTodoService = (workspace: WorkspaceKey): ScopedWorkspaceTodoService => ({
   getTodoCenterData: () => getTodoCenterDataBase(workspace),
   listManualTodos: () => listManualTodosBase(workspace),
   getManualTodo: (id) => getManualTodoBase(id, workspace),
@@ -81,27 +81,27 @@ export const createWorkspaceTodoService = (workspace: WorkspaceKey): ScopedWorks
   deleteManualTodo: (id) => deleteManualTodoBase(id, workspace)
 });
 
-export const createWorkspaceAuditService = (workspace: WorkspaceKey): ScopedWorkspaceAuditService => ({
+const createWorkspaceAuditService = (workspace: WorkspaceKey): ScopedWorkspaceAuditService => ({
   listAuditLogs: (options) => listAuditLogsBase({ ...options, workspace }),
   createAuditLog: (body) => createAuditLogBase(withWorkspaceAuditLog(workspace, body)),
   createAuditLogs: (entries) => createAuditLogsBase(entries.map((entry) => withWorkspaceAuditLog(workspace, entry)))
 });
 
-export const createWorkspaceTagService = (workspace: WorkspaceKey): ScopedWorkspaceTagService => ({
+const createWorkspaceTagService = (workspace: WorkspaceKey): ScopedWorkspaceTagService => ({
   listWorkspaceTags: () => listWorkspaceTagsBase(workspace),
   createWorkspaceTag: (body) => createWorkspaceTagBase(withWorkspaceBody(workspace, body)),
   updateWorkspaceTag: (id, body) => updateWorkspaceTagBase(id, withWorkspaceBody(workspace, body)),
   deleteWorkspaceTag: (id) => deleteWorkspaceTagBase(id, workspace)
 });
 
-export const createWorkspaceTaskCenterService = (workspace: WorkspaceKey): ScopedWorkspaceTaskCenterService => ({
+const createWorkspaceTaskCenterService = (workspace: WorkspaceKey): ScopedWorkspaceTaskCenterService => ({
   getTaskCenterSnapshot: (compactInput) => getTaskCenterSnapshotBase(workspace, compactInput),
   getTaskCenterTask: (id) => getTaskCenterTaskBase(id, workspace),
   updateTaskCenterTask: (id, body) => updateTaskCenterTaskBase(id, withWorkspaceBody(workspace, body), workspace),
   deleteTaskCenterTask: (id) => deleteTaskCenterTaskBase(id, workspace)
 });
 
-export const createWorkspaceCenterServices = (workspace: WorkspaceKey): ScopedWorkspaceCenterServices => ({
+const createWorkspaceCenterServices = (workspace: WorkspaceKey): ScopedWorkspaceCenterServices => ({
   todo: createWorkspaceTodoService(workspace),
   audit: createWorkspaceAuditService(workspace),
   tag: createWorkspaceTagService(workspace),
