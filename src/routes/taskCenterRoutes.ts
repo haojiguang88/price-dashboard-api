@@ -3,7 +3,7 @@ import { execFile } from 'child_process';
 import path from 'path';
 import { promisify } from 'util';
 import getDb, { getDatabasePath } from '../config/database';
-import { inferTaskWorkspace, normalizeWorkspace, resolveDomainForWorkspace, type WorkspaceKey } from '../utils/workspace';
+import { inferTaskWorkspace, resolveDomainForWorkspace, type WorkspaceKey } from '../utils/workspace';
 import {
   businessWorkspaceCenterServices,
   type ScopedWorkspaceTaskCenterService
@@ -32,19 +32,19 @@ const lastScheduledRunByTaskWindow = new Map<string, string>();
 const DEFAULT_TASK_TIMEOUT_MS = 30 * 60 * 1000;
 const MODEL_TRAINING_ROOT = process.env.MODEL_TRAINING_ROOT || '/Volumes/7100/model-training';
 const DEFAULT_TASK_PYTHON = path.join(MODEL_TRAINING_ROOT, 'venv', 'bin', 'python');
+const RUNTIME_TASK_WORKSPACE: WorkspaceKey = 'business';
 
 function getTaskDomain(task: Partial<TaskRow>) {
   const workspace = inferTaskWorkspace(task);
   return resolveDomainForWorkspace(task.domain, workspace);
 }
 
-function getRuntimeTaskWorkspaceScope(): WorkspaceKey | null {
-  const workspace = normalizeWorkspace(process.env.APP_WORKSPACE);
-  return workspace === 'business' ? workspace : null;
+function getRuntimeTaskWorkspaceScope(): WorkspaceKey {
+  return RUNTIME_TASK_WORKSPACE;
 }
 
 function isTaskInRuntimeWorkspace(task: Partial<TaskRow>, runtimeWorkspace = getRuntimeTaskWorkspaceScope()) {
-  return !runtimeWorkspace || inferTaskWorkspace(task) === runtimeWorkspace;
+  return inferTaskWorkspace(task) === runtimeWorkspace;
 }
 
 function parseConfig(configJson?: string) {
