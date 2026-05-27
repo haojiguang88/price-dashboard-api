@@ -210,15 +210,13 @@ async function expireSupersededScheduledRuns(db: any, taskKey: string, taskName:
 export async function cleanupOrphanedTaskRunsOnStartup() {
   const db = await getDb();
   const runtimeWorkspace = getRuntimeTaskWorkspaceScope();
-  const workspaceCondition = runtimeWorkspace ? ' AND workspace = ?' : '';
-  const params = runtimeWorkspace ? [runtimeWorkspace] : [];
   const rows = await db.all(
     `SELECT id, task_key
      FROM task_center_runs
      WHERE status = 'running'
-       ${workspaceCondition}
+       AND workspace = ?
      ORDER BY datetime(REPLACE(started_at, 'T', ' ')) ASC, id ASC`,
-    params
+    [runtimeWorkspace]
   );
   if (rows.length === 0) return;
 
@@ -238,10 +236,8 @@ export async function cleanupOrphanedTaskRunsOnStartup() {
            last_run_at = ?,
            updated_at = ?
        WHERE task_key = ?
-       ${runtimeWorkspace ? 'AND workspace = ?' : ''}`,
-      runtimeWorkspace
-        ? [message, now, now, row.task_key, runtimeWorkspace]
-        : [message, now, now, row.task_key]
+       AND workspace = ?`,
+      [message, now, now, row.task_key, runtimeWorkspace]
     );
   }
   console.warn(`[task-center] cleaned ${rows.length} orphaned business task run(s) after backend startup`);
