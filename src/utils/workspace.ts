@@ -19,6 +19,8 @@ export type AuditWorkspaceInput = WorkspaceInput & {
   detail?: unknown;
 };
 
+const BUSINESS_DOMAINS = new Set(['business', 'price', 'commodity']);
+
 export function normalizeWorkspace(value: unknown): WorkspaceKey | null {
   const raw = String(value || '').trim().toLowerCase();
   return WORKSPACES.includes(raw as WorkspaceKey) ? raw as WorkspaceKey : null;
@@ -52,37 +54,22 @@ export function appendWorkspaceCondition(
 
 export function resolveDomainForWorkspace(
   domainInput: unknown,
-  workspace: WorkspaceKey,
-  _tradingDomain = 'finance'
+  workspace: WorkspaceKey
 ) {
   const domain = String(domainInput || '').trim().toLowerCase();
-  if (domain && domain !== 'trading') return domain;
+  if (BUSINESS_DOMAINS.has(domain)) return domain;
   return workspace;
 }
 
 export function inferManualWorkspace(input: WorkspaceInput): WorkspaceKey {
   const explicit = normalizeWorkspace(input.workspace);
   if (explicit) return explicit;
-
-  const domain = String(input.domain || '').trim().toLowerCase();
-  if (['business', 'price', 'commodity'].includes(domain)) return 'business';
   return 'business';
 }
 
 export function inferTaskWorkspace(task: TaskWorkspaceInput): WorkspaceKey {
   const explicit = normalizeWorkspace(task.workspace);
   if (explicit) return explicit;
-
-  const domain = String(task.domain || '').trim().toLowerCase();
-  const taskKey = String(task.task_key || '').trim().toLowerCase();
-  const taskType = String(task.task_type || '').trim().toLowerCase();
-  if (
-    ['business', 'price', 'commodity'].includes(domain)
-    || ['iphone_price_update', 'video_game_machine_price_update', 'popmart_price_update', 'commodity_metals_price_update'].includes(taskKey)
-    || taskType.startsWith('commodity_')
-  ) {
-    return 'business';
-  }
   return 'business';
 }
 
@@ -109,10 +96,5 @@ export function inferAuditWorkspace(input: AuditWorkspaceInput): WorkspaceKey {
 
   const pathWorkspace = inferWorkspaceFromPath(input.path);
   if (pathWorkspace) return pathWorkspace;
-
-  const text = `${input.module || ''} ${input.target || ''} ${input.detail || ''}`;
-  if (text.includes('商品') || text.includes('价格')) {
-    return 'business';
-  }
   return 'business';
 }
