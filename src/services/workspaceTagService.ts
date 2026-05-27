@@ -54,8 +54,8 @@ export const createWorkspaceTag = async (input: { name?: unknown; domain?: unkno
       [name, domain, workspace, now, now]
     );
     return db.get(
-      `SELECT id, name, domain, workspace, created_at, updated_at FROM workspace_tags WHERE id = ?`,
-      [result.lastID]
+      `SELECT id, name, domain, workspace, created_at, updated_at FROM workspace_tags WHERE id = ? AND workspace = ?`,
+      [result.lastID, workspace]
     );
   } catch (error) {
     if (isUniqueConstraintError(error)) throw new WorkspaceCenterError(409, "标签已存在");
