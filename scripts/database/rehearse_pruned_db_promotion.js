@@ -253,8 +253,8 @@ This is a rehearsal artifact. The stable DB paths were not overwritten.
 
 Before running the generated promotion script:
 
-1. Stop platform API/frontend launchd services.
-2. Stop any split-dev or dry-run API processes.
+1. Stop business/trading API/frontend launchd services.
+2. Stop any local dev or dry-run API processes.
 3. Regenerate split preview, validate it, regenerate prune SQL, and materialize a fresh pruned copy after writers are stopped.
 4. Re-run \`npm run db:promote-pruned-rehearsal\`.
 5. Review the new report and generated scripts.
