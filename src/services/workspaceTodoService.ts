@@ -17,9 +17,10 @@ type ManualTodoInput = {
 
 const getScopedIdFilter = (id: string, workspaceInput: unknown) => {
   const workspace = normalizeWorkspace(workspaceInput);
+  if (!workspace) throw new WorkspaceCenterError(400, "缺少有效工作区");
   return {
-    whereClause: workspace ? "id = ? AND workspace = ?" : "id = ?",
-    params: workspace ? [id, workspace] : [id],
+    whereClause: "id = ? AND workspace = ?",
+    params: [id, workspace],
     workspace
   };
 };
