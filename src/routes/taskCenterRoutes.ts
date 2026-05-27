@@ -181,12 +181,13 @@ function formatChinaDateTime(value?: string | null) {
 }
 
 async function expireSupersededScheduledRuns(db: any, taskKey: string, taskName: string, now = new Date()) {
+  const runtimeWorkspace = getRuntimeTaskWorkspaceScope();
   const runningRows = await db.all(
     `SELECT id, started_at
      FROM task_center_runs
-     WHERE task_key = ? AND status = 'running'
+     WHERE task_key = ? AND status = 'running' AND workspace = ?
      ORDER BY datetime(REPLACE(started_at, 'T', ' ')) DESC, id DESC`,
-    [taskKey]
+    [taskKey, runtimeWorkspace]
   );
   const staleRows = runningRows.filter((row: any) => {
     const startedMs = new Date(row.started_at).getTime();
@@ -248,13 +249,14 @@ export async function cleanupOrphanedTaskRunsOnStartup() {
 
 async function getScheduledTaskRunningReason(db: any, task: TaskRow, now = new Date()) {
   await expireSupersededScheduledRuns(db, task.task_key, task.name || task.task_key, now);
+  const runtimeWorkspace = getRuntimeTaskWorkspaceScope();
   const running = await db.get(
     `SELECT id, started_at
      FROM task_center_runs
-     WHERE task_key = ? AND status = 'running'
+     WHERE task_key = ? AND status = 'running' AND workspace = ?
      ORDER BY datetime(REPLACE(started_at, 'T', ' ')) DESC, id DESC
      LIMIT 1`,
-    [task.task_key]
+    [task.task_key, runtimeWorkspace]
   );
   if (!running) return null;
   return `${task.name || task.task_key}正在执行，本轮定时跳过，避免重复启动。开始时间：${formatChinaDateTime(running.started_at)}`;
