@@ -265,7 +265,7 @@ function getTaskPython(config: any) {
 }
 
 async function runPythonJsonScript(config: any, scriptName: string, args: string[], fallbackMessage: string) {
-  const scriptPath = path.join(__dirname, '../../scripts/finance', scriptName);
+  const scriptPath = path.join(__dirname, '../../scripts/business', scriptName);
   const { stdout, stderr } = await execFileAsync(getTaskPython(config), [scriptPath, ...args], {
     cwd: path.join(__dirname, '../..'),
     maxBuffer: 1024 * 1024 * 10,
