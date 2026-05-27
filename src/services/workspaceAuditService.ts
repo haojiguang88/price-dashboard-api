@@ -79,6 +79,7 @@ const upsertAuditLog = async (db: any, entry: ReturnType<typeof normalizeAuditLo
         domain = excluded.domain,
         workspace = excluded.workspace,
         updated_at = excluded.updated_at
+      WHERE audit_logs.workspace = excluded.workspace
     `,
     [
       entry.id,
@@ -97,14 +98,16 @@ const upsertAuditLog = async (db: any, entry: ReturnType<typeof normalizeAuditLo
     ]
   );
 
-  return db.get(
+  const row = await db.get(
     `
       SELECT id, timestamp, module, action, target, status, detail, entity_id, path, domain, workspace, created_at, updated_at
       FROM audit_logs
-      WHERE id = ?
+      WHERE id = ? AND workspace = ?
     `,
-    [entry.id]
+    [entry.id, entry.workspace]
   );
+  if (!row) throw new WorkspaceCenterError(409, "审计日志 ID 已存在于其它工作区");
+  return row;
 };
 
 export const listAuditLogs = async (options: ListAuditLogOptions) => {
@@ -125,7 +128,8 @@ export const listAuditLogs = async (options: ListAuditLogOptions) => {
     where.push("status = ?");
     params.push(String(options.status));
   }
-  appendWorkspaceCondition(where, params, options.workspace);
+  const workspace = appendWorkspaceCondition(where, params, options.workspace);
+  if (!workspace) throw new WorkspaceCenterError(400, "缺少有效工作区");
 
   return db.all(
     `
