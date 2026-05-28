@@ -1,4 +1,3 @@
-import type { WorkspaceKey } from "../utils/workspace";
 import {
   createManualTodo as createManualTodoBase,
   deleteManualTodo as deleteManualTodoBase,
@@ -26,14 +25,16 @@ import {
   updateTaskCenterTask as updateTaskCenterTaskBase
 } from "./workspaceTaskCenterService";
 
-const withWorkspaceBody = <T extends Record<string, any>>(workspace: WorkspaceKey, body: T = {} as T) => ({
+const CURRENT_WORKSPACE = "business" as const;
+
+const withCurrentWorkspaceBody = <T extends Record<string, any>>(body: T = {} as T) => ({
   ...body,
-  workspace
+  workspace: CURRENT_WORKSPACE
 });
 
-const withWorkspaceAuditLog = (workspace: WorkspaceKey, body: AuditLogInput = {}): AuditLogInput => ({
+const withCurrentWorkspaceAuditLog = (body: AuditLogInput = {}): AuditLogInput => ({
   ...body,
-  workspace
+  workspace: CURRENT_WORKSPACE
 });
 
 export interface ScopedWorkspaceTodoService {
@@ -72,42 +73,32 @@ export interface ScopedWorkspaceCenterServices {
   taskCenter: ScopedWorkspaceTaskCenterService;
 }
 
-const createWorkspaceTodoService = (workspace: WorkspaceKey): ScopedWorkspaceTodoService => ({
-  getTodoCenterData: () => getTodoCenterDataBase(workspace),
-  listManualTodos: () => listManualTodosBase(workspace),
-  getManualTodo: (id) => getManualTodoBase(id, workspace),
-  createManualTodo: (body) => createManualTodoBase(withWorkspaceBody(workspace, body)),
-  updateManualTodo: (id, body) => updateManualTodoBase(id, withWorkspaceBody(workspace, body), workspace),
-  deleteManualTodo: (id) => deleteManualTodoBase(id, workspace)
-});
-
-const createWorkspaceAuditService = (workspace: WorkspaceKey): ScopedWorkspaceAuditService => ({
-  listAuditLogs: (options) => listAuditLogsBase({ ...options, workspace }),
-  createAuditLog: (body) => createAuditLogBase(withWorkspaceAuditLog(workspace, body)),
-  createAuditLogs: (entries) => createAuditLogsBase(entries.map((entry) => withWorkspaceAuditLog(workspace, entry)))
-});
-
-const createWorkspaceTagService = (workspace: WorkspaceKey): ScopedWorkspaceTagService => ({
-  listWorkspaceTags: () => listWorkspaceTagsBase(workspace),
-  createWorkspaceTag: (body) => createWorkspaceTagBase(withWorkspaceBody(workspace, body)),
-  updateWorkspaceTag: (id, body) => updateWorkspaceTagBase(id, withWorkspaceBody(workspace, body)),
-  deleteWorkspaceTag: (id) => deleteWorkspaceTagBase(id, workspace)
-});
-
-const createWorkspaceTaskCenterService = (workspace: WorkspaceKey): ScopedWorkspaceTaskCenterService => ({
-  getTaskCenterSnapshot: (compactInput) => getTaskCenterSnapshotBase(workspace, compactInput),
-  getTaskCenterTask: (id) => getTaskCenterTaskBase(id, workspace),
-  updateTaskCenterTask: (id, body) => updateTaskCenterTaskBase(id, withWorkspaceBody(workspace, body), workspace),
-  deleteTaskCenterTask: (id) => deleteTaskCenterTaskBase(id, workspace)
-});
-
-const createWorkspaceCenterServices = (workspace: WorkspaceKey): ScopedWorkspaceCenterServices => ({
-  todo: createWorkspaceTodoService(workspace),
-  audit: createWorkspaceAuditService(workspace),
-  tag: createWorkspaceTagService(workspace),
-  taskCenter: createWorkspaceTaskCenterService(workspace)
-});
-
-export const businessWorkspaceCenterServices = createWorkspaceCenterServices("business");
+export const businessWorkspaceCenterServices: ScopedWorkspaceCenterServices = {
+  todo: {
+    getTodoCenterData: () => getTodoCenterDataBase(CURRENT_WORKSPACE),
+    listManualTodos: () => listManualTodosBase(CURRENT_WORKSPACE),
+    getManualTodo: (id) => getManualTodoBase(id, CURRENT_WORKSPACE),
+    createManualTodo: (body) => createManualTodoBase(withCurrentWorkspaceBody(body)),
+    updateManualTodo: (id, body) => updateManualTodoBase(id, withCurrentWorkspaceBody(body), CURRENT_WORKSPACE),
+    deleteManualTodo: (id) => deleteManualTodoBase(id, CURRENT_WORKSPACE)
+  },
+  audit: {
+    listAuditLogs: (options) => listAuditLogsBase({ ...options, workspace: CURRENT_WORKSPACE }),
+    createAuditLog: (body) => createAuditLogBase(withCurrentWorkspaceAuditLog(body)),
+    createAuditLogs: (entries) => createAuditLogsBase(entries.map(withCurrentWorkspaceAuditLog))
+  },
+  tag: {
+    listWorkspaceTags: () => listWorkspaceTagsBase(CURRENT_WORKSPACE),
+    createWorkspaceTag: (body) => createWorkspaceTagBase(withCurrentWorkspaceBody(body)),
+    updateWorkspaceTag: (id, body) => updateWorkspaceTagBase(id, withCurrentWorkspaceBody(body)),
+    deleteWorkspaceTag: (id) => deleteWorkspaceTagBase(id, CURRENT_WORKSPACE)
+  },
+  taskCenter: {
+    getTaskCenterSnapshot: (compactInput) => getTaskCenterSnapshotBase(CURRENT_WORKSPACE, compactInput),
+    getTaskCenterTask: (id) => getTaskCenterTaskBase(id, CURRENT_WORKSPACE),
+    updateTaskCenterTask: (id, body) => updateTaskCenterTaskBase(id, withCurrentWorkspaceBody(body), CURRENT_WORKSPACE),
+    deleteTaskCenterTask: (id) => deleteTaskCenterTaskBase(id, CURRENT_WORKSPACE)
+  }
+};
 
 export type { AuditLogInput };
