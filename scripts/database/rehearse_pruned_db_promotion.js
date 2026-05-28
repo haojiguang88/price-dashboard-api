@@ -256,7 +256,7 @@ Before running the generated promotion script:
 1. Stop business/trading API/frontend launchd services.
 2. Stop any local dev or dry-run API processes.
 3. Regenerate split preview, validate it, regenerate prune SQL, and materialize a fresh pruned copy after writers are stopped.
-4. Re-run \`npm run db:promote-pruned-rehearsal\`.
+4. Re-run \`npm run db:archive:promote-pruned-rehearsal\`.
 5. Review the new report and generated scripts.
 6. Only then run the generated promotion script manually.
 7. Start business/trading services and run health + boundary smoke tests.

@@ -288,7 +288,7 @@ function buildPrunePlan(manifest, workspacePlans, sharedPlans) {
 
 async function main() {
   if (!fs.existsSync(manifestPath)) {
-    throw new Error(`Split manifest not found: ${manifestPath}. Run npm run db:split-preview first.`);
+    throw new Error(`Split manifest not found: ${manifestPath}. Run npm run db:archive:split-preview first.`);
   }
 
   const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));

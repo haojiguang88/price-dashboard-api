@@ -83,7 +83,7 @@ function buildSqlForSide(report, side) {
   if (sourceDrift.length > 0) {
     lines.push(
       `-- WARNING: live source changed after the preview was created (${sourceDrift.length} tables drifted).`,
-      '-- Before real execution: stop backend/scheduler, rerun db:split-preview and db:split-validate, then regenerate this dry-run.',
+      '-- Before real execution: stop backend/scheduler, rerun db:archive:split-preview and db:archive:split-validate, then regenerate this dry-run.',
       ''
     );
   }
@@ -157,7 +157,7 @@ function buildSqlForSide(report, side) {
 
 function main() {
   if (!fs.existsSync(reportPath)) {
-    throw new Error(`Validation report not found: ${reportPath}. Run npm run db:split-validate first.`);
+    throw new Error(`Validation report not found: ${reportPath}. Run npm run db:archive:split-validate first.`);
   }
 
   const report = JSON.parse(fs.readFileSync(reportPath, 'utf8'));

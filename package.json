@@ -9,12 +9,12 @@
     "build": "tsc",
     "start": "npm run start:business",
     "start:business": "sh -c 'PORT=${PORT:-3001} BUSINESS_DB_PATH=${BUSINESS_DB_PATH:-/Volumes/7100/price-dashboard-data/db/price_dashboard_business_dev.db} node dist/index.js'",
-    "db:split-preview": "node scripts/database/split_database_preview.js",
-    "db:split-validate": "node scripts/database/validate_split_preview.js",
-    "db:prune-dry-run": "node scripts/database/generate_prune_dry_run.js",
+    "db:archive:split-preview": "node scripts/database/split_database_preview.js",
+    "db:archive:split-validate": "node scripts/database/validate_split_preview.js",
+    "db:archive:prune-dry-run": "node scripts/database/generate_prune_dry_run.js",
     "db:workspace-center-table-dry-run": "node scripts/database/generate_workspace_center_table_boundary_dry_run.js",
-    "db:split-pruned-copy": "node scripts/database/materialize_pruned_split_copies.js",
-    "db:promote-pruned-rehearsal": "node scripts/database/rehearse_pruned_db_promotion.js",
+    "db:archive:split-pruned-copy": "node scripts/database/materialize_pruned_split_copies.js",
+    "db:archive:promote-pruned-rehearsal": "node scripts/database/rehearse_pruned_db_promotion.js",
     "restart:local": "sh -c 'port=${PORT:-3001}; pid=$(lsof -tiTCP:$port -sTCP:LISTEN || true); if [ -n \"$pid\" ]; then kill $pid; fi; npm run start:business'"
   },
   "keywords": [
