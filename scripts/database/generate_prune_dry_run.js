@@ -2,6 +2,9 @@
 
 const fs = require('fs');
 const path = require('path');
+const { requireArchivedSplitToolConfirmation } = require('./archiveGuard');
+
+requireArchivedSplitToolConfirmation('generate_prune_dry_run');
 
 const DEFAULT_DATABASE_PATH = '/Volumes/7100/price-dashboard-data/db/price_dashboard_dev.db';
 const sourcePath = process.env.DB_PATH || DEFAULT_DATABASE_PATH;

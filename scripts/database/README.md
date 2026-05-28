@@ -18,12 +18,15 @@ npm run db:workspace-center-table-dry-run
 Archived recovery tools:
 
 ```bash
-npm run db:archive:split-preview
-npm run db:archive:split-validate
-npm run db:archive:prune-dry-run
-npm run db:archive:split-pruned-copy
-npm run db:archive:promote-pruned-rehearsal
+CONFIRM_ARCHIVED_SPLIT_TOOL=YES npm run db:archive:split-preview
+CONFIRM_ARCHIVED_SPLIT_TOOL=YES npm run db:archive:split-validate
+CONFIRM_ARCHIVED_SPLIT_TOOL=YES npm run db:archive:prune-dry-run
+CONFIRM_ARCHIVED_SPLIT_TOOL=YES npm run db:archive:split-pruned-copy
+CONFIRM_ARCHIVED_SPLIT_TOOL=YES npm run db:archive:promote-pruned-rehearsal
 ```
+
+The confirmation variable is required intentionally. Running these tools without it
+will exit before reading or writing split artifacts.
 
 Final validation gate before any future DB promotion:
 

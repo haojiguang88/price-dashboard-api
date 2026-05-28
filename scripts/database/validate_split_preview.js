@@ -3,6 +3,9 @@
 const fs = require('fs');
 const path = require('path');
 const sqlite3 = require('sqlite3');
+const { requireArchivedSplitToolConfirmation } = require('./archiveGuard');
+
+requireArchivedSplitToolConfirmation('validate_split_preview');
 
 const DEFAULT_DATABASE_PATH = '/Volumes/7100/price-dashboard-data/db/price_dashboard_dev.db';
 const sourcePath = process.env.DB_PATH || DEFAULT_DATABASE_PATH;
