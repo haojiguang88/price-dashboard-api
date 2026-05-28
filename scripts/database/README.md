@@ -25,3 +25,11 @@ npm run db:archive:split-pruned-copy
 npm run db:archive:promote-pruned-rehearsal
 ```
 
+Final validation gate before any future DB promotion:
+
+1. Stop all API/task writers first.
+2. Back up the current stable DBs to the external disk.
+3. Regenerate split preview, validation, prune SQL, pruned copies, and promotion rehearsal in one fresh run.
+4. Confirm `integrity_check` or `quick_check(1)` is `ok` for both stable targets.
+5. Confirm `manual_todos`, `task_center_tasks`, `task_center_runs`, `audit_logs`, and `workspace_tags` contain only their own workspace rows.
+6. Run full `foreign_key_check` in the final freeze window. Do not put that slow check into every lightweight smoke run.
