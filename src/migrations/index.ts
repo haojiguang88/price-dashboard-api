@@ -1,6 +1,6 @@
 // 迁移管理模块
 
-type MigrationScope = 'business' | 'trading' | 'shared';
+type MigrationScope = 'business' | 'trading' | 'cross_app';
 
 interface Migration {
   id: string;
@@ -10,9 +10,9 @@ interface Migration {
   run?: (db: any) => Promise<void>;
 }
 
-const APP_MIGRATION_SCOPE: Exclude<MigrationScope, 'shared'> = 'business';
+const APP_MIGRATION_SCOPE: Exclude<MigrationScope, 'cross_app'> = 'business';
 
-const sharedMigrationIds = new Set([
+const crossAppMigrationIds = new Set([
   '20260501_007',
   '20260507_001',
   '20260507_002',
@@ -81,20 +81,20 @@ const getMigrationText = (migration: Migration) => [
 
 const inferMigrationScope = (migration: Migration): MigrationScope => {
   if (migration.scope) return migration.scope;
-  if (sharedMigrationIds.has(migration.id)) return 'shared';
+  if (crossAppMigrationIds.has(migration.id)) return 'cross_app';
   if (startsWithAny(migration.id, businessMigrationIdPrefixes)) return 'business';
   if (startsWithAny(migration.id, tradingMigrationIdPrefixes)) return 'trading';
 
   const migrationText = getMigrationText(migration);
   if (businessMigrationPattern.test(migrationText)) return 'business';
   if (tradingMigrationPattern.test(migrationText)) return 'trading';
-  console.warn(`Migration ${migration.id} has no explicit scope; treating it as shared. Add scope before changing this migration.`);
-  return 'shared';
+  console.warn(`Migration ${migration.id} has no explicit scope; treating it as cross-app. Add scope before changing this migration.`);
+  return 'cross_app';
 };
 
 const shouldRunMigration = (migration: Migration) => {
   const scope = inferMigrationScope(migration);
-  return scope === 'shared' || scope === APP_MIGRATION_SCOPE;
+  return scope === 'cross_app' || scope === APP_MIGRATION_SCOPE;
 };
 
 // 迁移列表
@@ -2664,8 +2664,10 @@ const migrations: Migration[] = [
   },
   {
     id: '20260525_005_shared_table_workspaces',
-    name: 'Add workspace boundary to shared task and todo tables',
+    name: 'Add workspace boundary to cross-app task and todo tables',
     run: async (db: any) => {
+      // Historical compatibility: the migration id and legacy 'platform' value are kept unchanged
+      // so old single-app databases can still be normalized without replaying applied migrations.
       await ensureMigrationColumn(db, 'task_center_tasks', 'workspace', "TEXT NOT NULL DEFAULT 'platform'");
       await ensureMigrationColumn(db, 'task_center_runs', 'domain', 'TEXT');
       await ensureMigrationColumn(db, 'task_center_runs', 'workspace', "TEXT NOT NULL DEFAULT 'platform'");
