@@ -1,5 +1,7 @@
 import express from 'express';
 import getDb from '../config/database';
+import { validateRequiredDateOnly } from '../utils/dateValidation';
+import { normalizeQueryText, parsePagination, toLikePattern } from '../utils/listQuery';
 
 const router = express.Router();
 
@@ -9,20 +11,30 @@ const router = express.Router();
 router.post('/events', async (req, res) => {
   try {
     const db = await getDb();
-    const { title, track, event_date, event_type, description, related_object, impact, source, note } = req.body;
+    const { event_date, event_type, description, related_object, impact, source, note } = req.body;
+    const title = normalizeQueryText(req.body?.title);
+    const track = normalizeQueryText(req.body?.track);
     
     // 校验字段
-    if (!title || !track || !event_date) {
-      return res.status(400).json({ success: false, message: '缺少必填字段: title, track, event_date' });
+    if (!title || !track) {
+      return res.status(400).json({ success: false, message: '缺少必填字段: title, track' });
+    }
+    const eventDate = validateRequiredDateOnly(event_date, '事件日期');
+    if (!eventDate.ok) {
+      return res.status(400).json({ success: false, message: eventDate.message });
     }
     
     // 插入记录
     const now = new Date().toISOString();
     const result = await db.run(
       'INSERT INTO event_records (title, track, event_date, event_type, description, related_object, impact, source, note, is_deleted, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [title, track, event_date, event_type, description, related_object, impact, source, note, 0, now, now]
+      [title, track, eventDate.value, event_type, description, related_object, impact, source, note, 0, now, now]
     );
-    res.json({ success: true, data: { id: result.lastID } });
+    const createdRecord = await db.get(
+      'SELECT id, title, track, event_date, event_type, description, related_object, impact, source, note, created_at, updated_at FROM event_records WHERE id = ? AND is_deleted = 0',
+      [result.lastID]
+    );
+    res.json({ success: true, data: createdRecord || { id: result.lastID } });
   } catch (error) {
     console.error('Error creating event record:', error);
     res.status(500).json({ success: false, message: '新增事件记录失败' });
@@ -34,15 +46,21 @@ router.put('/events/:id', async (req, res) => {
   try {
     const db = await getDb();
     const { id } = req.params;
-    const { title, track, event_date, event_type, description, related_object, impact, source, note } = req.body;
+    const { event_date, event_type, description, related_object, impact, source, note } = req.body;
+    const title = normalizeQueryText(req.body?.title);
+    const track = normalizeQueryText(req.body?.track);
     
     // 校验字段
-    if (!title || !track || !event_date) {
-      return res.status(400).json({ success: false, message: '缺少必填字段: title, track, event_date' });
+    if (!title || !track) {
+      return res.status(400).json({ success: false, message: '缺少必填字段: title, track' });
+    }
+    const eventDate = validateRequiredDateOnly(event_date, '事件日期');
+    if (!eventDate.ok) {
+      return res.status(400).json({ success: false, message: eventDate.message });
     }
     
     // 检查记录是否存在
-    const existingRecord = await db.get('SELECT * FROM event_records WHERE id = ?', [id]);
+    const existingRecord = await db.get('SELECT * FROM event_records WHERE id = ? AND is_deleted = 0', [id]);
     if (!existingRecord) {
       return res.status(404).json({ success: false, message: '事件记录不存在' });
     }
@@ -51,9 +69,13 @@ router.put('/events/:id', async (req, res) => {
     const now = new Date().toISOString();
     const result = await db.run(
       'UPDATE event_records SET title = ?, track = ?, event_date = ?, event_type = ?, description = ?, related_object = ?, impact = ?, source = ?, note = ?, updated_at = ? WHERE id = ?',
-      [title, track, event_date, event_type, description, related_object, impact, source, note, now, id]
+      [title, track, eventDate.value, event_type, description, related_object, impact, source, note, now, id]
     );
-    res.json({ success: true, data: { changes: result.changes } });
+    const updatedRecord = await db.get(
+      'SELECT id, title, track, event_date, event_type, description, related_object, impact, source, note, created_at, updated_at FROM event_records WHERE id = ? AND is_deleted = 0',
+      [id]
+    );
+    res.json({ success: true, data: updatedRecord ? { ...updatedRecord, changes: result.changes } : { changes: result.changes } });
   } catch (error) {
     console.error('Error updating event record:', error);
     res.status(500).json({ success: false, message: '编辑事件记录失败' });
@@ -86,34 +108,33 @@ router.delete('/events/:id', async (req, res) => {
 router.get('/events', async (req, res) => {
   try {
     const db = await getDb();
-    const { q, track, event_type, page = 1, pageSize = 10 } = req.query;
+    const { q, track, event_type, page, pageSize } = req.query;
+    const keyword = normalizeQueryText(q);
+    const trackFilter = normalizeQueryText(track);
+    const eventTypeFilter = normalizeQueryText(event_type);
+    const pagination = parsePagination(page, pageSize);
     
     // 构建查询条件
     let whereClause = 'is_deleted = 0';
     const params: any[] = [];
     
     // 搜索条件
-    if (q) {
+    if (keyword) {
       whereClause += ' AND (title LIKE ? OR description LIKE ? OR related_object LIKE ? OR impact LIKE ? OR source LIKE ? OR note LIKE ? OR track LIKE ? OR event_type LIKE ?)';
-      const searchTerm = `%${q}%`;
+      const searchTerm = toLikePattern(keyword);
       params.push(searchTerm, searchTerm, searchTerm, searchTerm, searchTerm, searchTerm, searchTerm, searchTerm);
     }
     
     // 精确筛选条件
-    if (track) {
+    if (trackFilter) {
       whereClause += ' AND track = ?';
-      params.push(track);
+      params.push(trackFilter);
     }
     
-    if (event_type) {
+    if (eventTypeFilter) {
       whereClause += ' AND event_type = ?';
-      params.push(event_type);
+      params.push(eventTypeFilter);
     }
-    
-    // 计算分页
-    const pageNum = parseInt(page as string) || 1;
-    const size = parseInt(pageSize as string) || 10;
-    const offset = (pageNum - 1) * size;
     
     // 获取总数
     const countQuery = `SELECT COUNT(*) as total FROM event_records WHERE ${whereClause}`;
@@ -129,7 +150,7 @@ router.get('/events', async (req, res) => {
       LIMIT ? OFFSET ?
     `;
     
-    const dataParams = [...params, size, offset];
+    const dataParams = [...params, pagination.limit, pagination.offset];
     const items = await db.all(dataQuery, dataParams);
     
     // 返回结果
@@ -138,8 +159,8 @@ router.get('/events', async (req, res) => {
       data: {
         items,
         total,
-        page: pageNum,
-        pageSize: size
+        page: pagination.page,
+        pageSize: pagination.pageSize
       }
     });
   } catch (error) {

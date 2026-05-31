@@ -1,5 +1,12 @@
 import express from "express";
 import getDb from "../config/database";
+import {
+  annualPlanLinkJoins,
+  annualPlanLinkSelectFields,
+  serializeAnnualPlanLink,
+  validateOptionalAnnualPlanItemLink
+} from "../utils/annualPlanLinks";
+import { validateActiveMasterTargetByIds } from "../utils/masterData";
 
 const router = express.Router();
 
@@ -8,31 +15,41 @@ const validStatuses = ["watching", "waiting_price", "waiting_signal", "archived"
 // 验证优先级枚举
 const validPriorities = ["high", "medium", "low"];
 
+const serializeWatchItem = (item: any) => ({
+  ...item,
+  annual_plan_item_id: item.annual_plan_item_id ? String(item.annual_plan_item_id) : "",
+  annual_plan_item: serializeAnnualPlanLink(item)
+});
+
 // 获取列表
 router.get("/watchlist", async (req, res) => {
   try {
     const db = await getDb();
-    const items = await db.all(`
+    const rows = await db.all(`
       SELECT 
         w.id, 
         w.category_id, 
         w.object_id, 
         w.variant_id, 
+        w.annual_plan_item_id,
         c.name as category_name, 
         o.name as object_name, 
         CASE WHEN w.variant_id = 0 THEN '' ELSE v.name END as variant_name, 
         w.status, 
         w.priority, 
         w.reason, 
-        w.updated_at
+        w.updated_at,
+        ${annualPlanLinkSelectFields}
       FROM watchlist_items w
-      LEFT JOIN categories c ON w.category_id = c.id
-      LEFT JOIN objects o ON w.object_id = o.id
-      LEFT JOIN variants v ON w.variant_id = v.id
+      JOIN categories c ON w.category_id = c.id AND COALESCE(c.is_archived, 0) = 0
+      JOIN objects o ON w.object_id = o.id AND o.category_id = c.id AND COALESCE(o.is_archived, 0) = 0
+      LEFT JOIN variants v ON w.variant_id = v.id AND v.object_id = o.id AND COALESCE(v.is_archived, 0) = 0
+      ${annualPlanLinkJoins('w')}
+      WHERE w.variant_id = 0 OR v.id IS NOT NULL
       ORDER BY w.updated_at DESC
     `);
     
-    res.json({ success: true, data: items, message: "获取观察池列表成功" });
+    res.json({ success: true, data: rows.map(serializeWatchItem), message: "获取观察池列表成功" });
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     res.status(500).json({ success: false, message: "获取观察池列表失败", error: errorMessage });
@@ -51,6 +68,7 @@ router.get("/watchlist/:id", async (req, res) => {
         w.category_id, 
         w.object_id, 
         w.variant_id, 
+        w.annual_plan_item_id,
         c.name as category_name, 
         o.name as object_name, 
         CASE WHEN w.variant_id = 0 THEN '' ELSE v.name END as variant_name, 
@@ -61,19 +79,21 @@ router.get("/watchlist/:id", async (req, res) => {
         w.risks, 
         w.note, 
         w.created_at, 
-        w.updated_at
+        w.updated_at,
+        ${annualPlanLinkSelectFields}
       FROM watchlist_items w
-      LEFT JOIN categories c ON w.category_id = c.id
-      LEFT JOIN objects o ON w.object_id = o.id
-      LEFT JOIN variants v ON w.variant_id = v.id
-      WHERE w.id = ?
+      JOIN categories c ON w.category_id = c.id AND COALESCE(c.is_archived, 0) = 0
+      JOIN objects o ON w.object_id = o.id AND o.category_id = c.id AND COALESCE(o.is_archived, 0) = 0
+      LEFT JOIN variants v ON w.variant_id = v.id AND v.object_id = o.id AND COALESCE(v.is_archived, 0) = 0
+      ${annualPlanLinkJoins('w')}
+      WHERE w.id = ? AND (w.variant_id = 0 OR v.id IS NOT NULL)
     `, [id]);
     
     if (!item) {
       return res.status(404).json({ success: false, message: "观察池项目不存在" });
     }
     
-    res.json({ success: true, data: item, message: "获取观察池项目详情成功" });
+    res.json({ success: true, data: serializeWatchItem(item), message: "获取观察池项目详情成功" });
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     res.status(500).json({ success: false, message: "获取观察池项目详情失败", error: errorMessage });
@@ -92,7 +112,8 @@ router.post("/watchlist", async (req, res) => {
       reason,
       watch_points,
       risks,
-      note
+      note,
+      annual_plan_item_id
     } = req.body;
     
     // 基础校验
@@ -111,12 +132,44 @@ router.post("/watchlist", async (req, res) => {
     
     const now = new Date().toISOString();
     const db = await getDb();
+    const masterTarget = await validateActiveMasterTargetByIds(db, category_id, object_id, variant_id);
+    if (!masterTarget.ok) {
+      return res.status(400).json({ success: false, message: masterTarget.message });
+    }
+
+    const annualPlanLink = await validateOptionalAnnualPlanItemLink(db, annual_plan_item_id);
+    if (!annualPlanLink.ok) {
+      return res.status(400).json({ success: false, message: annualPlanLink.message });
+    }
+
+    const duplicateItem = await db.get(
+      `SELECT id FROM watchlist_items
+       WHERE category_id = ? AND object_id = ? AND variant_id = ?
+       LIMIT 1`,
+      [masterTarget.target.category_id, masterTarget.target.object_id, masterTarget.target.variant_id]
+    );
+    if (duplicateItem) {
+      return res.status(409).json({ success: false, message: "该对象已在观察池中" });
+    }
     
     const result = await db.run(
       `INSERT INTO watchlist_items 
-       (category_id, object_id, variant_id, status, priority, reason, watch_points, risks, note, created_at, updated_at) 
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [category_id, object_id, variant_id, status, priority, reason, watch_points, risks, note, now, now]
+       (category_id, object_id, variant_id, annual_plan_item_id, status, priority, reason, watch_points, risks, note, created_at, updated_at) 
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        masterTarget.target.category_id,
+        masterTarget.target.object_id,
+        masterTarget.target.variant_id,
+        annualPlanLink.value,
+        status,
+        priority,
+        reason,
+        watch_points,
+        risks,
+        note,
+        now,
+        now
+      ]
     );
     
     res.json({ success: true, data: { id: result.lastID }, message: "新增观察池项目成功" });
@@ -139,7 +192,8 @@ router.put("/watchlist/:id", async (req, res) => {
       reason,
       watch_points,
       risks,
-      note
+      note,
+      annual_plan_item_id
     } = req.body;
     
     // 基础校验
@@ -160,16 +214,52 @@ router.put("/watchlist/:id", async (req, res) => {
     const db = await getDb();
     
     // 检查项目是否存在
-    const existingItem = await db.get("SELECT id FROM watchlist_items WHERE id = ?", [id]);
+    const existingItem = await db.get("SELECT id, annual_plan_item_id FROM watchlist_items WHERE id = ?", [id]);
     if (!existingItem) {
       return res.status(404).json({ success: false, message: "观察池项目不存在" });
+    }
+
+    const masterTarget = await validateActiveMasterTargetByIds(db, category_id, object_id, variant_id);
+    if (!masterTarget.ok) {
+      return res.status(400).json({ success: false, message: masterTarget.message });
+    }
+
+    const annualPlanItemIdInput = Object.prototype.hasOwnProperty.call(req.body, 'annual_plan_item_id')
+      ? annual_plan_item_id
+      : existingItem.annual_plan_item_id;
+    const annualPlanLink = await validateOptionalAnnualPlanItemLink(db, annualPlanItemIdInput);
+    if (!annualPlanLink.ok) {
+      return res.status(400).json({ success: false, message: annualPlanLink.message });
+    }
+
+    const duplicateItem = await db.get(
+      `SELECT id FROM watchlist_items
+       WHERE category_id = ? AND object_id = ? AND variant_id = ? AND id != ?
+       LIMIT 1`,
+      [masterTarget.target.category_id, masterTarget.target.object_id, masterTarget.target.variant_id, id]
+    );
+    if (duplicateItem) {
+      return res.status(409).json({ success: false, message: "该对象已在观察池中" });
     }
     
     const result = await db.run(
       `UPDATE watchlist_items 
-       SET category_id = ?, object_id = ?, variant_id = ?, status = ?, priority = ?, reason = ?, watch_points = ?, risks = ?, note = ?, updated_at = ? 
+       SET category_id = ?, object_id = ?, variant_id = ?, annual_plan_item_id = ?, status = ?, priority = ?, reason = ?, watch_points = ?, risks = ?, note = ?, updated_at = ? 
        WHERE id = ?`,
-      [category_id, object_id, variant_id, status, priority, reason, watch_points, risks, note, now, id]
+      [
+        masterTarget.target.category_id,
+        masterTarget.target.object_id,
+        masterTarget.target.variant_id,
+        annualPlanLink.value,
+        status,
+        priority,
+        reason,
+        watch_points,
+        risks,
+        note,
+        now,
+        id
+      ]
     );
     
     res.json({ success: true, data: { id, changes: result.changes }, message: "编辑观察池项目成功" });

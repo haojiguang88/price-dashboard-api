@@ -1,5 +1,6 @@
 import express from 'express';
 import getDb from '../config/database';
+import { validateActiveRuleScope } from '../utils/masterData';
 
 const router = express.Router();
 
@@ -7,10 +8,12 @@ const router = express.Router();
 const validRuleTypes = [
   'price_change_daily',
   'price_change_period',
+  'consecutive_change',
   'new_high',
   'new_low',
   'historical_new_high',
   'historical_new_low',
+  'amplitude',
   'volatility'
 ];
 
@@ -35,14 +38,68 @@ const validateStatus = (status: string): boolean => {
   return validStatuses.includes(status);
 };
 
-// 验证 JSON 字符串
-const validateJsonString = (jsonString: string): boolean => {
+const parseParamsJson = (jsonString: string): Record<string, any> | null => {
   try {
-    JSON.parse(jsonString);
-    return true;
+    const parsed = JSON.parse(jsonString);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
   } catch {
-    return false;
+    return null;
   }
+};
+
+const isPositiveNumber = (value: unknown) => {
+  const numericValue = Number(value);
+  return Number.isFinite(numericValue) && numericValue > 0;
+};
+
+const isIntegerAtLeast = (value: unknown, minimum: number) => {
+  const numericValue = Number(value);
+  return Number.isInteger(numericValue) && numericValue >= minimum;
+};
+
+const validateRuleParams = (ruleType: string, paramsJson: string): { ok: true } | { ok: false; message: string } => {
+  const params = parseParamsJson(paramsJson);
+  if (!params) return { ok: false, message: "无效的 params_json 格式" };
+
+  if (ruleType === 'price_change_daily' || ruleType === 'price_change_period') {
+    if (!isPositiveNumber(params.threshold)) {
+      return { ok: false, message: "价格涨跌规则必须配置大于 0 的 threshold" };
+    }
+    if (params.direction !== 'up' && params.direction !== 'down') {
+      return { ok: false, message: "价格涨跌规则 direction 必须是 up 或 down" };
+    }
+    if (params.threshold_unit !== 'percent' && params.threshold_unit !== 'amount') {
+      return { ok: false, message: "价格涨跌规则 threshold_unit 必须是 percent 或 amount" };
+    }
+    if (ruleType === 'price_change_period' && !isIntegerAtLeast(params.period, 2)) {
+      return { ok: false, message: "区间涨跌规则 period 必须是不小于 2 的整数" };
+    }
+    return { ok: true };
+  }
+
+  if (ruleType === 'consecutive_change') {
+    return isIntegerAtLeast(params.days, 2)
+      ? { ok: true }
+      : { ok: false, message: "连续涨跌规则 days 必须是不小于 2 的整数" };
+  }
+
+  if (ruleType === 'new_high' || ruleType === 'new_low') {
+    return isIntegerAtLeast(params.days, 2)
+      ? { ok: true }
+      : { ok: false, message: "阶段新高/新低规则 days 必须是不小于 2 的整数" };
+  }
+
+  if (ruleType === 'amplitude' || ruleType === 'volatility') {
+    return isPositiveNumber(params.threshold)
+      ? { ok: true }
+      : { ok: false, message: "波动规则必须配置大于 0 的 threshold" };
+  }
+
+  if (ruleType === 'historical_new_high' || ruleType === 'historical_new_low') {
+    return { ok: true };
+  }
+
+  return { ok: false, message: "无效的规则类型" };
 };
 
 // 获取规则列表
@@ -145,40 +202,41 @@ router.post('/', async (req, res) => {
       return;
     }
     
-    // 验证 JSON 字符串
-    if (!validateJsonString(params_json)) {
-      res.status(400).json({ status: "error", message: "无效的 params_json 格式" });
+    const paramsValidation = validateRuleParams(rule_type, params_json);
+    if (!paramsValidation.ok) {
+      res.status(400).json({ status: "error", message: paramsValidation.message });
       return;
     }
     
-    // 验证 scope_id
-    if (scope_type === 'category' && !scope_id) {
-      res.status(400).json({ status: "error", message: "scope_type 为 category 时，scope_id 必填" });
-      return;
-    }
-    if (scope_type === 'object' && !scope_id) {
-      res.status(400).json({ status: "error", message: "scope_type 为 object 时，scope_id 必填" });
+    const scopeValidation = await validateActiveRuleScope(db, scope_type, scope_id);
+    if (!scopeValidation.ok) {
+      res.status(400).json({ status: "error", message: scopeValidation.message });
       return;
     }
     
     const now = new Date().toISOString();
     
-    // 先插入记录，rule_code 暂时为空
-    const result = await db.run(
-      `INSERT INTO monitor_rules 
-       (rule_code, rule_name, rule_type, scope_type, scope_id, params_json, action_text, description, status, created_at, updated_at) 
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      ['', rule_name, rule_type, scope_type, scope_id, params_json, action_text, description, status, now, now]
-    );
-    
-    // 生成 rule_code
-    const ruleCode = 'R' + String(result.lastID).padStart(3, '0');
-    
-    // 更新 rule_code
-    await db.run(
-      'UPDATE monitor_rules SET rule_code = ?, updated_at = ? WHERE id = ?',
-      [ruleCode, now, result.lastID]
-    );
+    const tempRuleCode = `TEMP-${now}-${Math.random().toString(36).slice(2, 10)}`;
+    await db.run("BEGIN IMMEDIATE TRANSACTION");
+    let result;
+    try {
+      result = await db.run(
+        `INSERT INTO monitor_rules
+         (rule_code, rule_name, rule_type, scope_type, scope_id, params_json, action_text, description, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [tempRuleCode, rule_name, rule_type, scope_type, scopeValidation.normalizedScopeId, params_json, action_text, description, status, now, now]
+      );
+
+      const ruleCode = 'R' + String(result.lastID).padStart(3, '0');
+      await db.run(
+        'UPDATE monitor_rules SET rule_code = ?, updated_at = ? WHERE id = ?',
+        [ruleCode, now, result.lastID]
+      );
+      await db.run("COMMIT");
+    } catch (error) {
+      await db.run("ROLLBACK").catch(() => undefined);
+      throw error;
+    }
     
     const newRule = await db.get('SELECT * FROM monitor_rules WHERE id = ?', [result.lastID]);
     
@@ -226,19 +284,15 @@ router.put('/:id', async (req, res) => {
       return;
     }
     
-    // 验证 JSON 字符串
-    if (!validateJsonString(params_json)) {
-      res.status(400).json({ status: "error", message: "无效的 params_json 格式" });
+    const paramsValidation = validateRuleParams(rule_type, params_json);
+    if (!paramsValidation.ok) {
+      res.status(400).json({ status: "error", message: paramsValidation.message });
       return;
     }
     
-    // 验证 scope_id
-    if (existingRule.scope_type === 'category' && !scope_id) {
-      res.status(400).json({ status: "error", message: "scope_type 为 category 时，scope_id 必填" });
-      return;
-    }
-    if (existingRule.scope_type === 'object' && !scope_id) {
-      res.status(400).json({ status: "error", message: "scope_type 为 object 时，scope_id 必填" });
+    const scopeValidation = await validateActiveRuleScope(db, existingRule.scope_type, scope_id);
+    if (!scopeValidation.ok) {
+      res.status(400).json({ status: "error", message: scopeValidation.message });
       return;
     }
     
@@ -254,7 +308,7 @@ router.put('/:id', async (req, res) => {
        description = ?, 
        updated_at = ? 
        WHERE id = ?`,
-      [rule_name, rule_type, scope_id, params_json, action_text, description, now, id]
+      [rule_name, rule_type, scopeValidation.normalizedScopeId, params_json, action_text, description, now, id]
     );
     
     const updatedRule = await db.get('SELECT * FROM monitor_rules WHERE id = ?', [id]);

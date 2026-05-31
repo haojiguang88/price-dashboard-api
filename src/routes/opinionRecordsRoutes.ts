@@ -1,5 +1,7 @@
 import express from 'express';
 import getDb from '../config/database';
+import { validateOptionalDateOnly } from '../utils/dateValidation';
+import { normalizeQueryText, parsePagination, toLikePattern } from '../utils/listQuery';
 
 const router = express.Router();
 
@@ -30,20 +32,34 @@ router.use(async (_req, _res, next) => {
 router.post('/opinions', async (req, res) => {
   try {
     const db = await getDb();
-    const { title, track, person_name, source_platform, opinion_date, validation_status, summary_result, original_opinion, my_interpretation, validation_result, validation_date, person_observation, note } = req.body;
+    const { person_name, source_platform, opinion_date, validation_status, summary_result, original_opinion, my_interpretation, validation_result, validation_date, person_observation, note } = req.body;
+    const title = normalizeQueryText(req.body?.title);
+    const track = normalizeQueryText(req.body?.track);
     
     // 校验字段
     if (!title || !track) {
       return res.status(400).json({ success: false, message: '缺少必填字段: title, track' });
+    }
+    const opinionDate = validateOptionalDateOnly(opinion_date, '观点日期');
+    if (!opinionDate.ok) {
+      return res.status(400).json({ success: false, message: opinionDate.message });
+    }
+    const validationDate = validateOptionalDateOnly(validation_date, '验证日期');
+    if (!validationDate.ok) {
+      return res.status(400).json({ success: false, message: validationDate.message });
     }
     
     // 插入记录
     const now = new Date().toISOString();
     const result = await db.run(
       'INSERT INTO opinion_records (title, track, person_name, source_platform, opinion_date, validation_status, summary_result, original_opinion, my_interpretation, validation_result, validation_date, person_observation, note, is_deleted, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [title, track, person_name, source_platform, opinion_date, validation_status, summary_result, original_opinion, my_interpretation, validation_result, validation_date, person_observation, note, 0, now, now]
+      [title, track, person_name, source_platform, opinionDate.value, validation_status, summary_result, original_opinion, my_interpretation, validation_result, validationDate.value, person_observation, note, 0, now, now]
     );
-    res.json({ success: true, data: { id: result.lastID } });
+    const createdRecord = await db.get(
+      'SELECT id, title, track, person_name, source_platform, opinion_date, validation_status, summary_result, original_opinion, my_interpretation, validation_result, validation_date, person_observation, note, created_at, updated_at FROM opinion_records WHERE id = ? AND is_deleted = 0',
+      [result.lastID]
+    );
+    res.json({ success: true, data: createdRecord || { id: result.lastID } });
   } catch (error) {
     console.error('Error creating opinion record:', error);
     res.status(500).json({ success: false, message: '新增观点记录失败' });
@@ -55,11 +71,21 @@ router.put('/opinions/:id', async (req, res) => {
   try {
     const db = await getDb();
     const { id } = req.params;
-    const { title, track, person_name, source_platform, opinion_date, validation_status, summary_result, original_opinion, my_interpretation, validation_result, validation_date, person_observation, note } = req.body;
+    const { person_name, source_platform, opinion_date, validation_status, summary_result, original_opinion, my_interpretation, validation_result, validation_date, person_observation, note } = req.body;
+    const title = normalizeQueryText(req.body?.title);
+    const track = normalizeQueryText(req.body?.track);
     
     // 校验字段
     if (!title || !track) {
       return res.status(400).json({ success: false, message: '缺少必填字段: title, track' });
+    }
+    const opinionDate = validateOptionalDateOnly(opinion_date, '观点日期');
+    if (!opinionDate.ok) {
+      return res.status(400).json({ success: false, message: opinionDate.message });
+    }
+    const validationDate = validateOptionalDateOnly(validation_date, '验证日期');
+    if (!validationDate.ok) {
+      return res.status(400).json({ success: false, message: validationDate.message });
     }
     
     // 检查记录是否存在
@@ -72,9 +98,13 @@ router.put('/opinions/:id', async (req, res) => {
     const now = new Date().toISOString();
     const result = await db.run(
       'UPDATE opinion_records SET title = ?, track = ?, person_name = ?, source_platform = ?, opinion_date = ?, validation_status = ?, summary_result = ?, original_opinion = ?, my_interpretation = ?, validation_result = ?, validation_date = ?, person_observation = ?, note = ?, updated_at = ? WHERE id = ?',
-      [title, track, person_name, source_platform, opinion_date, validation_status, summary_result, original_opinion, my_interpretation, validation_result, validation_date, person_observation, note, now, id]
+      [title, track, person_name, source_platform, opinionDate.value, validation_status, summary_result, original_opinion, my_interpretation, validation_result, validationDate.value, person_observation, note, now, id]
     );
-    res.json({ success: true, data: { changes: result.changes } });
+    const updatedRecord = await db.get(
+      'SELECT id, title, track, person_name, source_platform, opinion_date, validation_status, summary_result, original_opinion, my_interpretation, validation_result, validation_date, person_observation, note, created_at, updated_at FROM opinion_records WHERE id = ? AND is_deleted = 0',
+      [id]
+    );
+    res.json({ success: true, data: updatedRecord ? { ...updatedRecord, changes: result.changes } : { changes: result.changes } });
   } catch (error) {
     console.error('Error updating opinion record:', error);
     res.status(500).json({ success: false, message: '编辑观点记录失败' });
@@ -170,38 +200,37 @@ router.delete('/opinions/persons/:personName', async (req, res) => {
 router.get('/opinions', async (req, res) => {
   try {
     const db = await getDb();
-    const { q, source_platform, track, include_blocked, page = 1, pageSize = 10 } = req.query;
+    const { q, source_platform, track, include_blocked, page, pageSize } = req.query;
+    const keyword = normalizeQueryText(q);
+    const sourcePlatformFilter = normalizeQueryText(source_platform);
+    const trackFilter = normalizeQueryText(track);
+    const pagination = parsePagination(page, pageSize);
     
     // 构建查询条件
     let whereClause = 'is_deleted = 0';
     const params: any[] = [];
     
     // 搜索条件
-    if (q) {
+    if (keyword) {
       whereClause += ' AND (opinion_records.person_name LIKE ? OR title LIKE ? OR original_opinion LIKE ? OR my_interpretation LIKE ? OR validation_result LIKE ? OR person_observation LIKE ? OR note LIKE ? OR source_platform LIKE ? OR track LIKE ?)';
-      const searchTerm = `%${q}%`;
+      const searchTerm = toLikePattern(keyword);
       params.push(searchTerm, searchTerm, searchTerm, searchTerm, searchTerm, searchTerm, searchTerm, searchTerm, searchTerm);
     }
     
     // 精确筛选条件
-    if (source_platform) {
+    if (sourcePlatformFilter) {
       whereClause += ' AND source_platform = ?';
-      params.push(source_platform);
+      params.push(sourcePlatformFilter);
     }
     
-    if (track) {
+    if (trackFilter) {
       whereClause += ' AND track = ?';
-      params.push(track);
+      params.push(trackFilter);
     }
 
     if (include_blocked !== '1') {
       whereClause += ' AND opinion_records.person_name NOT IN (SELECT person_name FROM opinion_blocked_persons)';
     }
-    
-    // 计算分页
-    const pageNum = parseInt(page as string) || 1;
-    const size = parseInt(pageSize as string) || 10;
-    const offset = (pageNum - 1) * size;
     
     // 获取总数
     const countQuery = `SELECT COUNT(*) as total FROM opinion_records WHERE ${whereClause}`;
@@ -219,7 +248,7 @@ router.get('/opinions', async (req, res) => {
       LIMIT ? OFFSET ?
     `;
     
-    const dataParams = [...params, size, offset];
+    const dataParams = [...params, pagination.limit, pagination.offset];
     const items = await db.all(dataQuery, dataParams);
     
     // 返回结果
@@ -228,8 +257,8 @@ router.get('/opinions', async (req, res) => {
       data: {
         items,
         total,
-        page: pageNum,
-        pageSize: size
+        page: pagination.page,
+        pageSize: pagination.pageSize
       }
     });
   } catch (error) {

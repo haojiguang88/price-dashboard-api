@@ -1,5 +1,7 @@
 import express from "express";
 import getDb from "../config/database";
+import { isValidDateOnly } from "../utils/dateValidation";
+import { validateActiveMasterTargetByIds, validateActiveMasterTargetByNames } from "../utils/masterData";
 
 const router = express.Router();
 
@@ -50,6 +52,25 @@ const diffDays = (fromDate: string, toDate: string) => {
 
 const buildPositionLabel = (item: { category_name: string; object_name: string; variant_name?: string }) => {
   return [item.category_name, item.object_name, item.variant_name].filter(Boolean).join(' / ');
+};
+
+const refreshPositionAggregate = async (db: any, positionId: number | string, now = new Date().toISOString()) => {
+  const summary = await db.get(
+    `SELECT
+       COALESCE(SUM(remaining_quantity), 0) AS total_quantity,
+       COALESCE(SUM(batch_price * remaining_quantity), 0) AS total_cost
+     FROM position_batches
+     WHERE position_id = ? AND remaining_quantity > 0`,
+    [positionId]
+  );
+  const totalQuantity = toFiniteNumber(summary?.total_quantity, 0);
+  const totalCost = toFiniteNumber(summary?.total_cost, 0);
+  const avgPrice = totalQuantity > 0 ? totalCost / totalQuantity : 0;
+
+  await db.run(
+    "UPDATE positions SET total_quantity = ?, total_cost = ?, avg_price = ?, updated_at = ? WHERE id = ?",
+    [totalQuantity, totalCost, avgPrice, now, positionId]
+  );
 };
 
 const compactPositionItem = (item: PositionInsightItem) => ({
@@ -319,11 +340,15 @@ router.get("/positions", async (req, res) => {
             COALESCE(variant, '') as variant, 
             price, 
             date, 
-            ROW_NUMBER() OVER (PARTITION BY category, object_name, COALESCE(variant, '') ORDER BY date DESC) as rn 
+            ROW_NUMBER() OVER (PARTITION BY category, object_name, COALESCE(variant, '') ORDER BY date DESC, created_at DESC, id DESC) as rn 
           FROM price_records 
         ) as latest_prices 
         WHERE rn = 1 
       ) as pr ON p.category_name = pr.category AND p.object_name = pr.object_name AND COALESCE(p.variant_name, '') = pr.variant 
+      JOIN categories c ON c.name = p.category_name AND COALESCE(c.is_archived, 0) = 0
+      JOIN objects o ON o.category_id = c.id AND o.name = p.object_name AND COALESCE(o.is_archived, 0) = 0
+      LEFT JOIN variants v ON v.object_id = o.id AND v.name = COALESCE(p.variant_name, '') AND COALESCE(p.variant_name, '') <> '' AND COALESCE(v.is_archived, 0) = 0
+      WHERE COALESCE(p.variant_name, '') = '' OR v.id IS NOT NULL
       GROUP BY 
         p.id, 
         p.category_name, 
@@ -495,9 +520,9 @@ router.post("/position-batches", async (req, res) => {
     const db = await getDb();
     const { category_name, object_name, variant_name, category_id, object_id, variant_id, batch_price, batch_quantity, batch_date, note } = req.body;
     
-    // 校验价格是否为数字
-    if (typeof batch_price !== 'number') {
-      return res.status(400).json({ status: "error", message: "批次价格必须是数字" });
+    // 校验价格是否为正数
+    if (typeof batch_price !== 'number' || !Number.isFinite(batch_price) || batch_price <= 0) {
+      return res.status(400).json({ status: "error", message: "批次价格必须是大于 0 的数字" });
     }
     
     // 校验数量是否为整数且大于 0
@@ -511,37 +536,26 @@ router.post("/position-batches", async (req, res) => {
     }
     
     // 处理两种口径
-    let final_category_name, final_object_name, final_variant_name = '';
+    let final_category_name = '';
+    let final_object_name = '';
+    let final_variant_name = '';
     
     if (category_id && object_id) {
-      // id 口径
-      // 根据 category_id 查 category_name
-      const category = await db.get("SELECT * FROM categories WHERE id = ?", [category_id]);
-      if (!category) {
-        return res.status(400).json({ status: "error", message: "品类不存在" });
+      const masterTarget = await validateActiveMasterTargetByIds(db, category_id, object_id, variant_id);
+      if (!masterTarget.ok) {
+        return res.status(400).json({ status: "error", message: masterTarget.message });
       }
-      final_category_name = category.name;
-      
-      // 根据 object_id 查 object_name
-      const object = await db.get("SELECT * FROM objects WHERE id = ?", [object_id]);
-      if (!object) {
-        return res.status(400).json({ status: "error", message: "对象不存在" });
-      }
-      final_object_name = object.name;
-      
-      // 如果 variant_id 非空，查 variant_name
-      if (variant_id) {
-        const variant = await db.get("SELECT * FROM variants WHERE id = ?", [variant_id]);
-        if (!variant) {
-          return res.status(400).json({ status: "error", message: "变体不存在" });
-        }
-        final_variant_name = variant.name;
-      }
+      final_category_name = masterTarget.target.category_name;
+      final_object_name = masterTarget.target.object_name;
+      final_variant_name = masterTarget.target.variant_name;
     } else if (category_name && object_name) {
-      // name 口径
-      final_category_name = category_name;
-      final_object_name = object_name;
-      final_variant_name = variant_name || '';
+      const masterTarget = await validateActiveMasterTargetByNames(db, category_name, object_name, variant_name);
+      if (!masterTarget.ok) {
+        return res.status(400).json({ status: "error", message: masterTarget.message });
+      }
+      final_category_name = masterTarget.target.category_name;
+      final_object_name = masterTarget.target.object_name;
+      final_variant_name = masterTarget.target.variant_name;
     } else {
       // 两种口径都没有
       return res.status(400).json({ status: "error", message: "缺少必填字段: 请提供 category_name/object_name 或 category_id/object_id" });
@@ -550,29 +564,12 @@ router.post("/position-batches", async (req, res) => {
     // 标准化 variant_name
     const variant = final_variant_name || '';
     
+    if (!isValidDateOnly(String(batch_date).trim())) {
+      return res.status(400).json({ status: "error", message: "批次日期格式错误" });
+    }
+
     // 计算批次成本
     const batch_cost = batch_price * batch_quantity;
-    
-    // 校验主数据是否存在（name 口径）
-    if (!category_id && !object_id) {
-      const category = await db.get("SELECT * FROM categories WHERE name = ?", [final_category_name]);
-      if (!category) {
-        return res.status(400).json({ status: "error", message: "品类不存在" });
-      }
-      
-      const object = await db.get("SELECT * FROM objects WHERE category_id = ? AND name = ?", [category.id, final_object_name]);
-      if (!object) {
-        return res.status(400).json({ status: "error", message: "对象不存在" });
-      }
-      
-      // 如果 variant_name 不为空，校验变体是否存在
-      if (final_variant_name) {
-        const variant = await db.get("SELECT * FROM variants WHERE object_id = ? AND name = ?", [object.id, final_variant_name]);
-        if (!variant) {
-          return res.status(400).json({ status: "error", message: "变体不存在" });
-        }
-      }
-    }
     
     // 开始事务
     await db.run("BEGIN TRANSACTION");
@@ -598,8 +595,9 @@ router.post("/position-batches", async (req, res) => {
       const now = new Date().toISOString();
       const batchResult = await db.run(
         "INSERT INTO position_batches (position_id, batch_price, batch_quantity, batch_cost, remaining_quantity, batch_date, note, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        [position.id, batch_price, batch_quantity, batch_cost, batch_quantity, batch_date, note, now, now]
+        [position.id, batch_price, batch_quantity, batch_cost, batch_quantity, String(batch_date).trim(), note, now, now]
       );
+      await refreshPositionAggregate(db, position.id, now);
       
       // 提交事务
       await db.run("COMMIT");
@@ -638,40 +636,42 @@ router.put("/position-batches/:id", async (req, res) => {
     
     // 检查批次是否有关联的卖出记录
     const hasSellRecords = await db.get("SELECT COUNT(*) as count FROM sell_records WHERE batch_id = ?", [id]);
+    if (hasSellRecords && hasSellRecords.count > 0) {
+      // 已有关联卖出记录，只允许修改 note
+      if (note === undefined || note === null) {
+        return res.status(400).json({ status: "error", message: "已有关联卖出记录，仅允许修改备注" });
+      }
+    } else {
+      // 无关联卖出记录，允许修改所有字段
+      if (batch_price === undefined || batch_price === null || !batch_quantity || !batch_date) {
+        return res.status(400).json({ status: "error", message: "缺少必填字段: batch_price, batch_quantity, batch_date" });
+      }
+
+      if (typeof batch_price !== 'number' || !Number.isFinite(batch_price) || batch_price <= 0) {
+        return res.status(400).json({ status: "error", message: "批次价格必须是大于 0 的数字" });
+      }
+
+      if (!Number.isInteger(batch_quantity) || batch_quantity <= 0) {
+        return res.status(400).json({ status: "error", message: "批次数量必须是整数且大于 0" });
+      }
+
+      if (!isValidDateOnly(String(batch_date).trim())) {
+        return res.status(400).json({ status: "error", message: "批次日期格式错误" });
+      }
+    }
     
     // 开始事务
     await db.run("BEGIN TRANSACTION");
     
     try {
       if (hasSellRecords && hasSellRecords.count > 0) {
-        // 已有关联卖出记录，只允许修改 note
-        if (!note) {
-          return res.status(400).json({ status: "error", message: "已有关联卖出记录，仅允许修改备注" });
-        }
-        
         // 更新批次记录（只更新 note）
         const now = new Date().toISOString();
         await db.run(
           "UPDATE position_batches SET note = ?, updated_at = ? WHERE id = ?",
-          [note, now, id]
+          [String(note), now, id]
         );
       } else {
-        // 无关联卖出记录，允许修改所有字段
-        // 校验字段
-        if (!batch_price || !batch_quantity || !batch_date) {
-          return res.status(400).json({ status: "error", message: "缺少必填字段: batch_price, batch_quantity, batch_date" });
-        }
-        
-        // 校验价格是否为数字
-        if (typeof batch_price !== 'number') {
-          return res.status(400).json({ status: "error", message: "批次价格必须是数字" });
-        }
-        
-        // 校验数量是否为整数且大于 0
-        if (!Number.isInteger(batch_quantity) || batch_quantity <= 0) {
-          return res.status(400).json({ status: "error", message: "批次数量必须是整数且大于 0" });
-        }
-        
         // 计算批次成本
         const batch_cost = batch_price * batch_quantity;
         
@@ -679,8 +679,9 @@ router.put("/position-batches/:id", async (req, res) => {
         const now = new Date().toISOString();
         await db.run(
           "UPDATE position_batches SET batch_price = ?, batch_quantity = ?, batch_cost = ?, remaining_quantity = ?, batch_date = ?, note = ?, updated_at = ? WHERE id = ?",
-          [batch_price, batch_quantity, batch_cost, batch_quantity, batch_date, note, now, id]
+          [batch_price, batch_quantity, batch_cost, batch_quantity, String(batch_date).trim(), note, now, id]
         );
+        await refreshPositionAggregate(db, existingBatch.position_id, now);
       }
       
       // 提交事务
@@ -735,6 +736,7 @@ router.post("/position-batches/:id/copy", async (req, res) => {
         "INSERT INTO position_batches (position_id, batch_price, batch_quantity, batch_cost, remaining_quantity, batch_date, note, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [existingBatch.position_id, existingBatch.batch_price, existingBatch.batch_quantity, existingBatch.batch_cost, existingBatch.batch_quantity, existingBatch.batch_date, existingBatch.note, now, now]
       );
+      await refreshPositionAggregate(db, existingBatch.position_id, now);
       
       // 提交事务
       await db.run("COMMIT");
@@ -759,7 +761,7 @@ router.post("/positions/:id/sell", async (req, res) => {
     const { batch_id, quantity, price, sell_date, note } = req.body;
     
     // 校验参数
-    if (!batch_id || !quantity || !price || !sell_date) {
+    if (!batch_id || !quantity || price === undefined || price === null || !sell_date) {
       return res.status(400).json({ status: "error", message: "缺少必填字段: batch_id, quantity, price, sell_date" });
     }
     
@@ -769,8 +771,12 @@ router.post("/positions/:id/sell", async (req, res) => {
     }
     
     // 校验卖出价格是否为正数
-    if (typeof price !== 'number' || price <= 0) {
+    if (typeof price !== 'number' || !Number.isFinite(price) || price <= 0) {
       return res.status(400).json({ status: "error", message: "卖出价格必须是正数" });
+    }
+
+    if (!isValidDateOnly(String(sell_date).trim())) {
+      return res.status(400).json({ status: "error", message: "卖出日期格式错误" });
     }
     
     // 开始事务
@@ -803,7 +809,7 @@ router.post("/positions/:id/sell", async (req, res) => {
       const now = new Date().toISOString();
       await db.run(
         "INSERT INTO sell_records (category_name, object_name, variant_name, quantity, price, amount, cost, profit, sell_date, buy_date, batch_id, position_id, note, ended_position_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        [position.category_name, position.object_name, position.variant_name, quantity, price, sell_amount, sell_cost, profit, sell_date, batch.batch_date, batch_id, id, note, null, now, now]
+        [position.category_name, position.object_name, position.variant_name, quantity, price, sell_amount, sell_cost, profit, String(sell_date).trim(), batch.batch_date, batch_id, id, note, null, now, now]
       );
       
       // 扣减批次剩余数量
@@ -817,12 +823,27 @@ router.post("/positions/:id/sell", async (req, res) => {
       if (new_remaining_quantity === 0) {
         await db.run("DELETE FROM position_batches WHERE id = ?", [batch_id]);
       }
+      await refreshPositionAggregate(db, id, now);
       
-      // 更新 ended_positions
+      // 更新 ended_positions：按原持仓 id 聚合同一轮生命周期，避免同一对象后续重新建仓被合并。
       let endedPosition = await db.get(
-        "SELECT * FROM ended_positions WHERE category_name = ? AND object_name = ? AND variant_name = ?",
-        [position.category_name, position.object_name, position.variant_name || '']
+        "SELECT * FROM ended_positions WHERE source_id = ?",
+        [String(id)]
       );
+      if (!endedPosition) {
+        endedPosition = await db.get(
+          `SELECT ep.*
+           FROM ended_positions ep
+           JOIN sell_records sr ON sr.ended_position_id = ep.id
+           WHERE sr.position_id = ?
+           ORDER BY ep.id DESC
+           LIMIT 1`,
+          [id]
+        );
+        if (endedPosition && !endedPosition.source_id) {
+          await db.run("UPDATE ended_positions SET source_id = ?, updated_at = ? WHERE id = ?", [String(id), now, endedPosition.id]);
+        }
+      }
       
       if (endedPosition) {
         // 更新现有记录
@@ -833,16 +854,40 @@ router.post("/positions/:id/sell", async (req, res) => {
       } else {
         // 创建新记录
         await db.run(
-          "INSERT INTO ended_positions (category_name, object_name, variant_name, quantity, amount, cost, profit, sell_date, buy_date, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-          [position.category_name, position.object_name, position.variant_name || '', quantity, sell_amount, sell_cost, profit, sell_date, batch.batch_date, now, now]
+          "INSERT INTO ended_positions (source_id, category_name, object_name, variant_name, quantity, amount, cost, profit, sell_date, buy_date, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          [String(id), position.category_name, position.object_name, position.variant_name || '', quantity, sell_amount, sell_cost, profit, String(sell_date).trim(), batch.batch_date, now, now]
         );
         // 获取新创建的记录 ID
         const newEndedPosition = await db.get(
-          "SELECT id FROM ended_positions WHERE category_name = ? AND object_name = ? AND variant_name = ? ORDER BY id DESC LIMIT 1",
-          [position.category_name, position.object_name, position.variant_name || '']
+          "SELECT id FROM ended_positions WHERE source_id = ? ORDER BY id DESC LIMIT 1",
+          [String(id)]
         );
         endedPosition = newEndedPosition;
       }
+      await db.run(
+        "UPDATE sell_records SET ended_position_id = ? WHERE position_id = ? AND ended_position_id IS NULL",
+        [endedPosition.id, id]
+      );
+
+      // 每次卖出都以 sell_records 为真相源重算结束仓位汇总，避免部分卖出时日期停留在旧值。
+      const endedSummary = await db.get(
+        "SELECT SUM(quantity) as total_quantity, SUM(amount) as total_amount, SUM(cost) as total_cost, SUM(profit) as total_profit, MAX(sell_date) as final_sell_date, MIN(buy_date) as first_buy_date FROM sell_records WHERE ended_position_id = ?",
+        [endedPosition.id]
+      );
+
+      await db.run(
+        "UPDATE ended_positions SET quantity = ?, amount = ?, cost = ?, profit = ?, sell_date = ?, buy_date = ?, updated_at = ? WHERE id = ?",
+        [
+          endedSummary.total_quantity,
+          endedSummary.total_amount,
+          endedSummary.total_cost,
+          endedSummary.total_profit,
+          endedSummary.final_sell_date,
+          endedSummary.first_buy_date,
+          now,
+          endedPosition.id
+        ]
+      );
       
       // 检查仓位是否为空（通过批次真相源判断）
       const batchCount = await db.get(
@@ -857,28 +902,7 @@ router.post("/positions/:id/sell", async (req, res) => {
           "UPDATE sell_records SET ended_position_id = ? WHERE position_id = ? AND ended_position_id IS NULL",
           [endedPosition.id, id]
         );
-        
-        // 基于 sell_records 重算 ended_positions 汇总数据
-        const summary = await db.get(
-          "SELECT SUM(quantity) as total_quantity, SUM(amount) as total_amount, SUM(cost) as total_cost, SUM(profit) as total_profit, MAX(sell_date) as final_sell_date, MIN(buy_date) as first_buy_date FROM sell_records WHERE ended_position_id = ?",
-          [endedPosition.id]
-        );
-        
-        // 用重算结果覆盖更新 ended_positions
-        await db.run(
-          "UPDATE ended_positions SET quantity = ?, amount = ?, cost = ?, profit = ?, sell_date = ?, buy_date = ?, updated_at = ? WHERE id = ?",
-          [
-            summary.total_quantity,
-            summary.total_amount,
-            summary.total_cost,
-            summary.total_profit,
-            summary.final_sell_date,
-            summary.first_buy_date,
-            now,
-            endedPosition.id
-          ]
-        );
-        
+
         await db.run("DELETE FROM positions WHERE id = ?", [id]);
       }
       

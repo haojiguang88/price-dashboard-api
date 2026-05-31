@@ -1,5 +1,6 @@
 import express from 'express';
 import getDb from '../config/database';
+import { isValidDateOnly, validateRequiredDateOnlyOrLocalDateTime } from '../utils/dateValidation';
 
 const router = express.Router();
 
@@ -13,7 +14,7 @@ interface SupplyEventRow {
   countdown_status: string;
   scale_note: string | null;
   date_certainty: string;
-  trading_scope: string;
+  participation_scope: string;
   source_note: string | null;
   is_deleted: number;
   created_at: string;
@@ -64,7 +65,7 @@ interface EventPayload {
   countdown_status: string;
   scale_note: string | null;
   date_certainty: string;
-  trading_scope: string;
+  participation_scope: string;
   source_note: string | null;
 }
 
@@ -84,7 +85,9 @@ const toOptionalText = (value: unknown): string | null => {
 const isRestockEvent = (eventType: string): boolean => eventType.includes('补货');
 
 const parseDateOnlyUtc = (value: string): number | null => {
-  const [year, month, day] = value.slice(0, 10).split('-').map(Number);
+  const dateText = value.slice(0, 10);
+  if (!isValidDateOnly(dateText)) return null;
+  const [year, month, day] = dateText.split('-').map(Number);
   if (!year || !month || !day) return null;
   return Date.UTC(year, month - 1, day);
 };
@@ -107,16 +110,18 @@ const normalizeEventPayload = (body: Record<string, unknown>): EventPayload => (
   countdown_status: toQueryString(body.countdown_status) || '未记录',
   scale_note: toOptionalText(body.scale_note),
   date_certainty: toQueryString(body.date_certainty) || 'confirmed',
-  trading_scope: toQueryString(body.trading_scope) || 'normal',
+  participation_scope: toQueryString(body.participation_scope) || 'normal',
   source_note: toOptionalText(body.source_note),
 });
 
 const validateEventPayload = (payload: EventPayload): string | null => {
   if (!payload.product_name) return '品类不能为空';
-  if (!payload.event_date) return '日期不能为空';
+  const eventDate = validateRequiredDateOnlyOrLocalDateTime(payload.event_date, '日期');
+  if (!eventDate.ok) return eventDate.message;
+  payload.event_date = eventDate.value;
   if (!payload.event_type) return '事件类型不能为空';
   if (!['confirmed', 'estimated'].includes(payload.date_certainty)) return '日期确定性不合法';
-  if (!['normal', 'record_only'].includes(payload.trading_scope)) return '交易口径不合法';
+  if (!['normal', 'record_only'].includes(payload.participation_scope)) return '参与口径不合法';
   return null;
 };
 
@@ -219,7 +224,7 @@ const hydrateSupplyEvents = (rows: SupplyEventRow[], products: ProductRow[] = []
       min_interval_days: minInterval,
       max_interval_days: maxInterval,
       has_estimated_date: hydratedRows.some((row) => row.date_certainty === 'estimated'),
-      has_record_only: hydratedRows.some((row) => row.trading_scope === 'record_only'),
+      has_record_only: hydratedRows.some((row) => row.participation_scope === 'record_only'),
     });
   });
 
@@ -254,7 +259,7 @@ router.get('/product-supply-events', async (req, res) => {
     const eventType = toQueryString(req.query.event_type);
     const countdownStatus = toQueryString(req.query.countdown_status);
     const dateCertainty = toQueryString(req.query.date_certainty);
-    const tradingScope = toQueryString(req.query.trading_scope);
+    const participationScope = toQueryString(req.query.participation_scope);
 
     const items = hydratedItems.filter((item) => {
       if (q) {
@@ -273,7 +278,7 @@ router.get('/product-supply-events', async (req, res) => {
       if (eventType && eventType !== 'all' && item.event_type !== eventType) return false;
       if (countdownStatus && countdownStatus !== 'all' && item.countdown_status !== countdownStatus) return false;
       if (dateCertainty && dateCertainty !== 'all' && item.date_certainty !== dateCertainty) return false;
-      if (tradingScope && tradingScope !== 'all' && item.trading_scope !== tradingScope) return false;
+      if (participationScope && participationScope !== 'all' && item.participation_scope !== participationScope) return false;
       return true;
     });
 
@@ -282,7 +287,7 @@ router.get('/product-supply-events', async (req, res) => {
       eventType && eventType !== 'all'
       || countdownStatus && countdownStatus !== 'all'
       || dateCertainty && dateCertainty !== 'all'
-      || tradingScope && tradingScope !== 'all'
+      || participationScope && participationScope !== 'all'
     );
     const scopedProductStats = productStats.filter((stat) => {
       if (productName && productName !== 'all' && stat.product_name !== productName) return false;
@@ -322,7 +327,7 @@ router.get('/product-supply-events', async (req, res) => {
           product_count: scopedProductStats.length,
           restock_count: items.filter((item) => isRestockEvent(item.event_type)).length,
           estimated_count: items.filter((item) => item.date_certainty === 'estimated').length,
-          record_only_count: items.filter((item) => item.trading_scope === 'record_only').length,
+          record_only_count: items.filter((item) => item.participation_scope === 'record_only').length,
         },
       },
     });
@@ -372,7 +377,7 @@ router.post('/product-supply-events', async (req, res) => {
     const result = await db.run(
       `INSERT INTO product_supply_events (
         product_name, event_date, event_date_label, event_type, channel_region,
-        countdown_status, scale_note, date_certainty, trading_scope, source_note,
+        countdown_status, scale_note, date_certainty, participation_scope, source_note,
         is_deleted, created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
       [
@@ -384,7 +389,7 @@ router.post('/product-supply-events', async (req, res) => {
         payload.countdown_status,
         payload.scale_note,
         payload.date_certainty,
-        payload.trading_scope,
+        payload.participation_scope,
         payload.source_note,
         now,
         now,
@@ -435,7 +440,7 @@ router.put('/product-supply-events/:id', async (req, res) => {
            countdown_status = ?,
            scale_note = ?,
            date_certainty = ?,
-           trading_scope = ?,
+           participation_scope = ?,
            source_note = ?,
            updated_at = ?
        WHERE id = ? AND is_deleted = 0`,
@@ -448,7 +453,7 @@ router.put('/product-supply-events/:id', async (req, res) => {
         payload.countdown_status,
         payload.scale_note,
         payload.date_certainty,
-        payload.trading_scope,
+        payload.participation_scope,
         payload.source_note,
         now,
         id,
@@ -473,6 +478,37 @@ router.put('/product-supply-events/:id', async (req, res) => {
       success: false,
       message: isDuplicate ? '同一品类、日期、事件和渠道已存在' : '编辑补货事件失败',
     });
+  }
+});
+
+router.delete('/product-supply-events/:id', async (req, res) => {
+  try {
+    const db = await getDb();
+    const id = Number(req.params.id);
+
+    if (!Number.isInteger(id) || id <= 0) {
+      res.status(400).json({ success: false, message: '事件 ID 不合法' });
+      return;
+    }
+
+    const now = new Date().toISOString();
+    const result = await db.run(
+      `UPDATE product_supply_events
+       SET is_deleted = 1,
+           updated_at = ?
+       WHERE id = ? AND is_deleted = 0`,
+      [now, id],
+    );
+
+    if ((result.changes ?? 0) === 0) {
+      res.status(404).json({ success: false, message: '补货事件不存在' });
+      return;
+    }
+
+    res.json({ success: true, message: '补货事件已删除', data: { id } });
+  } catch (error) {
+    console.error('删除补货事件失败:', error);
+    res.status(500).json({ success: false, message: '删除补货事件失败' });
   }
 });
 

@@ -11,6 +11,11 @@ import { registerApiRoutes } from "./routes/apiRouteRegistry";
 const app = express();
 const appWorkspace = "business";
 const port = process.env.PORT || 3001;
+let databaseReady = false;
+
+const getStorageLocation = (dbPath: string) => (
+  dbPath.startsWith(process.cwd()) ? "project_data" : "custom_path"
+);
 
 // 配置 CORS
 const configuredCorsOrigins = String(process.env.CORS_ORIGINS || "")
@@ -18,16 +23,29 @@ const configuredCorsOrigins = String(process.env.CORS_ORIGINS || "")
   .map(origin => origin.trim())
   .filter(Boolean);
 
-const allowedLocalOrigins = new Set([
+const allowedCorsOrigins = new Set([
   "http://localhost:5173",
   "http://127.0.0.1:5173",
   "http://[::1]:5173",
   ...configuredCorsOrigins
 ]);
 
+const isLoopbackOrigin = (origin: string) => {
+  try {
+    const { hostname, protocol } = new URL(origin);
+    const normalizedHost = hostname.replace(/^\[|\]$/g, "");
+    return ["http:", "https:"].includes(protocol)
+      && ["localhost", "127.0.0.1", "::1"].includes(normalizedHost);
+  } catch {
+    return false;
+  }
+};
+
+const allowLoopbackCors = process.env.NODE_ENV !== "production";
+
 app.use(cors({
   origin(origin, callback) {
-    if (!origin || allowedLocalOrigins.has(origin)) {
+    if (!origin || allowedCorsOrigins.has(origin) || (allowLoopbackCors && isLoopbackOrigin(origin))) {
       callback(null, true);
       return;
     }
@@ -53,31 +71,43 @@ app.get("/", (req, res) => {
   res.json({ message: "Price Dashboard API", status: "running", version: "1.0.0", app_workspace: appWorkspace });
 });
 
-app.get("/health", (req, res) => {
+app.get("/health", async (req, res) => {
   const dbPath = getDatabasePath();
-  res.json({
-    status: "healthy",
-    app_workspace: appWorkspace,
-    db_path: dbPath,
-    external_storage: dbPath.startsWith("/Volumes/")
-  });
+  try {
+    const db = await getDb();
+    await db.get("SELECT 1 as ok");
+    res.json({
+      status: databaseReady ? "healthy" : "starting",
+      app_workspace: appWorkspace,
+      db_path: dbPath,
+      storage_location: getStorageLocation(dbPath),
+      database_ready: databaseReady
+    });
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    res.status(500).json({
+      status: "unhealthy",
+      app_workspace: appWorkspace,
+      db_path: dbPath,
+      storage_location: getStorageLocation(dbPath),
+      database_ready: false,
+      error: errorMessage
+    });
+  }
 });
 
 // 初始化数据库连接
 const initDatabase = async () => {
-  try {
-    await getDb();
-    console.log("Database initialized successfully");
-    
-    // 执行迁移
-    const dbPath = getDatabasePath();
-    await runMigrations(dbPath);
-    console.log("Migrations executed successfully");
-    await cleanupTaskCenterStartupState();
-  } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    console.error("Failed to initialize database:", errorMessage);
-  }
+  databaseReady = false;
+  await getDb();
+  console.log("Database initialized successfully");
+
+  // 执行迁移
+  const dbPath = getDatabasePath();
+  await runMigrations(dbPath);
+  console.log("Migrations executed successfully");
+  await cleanupTaskCenterStartupState();
+  databaseReady = true;
 };
 
 // 启动服务器
@@ -86,4 +116,8 @@ initDatabase().then(() => {
     console.log(`Server running on port ${port}`);
     startTaskCenterScheduler();
   });
+}).catch((error) => {
+  const errorMessage = error instanceof Error ? error.message : String(error);
+  console.error("Failed to initialize database:", errorMessage);
+  process.exit(1);
 });

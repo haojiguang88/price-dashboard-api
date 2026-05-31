@@ -1,5 +1,6 @@
 import express from 'express';
 import getDb from '../config/database';
+import { validateRequiredDateOnly } from '../utils/dateValidation';
 
 const router = express.Router();
 
@@ -88,7 +89,9 @@ const normalizeOpportunity = (body: RejectedOpportunityInput) => {
 
 const validateOpportunity = (item: ReturnType<typeof normalizeOpportunity>) => {
   if (!item.title) return '缺少必填字段: title';
-  if (!item.decisionDate) return '缺少必填字段: decision_date';
+  const decisionDate = validateRequiredDateOnly(item.decisionDate, '决策日期');
+  if (!decisionDate.ok) return decisionDate.message;
+  item.decisionDate = decisionDate.value;
   if (!item.rejectionReason) return '缺少必填字段: rejection_reason';
   if (!VALID_DECISION_STAGES.has(item.decisionStage)) return '无效的 decision_stage';
   if (!VALID_DECISION_QUALITIES.has(item.decisionQuality)) return '无效的 decision_quality';

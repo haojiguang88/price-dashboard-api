@@ -1,5 +1,6 @@
 import express from 'express';
 import getDb from '../config/database';
+import { validateOptionalDateOnly, validateRequiredDateOnlyOrLocalDateTime } from '../utils/dateValidation';
 
 const router = express.Router();
 
@@ -12,6 +13,21 @@ const normalizeNumber = (value: unknown): number | null => {
   if (value === null || value === undefined || value === '') return null;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
+};
+
+const recordDateFields = [
+  ['launch_date', '发售日期'],
+  ['expected_arrival_date', '预计到货'],
+  ['actual_arrival_date', '实际到货']
+] as const;
+
+const validateRecordDates = (body: any): string => {
+  for (const [field, label] of recordDateFields) {
+    const validation = validateOptionalDateOnly(body?.[field], label);
+    if (!validation.ok) return validation.message;
+    body[field] = validation.value || '';
+  }
+  return '';
 };
 
 const recordFields = [
@@ -179,6 +195,10 @@ router.post('/speculation-cycles', async (req, res) => {
     if (!normalizeText(req.body.category_name) || !normalizeText(req.body.object_name)) {
       return res.status(400).json({ success: false, message: '缺少必填字段: category_name, object_name' });
     }
+    const dateError = validateRecordDates(req.body);
+    if (dateError) {
+      return res.status(400).json({ success: false, message: dateError });
+    }
 
     const placeholders = recordFields.map(() => '?').join(', ');
     const result = await db.run(`
@@ -223,6 +243,10 @@ router.put('/speculation-cycles/:id', async (req, res) => {
     if (!normalizeText(req.body.category_name) || !normalizeText(req.body.object_name)) {
       return res.status(400).json({ success: false, message: '缺少必填字段: category_name, object_name' });
     }
+    const dateError = validateRecordDates(req.body);
+    if (dateError) {
+      return res.status(400).json({ success: false, message: dateError });
+    }
 
     const assignments = recordFields.map(field => `${field} = ?`).join(', ');
     const result = await db.run(`
@@ -261,9 +285,11 @@ router.post('/speculation-cycles/:id/events', async (req, res) => {
     if (!record) {
       return res.status(404).json({ success: false, message: '周期模式记录不存在' });
     }
-    if (!normalizeText(req.body.record_time)) {
-      return res.status(400).json({ success: false, message: '缺少必填字段: record_time' });
+    const recordTime = validateRequiredDateOnlyOrLocalDateTime(req.body.record_time, '节点时间');
+    if (!recordTime.ok) {
+      return res.status(400).json({ success: false, message: recordTime.message });
     }
+    req.body.record_time = recordTime.value;
 
     const placeholders = eventFields.map(() => '?').join(', ');
     const result = await db.run(`
@@ -290,9 +316,11 @@ router.put('/speculation-cycles/:id/events/:eventId', async (req, res) => {
     if (!existing) {
       return res.status(404).json({ success: false, message: '周期过程节点不存在' });
     }
-    if (!normalizeText(req.body.record_time)) {
-      return res.status(400).json({ success: false, message: '缺少必填字段: record_time' });
+    const recordTime = validateRequiredDateOnlyOrLocalDateTime(req.body.record_time, '节点时间');
+    if (!recordTime.ok) {
+      return res.status(400).json({ success: false, message: recordTime.message });
     }
+    req.body.record_time = recordTime.value;
 
     const assignments = eventFields.filter(field => field !== 'cycle_id').map(field => `${field} = ?`).join(', ');
     const values = mapEventPayload(cycleId, req.body).slice(1);

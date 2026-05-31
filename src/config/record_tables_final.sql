@@ -58,8 +58,8 @@ CREATE TABLE IF NOT EXISTS missed_projects (
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
--- 交易复盘表
-CREATE TABLE IF NOT EXISTS trade_reviews (
+-- 买卖复盘表
+CREATE TABLE IF NOT EXISTS business_reviews (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   title TEXT NOT NULL,
   track TEXT NOT NULL,
@@ -75,6 +75,7 @@ CREATE TABLE IF NOT EXISTS trade_reviews (
   exposed_problem TEXT,
   extracted_lesson TEXT,
   short_lesson TEXT,
+  annual_plan_item_id INTEGER,
   note TEXT,
   is_deleted INTEGER DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,

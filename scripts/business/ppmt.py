@@ -11,14 +11,22 @@ from urllib.parse import quote
 
 import requests
 
+from source_mappings import (
+    load_enabled_source_mappings,
+    mark_source_mapping_errors,
+    mark_source_mappings_matched,
+    mark_source_mappings_seen,
+    mark_source_run_error,
+)
 
 CATEGORY_NAME = "泡泡玛特"
+SOURCE_KEY = "qiandao_popmart"
 SOURCE_NAME = "千岛"
 SEARCH_URL = "https://oia.qiandao.com/search"
 SPU_URL = "https://oia.qiandao.com/spu"
-DEFAULT_DB_PATH = os.environ.get(
-    "BUSINESS_DB_PATH",
-    os.environ.get("DB_PATH", "/Volumes/7100/price-dashboard-data/db/price_dashboard_business_dev.db"),
+DEFAULT_DB_PATH = (
+    os.environ.get("BUSINESS_DB_PATH")
+    or str(Path(__file__).resolve().parents[2] / "data" / "price_dashboard_business.db")
 )
 
 HEADERS = {
@@ -51,6 +59,28 @@ SOURCE_TARGETS = [
     {"object": "闪闪", "query": "闪闪", "spu_id": "801090280999627960"},
     {"object": "飞行员", "query": "JUMP FOR JOY", "spu_id": "593651152747287737"},
 ]
+
+
+def load_source_targets(db_path):
+    mappings, configured = load_enabled_source_mappings(db_path, SOURCE_KEY)
+    if not configured:
+        return SOURCE_TARGETS
+
+    targets = []
+    for mapping in mappings:
+        meta = mapping.get("external_meta") or {}
+        object_name = str(mapping.get("object_name") or "").strip()
+        spu_id = str(meta.get("spu_id") or mapping.get("external_key") or "").strip()
+        query = str(meta.get("query") or mapping.get("external_name") or object_name).strip()
+        if not object_name or not spu_id or not query:
+            continue
+        targets.append({
+            "object": object_name,
+            "query": query,
+            "spu_id": spu_id,
+            "external_key": spu_id,
+        })
+    return targets
 
 
 def today():
@@ -145,10 +175,10 @@ def parse_spu_page(page_html, spu_id):
     }
 
 
-def fetch_source_items():
+def fetch_source_items(source_targets):
     session = requests.Session()
     source_items = []
-    for target in SOURCE_TARGETS:
+    for target in source_targets:
         page_html = fetch_search_html(session, target["query"])
         candidates = parse_search_results(page_html)
         matched = next(
@@ -188,10 +218,11 @@ def load_enabled_objects(db_path, category):
     return {row[0] for row in rows}
 
 
-def extract_records(source_items, enabled_objects, category):
+def extract_records(source_items, enabled_objects, category, source_targets):
     records = []
     missing_source_objects = []
-    mapped_objects = {target["object"] for target in SOURCE_TARGETS}
+    missing_errors = {}
+    mapped_objects = {target["object"] for target in source_targets}
 
     for item in source_items:
         object_name = item["object"]
@@ -201,6 +232,7 @@ def extract_records(source_items, enabled_objects, category):
         matched = item.get("matched")
         if not matched or matched.get("price") is None:
             missing_source_objects.append(object_name)
+            missing_errors[item["spu_id"]] = "本次来源未返回成交均价"
             continue
 
         records.append({
@@ -209,7 +241,7 @@ def extract_records(source_items, enabled_objects, category):
             "variant": "",
             "price": matched["price"],
             "raw_price": matched["price"],
-            "trade_date": today(),
+            "price_date": today(),
             "source": SOURCE_NAME,
             "source_id": matched["spu_id"],
             "source_name": matched["name"],
@@ -217,7 +249,7 @@ def extract_records(source_items, enabled_objects, category):
         })
 
     unmapped_enabled_objects = sorted(enabled_objects - mapped_objects)
-    return records, unmapped_enabled_objects, missing_source_objects
+    return records, unmapped_enabled_objects, missing_source_objects, missing_errors
 
 
 def upsert_price_records(db_path, records, dry_run=False):
@@ -247,7 +279,7 @@ def upsert_price_records(db_path, records, dry_run=False):
                 LIMIT 1
                 """,
                 (
-                    record["trade_date"],
+                    record["price_date"],
                     record["category"],
                     record["object"],
                     record["variant"],
@@ -262,7 +294,7 @@ def upsert_price_records(db_path, records, dry_run=False):
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        record["trade_date"],
+                        record["price_date"],
                         record["category"],
                         record["object"],
                         record["variant"],
@@ -308,7 +340,7 @@ def build_parser():
     parser = argparse.ArgumentParser(description="同步千岛泡泡玛特价格到商品价格工作台")
     parser.add_argument(
         "--db",
-        default=os.environ.get("DB_PATH", DEFAULT_DB_PATH),
+        default=DEFAULT_DB_PATH,
         help="SQLite 数据库路径",
     )
     parser.add_argument("--category", default=CATEGORY_NAME)
@@ -321,17 +353,49 @@ def main():
     args = parser.parse_args()
     try:
         enabled_objects = load_enabled_objects(args.db, args.category)
-        source_items = fetch_source_items()
-        records, unmapped_enabled_objects, missing_source_objects = extract_records(
+        source_targets = load_source_targets(args.db)
+        if not source_targets:
+            payload = {
+                "success": True,
+                "status": "skipped",
+                "skipped": True,
+                "message": "泡泡玛特价格更新已跳过：当前没有启用的数据源映射",
+                "category": args.category,
+                "source": SOURCE_NAME,
+                "dry_run": args.dry_run,
+                "source_count": 0,
+                "matched_count": 0,
+                "inserted": 0,
+                "updated": 0,
+                "skipped_count": 0,
+                "records": [],
+                "unmapped_enabled_objects": [],
+                "missing_source_objects": [],
+            }
+            print(json.dumps(payload, ensure_ascii=False))
+            return
+        source_items = fetch_source_items(source_targets)
+        if not args.dry_run:
+            mark_source_mappings_seen(args.db, SOURCE_KEY, [item["spu_id"] for item in source_items])
+        records, unmapped_enabled_objects, missing_source_objects, missing_errors = extract_records(
             source_items,
             enabled_objects,
             args.category,
+            source_targets,
         )
         inserted, updated, skipped, results = upsert_price_records(
             args.db,
             records,
             dry_run=args.dry_run,
         )
+        matched_keys = {record["source_id"] for record in records}
+        if not args.dry_run:
+            mark_source_mappings_matched(args.db, SOURCE_KEY, matched_keys)
+            mark_source_mapping_errors(args.db, SOURCE_KEY, {
+                key: message
+                for key, message in missing_errors.items()
+                if key not in matched_keys
+            })
         payload = {
             "success": True,
             "message": (
@@ -351,6 +415,10 @@ def main():
             "missing_source_objects": missing_source_objects,
         }
     except Exception as exc:
+        try:
+            mark_source_run_error(args.db, SOURCE_KEY, f"泡泡玛特价格更新失败：{exc}")
+        except Exception:
+            pass
         payload = {
             "success": False,
             "message": f"泡泡玛特价格更新失败：{exc}",

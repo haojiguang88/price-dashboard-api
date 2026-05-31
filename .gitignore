@@ -14,4 +14,10 @@ db/*.sqlite3
 db/*.db-journal
 db/*.db-wal
 db/*.db-shm
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+data/*.db-journal
+data/*.db-wal
+data/*.db-shm
 *.log

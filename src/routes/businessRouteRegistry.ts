@@ -8,7 +8,7 @@ import watchlistRoutes from "./watchlistRoutes";
 import eventRecordsRoutes from "./eventRecordsRoutes";
 import opinionRecordsRoutes from "./opinionRecordsRoutes";
 import missedProjectsRoutes from "./missedProjectsRoutes";
-import tradeReviewsRoutes from "./tradeReviewsRoutes";
+import businessReviewsRoutes from "./businessReviewsRoutes";
 import treeHangingCasesRoutes from "./treeHangingCasesRoutes";
 import marketReviewsRoutes from "./marketReviewsRoutes";
 import ruleExperiencesRoutes from "./ruleExperiencesRoutes";
@@ -24,10 +24,11 @@ import abnormalMonitorRoutes from "./abnormalMonitorRoutes";
 import volatilityAnalysisRoutes from "./volatilityAnalysisRoutes";
 import elasticityAnalysisRoutes from "./elasticityAnalysisRoutes";
 import riskControlRoutes from "./riskControlRoutes";
-import footballLotteryRoutes from "./footballLotteryRoutes";
 import rejectedOpportunitiesRoutes from "./rejectedOpportunitiesRoutes";
 import speculationCycleRoutes from "./speculationCycleRoutes";
 import productSupplyEventsRoutes from "./productSupplyEventsRoutes";
+import sourceMappingsRoutes from "./sourceMappingsRoutes";
+import categoryProfilesRoutes from "./categoryProfilesRoutes";
 
 export const registerBusinessRoutes = (app: Express) => {
   app.use("/api", priceRoutes);
@@ -39,7 +40,7 @@ export const registerBusinessRoutes = (app: Express) => {
   app.use("/api", eventRecordsRoutes);
   app.use("/api", opinionRecordsRoutes);
   app.use("/api", missedProjectsRoutes);
-  app.use("/api", tradeReviewsRoutes);
+  app.use("/api", businessReviewsRoutes);
   app.use("/api", treeHangingCasesRoutes);
   app.use("/api", marketReviewsRoutes);
   app.use("/api", ruleExperiencesRoutes);
@@ -55,8 +56,9 @@ export const registerBusinessRoutes = (app: Express) => {
   app.use("/api/volatility-analysis", volatilityAnalysisRoutes);
   app.use("/api/elasticity-analysis", elasticityAnalysisRoutes);
   app.use("/api/risk", riskControlRoutes);
-  app.use("/api/football-lottery", footballLotteryRoutes);
   app.use("/api", rejectedOpportunitiesRoutes);
   app.use("/api", speculationCycleRoutes);
   app.use("/api", productSupplyEventsRoutes);
+  app.use("/api", sourceMappingsRoutes);
+  app.use("/api", categoryProfilesRoutes);
 };

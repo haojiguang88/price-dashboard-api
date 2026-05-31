@@ -1,5 +1,12 @@
 import express from 'express';
 import getDb from '../config/database';
+import {
+  annualPlanLinkJoins,
+  annualPlanLinkSelectFields,
+  serializeAnnualPlanLink,
+  validateOptionalAnnualPlanItemLink
+} from '../utils/annualPlanLinks';
+import { validateActiveMasterTargetByNames } from '../utils/masterData';
 
 const router = express.Router();
 
@@ -180,24 +187,104 @@ const serializePlan = (plan: any, kind: PlanKind) => {
     track: plan.track,
     type: plan.type,
     market_type_preset: plan.market_type_preset,
+    annual_plan_item_id: plan.annual_plan_item_id ? String(plan.annual_plan_item_id) : '',
+    annual_plan_item: serializeAnnualPlanLink(plan),
     created_at: plan.created_at,
     updated_at: plan.updated_at
   };
 };
 
-const validateMasterData = async (db: any, categoryName: string, objectName: string, variantName?: string) => {
-  const category = await db.get('SELECT * FROM categories WHERE name = ?', [categoryName]);
-  if (!category) return '品类不存在';
+const buildPriceKey = (categoryName: unknown, objectName: unknown, variantName: unknown) => [
+  String(categoryName || '').trim(),
+  String(objectName || '').trim(),
+  String(variantName || '').trim()
+].join('|');
 
-  const object = await db.get('SELECT * FROM objects WHERE category_id = ? AND name = ?', [category.id, objectName]);
-  if (!object) return '对象不存在';
-
-  if (variantName) {
-    const variant = await db.get('SELECT * FROM variants WHERE object_id = ? AND name = ?', [object.id, variantName]);
-    if (!variant) return '变体不存在';
+const getLatestPriceMap = async (db: any) => {
+  const rows = await db.all(`
+    SELECT category, object_name, COALESCE(variant, '') AS variant_name, price, date, source, created_at, id
+    FROM price_records
+    WHERE price IS NOT NULL
+    ORDER BY date DESC, created_at DESC, id DESC
+  `);
+  const map = new Map<string, any>();
+  for (const row of rows) {
+    const key = buildPriceKey(row.category, row.object_name, row.variant_name);
+    if (!map.has(key)) {
+      map.set(key, {
+        price: roundNumber(Number(row.price)),
+        date: row.date,
+        source: row.source || '',
+        created_at: row.created_at,
+        id: row.id
+      });
+    }
   }
+  return map;
+};
 
-  return null;
+const getBuyingPlanPriceAlerts = async (db: any) => {
+  const plans = await db.all(`
+    SELECT p.*, ${annualPlanLinkSelectFields}
+    FROM buying_plans p
+    ${annualPlanLinkJoins('p')}
+    WHERE p.status IN ('pending', 'in_progress')
+    ORDER BY p.updated_at DESC, p.id DESC
+  `);
+  const latestPriceMap = await getLatestPriceMap(db);
+
+  return plans
+    .map((plan: any) => {
+      const latestPrice = latestPriceMap.get(buildPriceKey(plan.category_name, plan.object_name, plan.variant_name));
+      if (!latestPrice || !Number.isFinite(latestPrice.price)) return null;
+
+      const batches = parseStoredBatches(plan)
+        .filter(batch => batch.status !== 'completed' && batch.remaining_quantity > 0);
+      const reachedBatches = batches.filter(batch => latestPrice.price <= batch.target_price);
+      if (reachedBatches.length === 0) return null;
+
+      const bestBatch = reachedBatches
+        .slice()
+        .sort((a, b) => (latestPrice.price - a.target_price) - (latestPrice.price - b.target_price))[0];
+      const targetPrice = bestBatch.target_price;
+      const gapAmount = roundNumber(latestPrice.price - targetPrice);
+      const gapPercent = targetPrice > 0 ? roundNumber((gapAmount / targetPrice) * 100) : 0;
+      const targetLabel = [
+        plan.category_name,
+        plan.object_name,
+        plan.variant_name || ''
+      ].filter(Boolean).join(' / ');
+
+      return {
+        id: String(plan.id),
+        plan_name: plan.plan_name,
+        category_name: plan.category_name,
+        object_name: plan.object_name,
+        variant_name: plan.variant_name || '',
+        target_label: targetLabel,
+        target_price: targetPrice,
+        current_price: latestPrice.price,
+        price_date: latestPrice.date,
+        price_source: latestPrice.source,
+        gap_amount: gapAmount,
+        gap_percent: gapPercent,
+        plan_quantity: roundNumber(bestBatch.plan_quantity),
+        remaining_quantity: roundNumber(bestBatch.remaining_quantity),
+        batch_id: bestBatch.id,
+        batch_count: batches.length,
+        status: plan.status,
+        note: plan.note || '',
+        annual_plan_item_id: plan.annual_plan_item_id ? String(plan.annual_plan_item_id) : '',
+        annual_plan_item: serializeAnnualPlanLink(plan),
+        updated_at: plan.updated_at
+      };
+    })
+    .filter(Boolean)
+    .sort((a: any, b: any) => {
+      const percentDiff = a.gap_percent - b.gap_percent;
+      if (percentDiff !== 0) return percentDiff;
+      return new Date(b.price_date || b.updated_at).getTime() - new Date(a.price_date || a.updated_at).getTime();
+    });
 };
 
 const buildPlanPayload = async (db: any, reqBody: any, existingPlan?: any) => {
@@ -215,25 +302,38 @@ const buildPlanPayload = async (db: any, reqBody: any, existingPlan?: any) => {
     return { error: '缺少必填字段: plan_name, category_name, object_name' };
   }
 
+  const requestedStatus = reqBody.status ? String(reqBody.status) : undefined;
+  if (requestedStatus && !validStatuses.includes(requestedStatus)) {
+    return { error: '无效的计划状态' };
+  }
+
   const normalizedBatches = normalizeBatches(reqBody.batches, target_price, plan_quantity, existingPlan?.status || 'pending');
   if (normalizedBatches.error) {
     return { error: normalizedBatches.error };
   }
 
-  const masterDataError = await validateMasterData(db, category_name, object_name, variant_name);
-  if (masterDataError) {
-    return { error: masterDataError };
+  const masterData = await validateActiveMasterTargetByNames(db, category_name, object_name, variant_name);
+  if (!masterData.ok) {
+    return { error: masterData.message };
+  }
+
+  const annualPlanItemIdInput = Object.prototype.hasOwnProperty.call(reqBody, 'annual_plan_item_id')
+    ? reqBody.annual_plan_item_id
+    : existingPlan?.annual_plan_item_id;
+  const annualPlanLink = await validateOptionalAnnualPlanItemLink(db, annualPlanItemIdInput);
+  if (!annualPlanLink.ok) {
+    return { error: annualPlanLink.message };
   }
 
   const summary = summarizeBatches(normalizedBatches.batches);
-  const status = derivePlanStatus(normalizedBatches.batches, existingPlan?.status, reqBody.status);
+  const status = derivePlanStatus(normalizedBatches.batches, existingPlan?.status, requestedStatus);
 
   return {
     payload: {
       plan_name,
-      category_name,
-      object_name,
-      variant_name: variant_name || '',
+      category_name: masterData.target.category_name,
+      object_name: masterData.target.object_name,
+      variant_name: masterData.target.variant_name,
       target_price: summary.target_price,
       plan_quantity: summary.plan_quantity,
       total_amount: summary.total_amount,
@@ -247,6 +347,7 @@ const buildPlanPayload = async (db: any, reqBody: any, existingPlan?: any) => {
       track: reqBody.track || null,
       type: reqBody.type || existingPlan?.type || 'manual',
       market_type_preset: reqBody.market_type_preset || existingPlan?.market_type_preset || 'standard',
+      annual_plan_item_id: annualPlanLink.value,
       status
     }
   };
@@ -286,7 +387,7 @@ const registerPlanRoutes = (config: PlanConfig) => {
       const now = new Date().toISOString();
       const payload = result.payload;
       const insertResult = await db.run(
-        `INSERT INTO ${config.tableName} (plan_name, category_name, object_name, variant_name, target_price, plan_quantity, total_amount, note, track, type, market_type_preset, status, batches, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO ${config.tableName} (plan_name, category_name, object_name, variant_name, target_price, plan_quantity, total_amount, note, track, type, market_type_preset, annual_plan_item_id, status, batches, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           payload.plan_name,
           payload.category_name,
@@ -299,6 +400,7 @@ const registerPlanRoutes = (config: PlanConfig) => {
           payload.track,
           payload.type,
           payload.market_type_preset,
+          payload.annual_plan_item_id,
           payload.status,
           payload.batchesJson,
           now,
@@ -330,7 +432,7 @@ const registerPlanRoutes = (config: PlanConfig) => {
       const payload = result.payload;
       const now = new Date().toISOString();
       const updateResult = await db.run(
-        `UPDATE ${config.tableName} SET plan_name = ?, category_name = ?, object_name = ?, variant_name = ?, target_price = ?, plan_quantity = ?, total_amount = ?, note = ?, track = ?, type = ?, market_type_preset = ?, status = ?, batches = ?, updated_at = ? WHERE id = ?`,
+        `UPDATE ${config.tableName} SET plan_name = ?, category_name = ?, object_name = ?, variant_name = ?, target_price = ?, plan_quantity = ?, total_amount = ?, note = ?, track = ?, type = ?, market_type_preset = ?, annual_plan_item_id = ?, status = ?, batches = ?, updated_at = ? WHERE id = ?`,
         [
           payload.plan_name,
           payload.category_name,
@@ -343,6 +445,7 @@ const registerPlanRoutes = (config: PlanConfig) => {
           payload.track,
           payload.type,
           payload.market_type_preset,
+          payload.annual_plan_item_id,
           payload.status,
           payload.batchesJson,
           now,
@@ -379,14 +482,18 @@ const registerPlanRoutes = (config: PlanConfig) => {
       const db = await getDb();
       const { status } = req.query;
       const params: any[] = [];
-      let query = `SELECT * FROM ${config.tableName}`;
+      let query = `
+        SELECT p.*, ${annualPlanLinkSelectFields}
+        FROM ${config.tableName} p
+        ${annualPlanLinkJoins('p')}
+      `;
 
       if (status) {
-        query += ' WHERE status = ?';
+        query += ' WHERE p.status = ?';
         params.push(status);
       }
 
-      query += ' ORDER BY created_at DESC, id DESC';
+      query += ' ORDER BY p.created_at DESC, p.id DESC';
       const plans = await db.all(query, params);
       res.json({ success: true, data: plans.map((plan: any) => serializePlan(plan, config.kind)) });
     } catch (error) {
@@ -399,7 +506,13 @@ const registerPlanRoutes = (config: PlanConfig) => {
     try {
       const db = await getDb();
       const { id } = req.params;
-      const plan = await db.get(`SELECT * FROM ${config.tableName} WHERE id = ?`, [id]);
+      const plan = await db.get(
+        `SELECT p.*, ${annualPlanLinkSelectFields}
+         FROM ${config.tableName} p
+         ${annualPlanLinkJoins('p')}
+         WHERE p.id = ?`,
+        [id]
+      );
 
       if (!plan) {
         return res.status(404).json({ success: false, message: `${config.label}不存在` });
@@ -492,7 +605,7 @@ const registerPlanRoutes = (config: PlanConfig) => {
       const payload = result.payload;
       const now = new Date().toISOString();
       const insertResult = await db.run(
-        `INSERT INTO ${config.tableName} (plan_name, category_name, object_name, variant_name, target_price, plan_quantity, total_amount, note, track, type, market_type_preset, status, batches, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO ${config.tableName} (plan_name, category_name, object_name, variant_name, target_price, plan_quantity, total_amount, note, track, type, market_type_preset, annual_plan_item_id, status, batches, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           payload.plan_name,
           payload.category_name,
@@ -505,6 +618,7 @@ const registerPlanRoutes = (config: PlanConfig) => {
           payload.track,
           payload.type,
           payload.market_type_preset,
+          payload.annual_plan_item_id,
           'pending',
           payload.batchesJson,
           now,
@@ -562,6 +676,25 @@ router.get('/plans/stats', async (req, res) => {
   } catch (error) {
     console.error('Error getting plan stats:', error);
     res.status(500).json({ success: false, message: '获取计划统计数据失败' });
+  }
+});
+
+router.get('/plans/price-alerts', async (_req, res) => {
+  try {
+    const db = await getDb();
+    const items = await getBuyingPlanPriceAlerts(db);
+
+    res.json({
+      success: true,
+      data: {
+        items,
+        total: items.length,
+        generated_at: new Date().toISOString()
+      }
+    });
+  } catch (error) {
+    console.error('Error getting plan price alerts:', error);
+    res.status(500).json({ success: false, message: '获取计划价格到位提醒失败' });
   }
 });
 

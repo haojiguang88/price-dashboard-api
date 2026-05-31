@@ -46,10 +46,10 @@ router.post('/check-records/general-filter', async (req, res) => {
 
     // 必填校验
     if (!system_result || !ALLOWED_SYSTEM_RESULTS.includes(system_result)) {
-      return res.json({ success: false, message: `system_result 必须是 ${ALLOWED_SYSTEM_RESULTS.join(', ')} 之一` });
+      return res.status(400).json({ success: false, message: `system_result 必须是 ${ALLOWED_SYSTEM_RESULTS.join(', ')} 之一` });
     }
     if (!Array.isArray(items)) {
-      return res.json({ success: false, message: 'items 必须是数组' });
+      return res.status(400).json({ success: false, message: 'items 必须是数组' });
     }
 
     // 事务处理
@@ -104,9 +104,9 @@ router.post('/check-records/general-filter', async (req, res) => {
       data: { id: recordId }
     });
   } catch (error) {
-    await db.run('ROLLBACK');
+    await db.run('ROLLBACK').catch(() => undefined);
     console.error('保存风控总过滤记录失败:', error);
-    res.json({ success: false, message: error instanceof Error ? error.message : '保存风控总过滤记录失败' });
+    res.status(500).json({ success: false, message: error instanceof Error ? error.message : '保存风控总过滤记录失败' });
   }
 });
 
@@ -131,13 +131,13 @@ router.post('/check-records/category-risk', async (req, res) => {
 
     // 必填校验
     if (!category_name) {
-      return res.json({ success: false, message: '品类名称不能为空' });
+      return res.status(400).json({ success: false, message: '品类名称不能为空' });
     }
     if (!system_result || !ALLOWED_SYSTEM_RESULTS.includes(system_result)) {
-      return res.json({ success: false, message: `system_result 必须是 ${ALLOWED_SYSTEM_RESULTS.join(', ')} 之一` });
+      return res.status(400).json({ success: false, message: `system_result 必须是 ${ALLOWED_SYSTEM_RESULTS.join(', ')} 之一` });
     }
     if (!Array.isArray(items)) {
-      return res.json({ success: false, message: 'items 必须是数组' });
+      return res.status(400).json({ success: false, message: 'items 必须是数组' });
     }
     if (parentRecordId) {
       const parentRecord = await db.get(
@@ -145,7 +145,7 @@ router.post('/check-records/category-risk', async (req, res) => {
         [parentRecordId]
       );
       if (!parentRecord) {
-        return res.json({ success: false, message: '关联的风控总过滤记录不存在' });
+        return res.status(400).json({ success: false, message: '关联的风控总过滤记录不存在' });
       }
     }
 
@@ -221,9 +221,9 @@ router.post('/check-records/category-risk', async (req, res) => {
       data: { id: recordId }
     });
   } catch (error) {
-    await db.run('ROLLBACK');
+    await db.run('ROLLBACK').catch(() => undefined);
     console.error('保存品类风控记录失败:', error);
-    res.json({ success: false, message: error instanceof Error ? error.message : '保存品类风控记录失败' });
+    res.status(500).json({ success: false, message: error instanceof Error ? error.message : '保存品类风控记录失败' });
   }
 });
 
@@ -287,7 +287,7 @@ router.get('/check-records', async (req, res) => {
     res.json({ success: true, data: result });
   } catch (error) {
     console.error('查询风控检查记录列表失败:', error);
-    res.json({ success: false, message: error instanceof Error ? error.message : '查询风控检查记录列表失败' });
+    res.status(500).json({ success: false, message: error instanceof Error ? error.message : '查询风控检查记录列表失败' });
   }
 });
 
@@ -299,7 +299,7 @@ router.get('/check-records/:id', async (req, res) => {
 
     const record = await db.get('SELECT * FROM risk_check_records WHERE id = ?', [id]);
     if (!record) {
-      return res.json({ success: false, message: '风控检查记录不存在' });
+      return res.status(404).json({ success: false, message: '风控检查记录不存在' });
     }
 
     const items = await db.all(`
@@ -340,24 +340,26 @@ router.get('/check-records/:id', async (req, res) => {
     });
   } catch (error) {
     console.error('查询风控检查记录详情失败:', error);
-    res.json({ success: false, message: error instanceof Error ? error.message : '查询风控检查记录详情失败' });
+    res.status(500).json({ success: false, message: error instanceof Error ? error.message : '查询风控检查记录详情失败' });
   }
 });
 
 // 5. 删除风控检查记录
 router.delete('/check-records/:id', async (req, res) => {
   const db = await getDb();
+  let transactionStarted = false;
   try {
     const { id } = req.params;
 
     // 检查记录是否存在
     const record = await db.get('SELECT id FROM risk_check_records WHERE id = ?', [id]);
     if (!record) {
-      return res.json({ success: false, message: '风控检查记录不存在' });
+      return res.status(404).json({ success: false, message: '风控检查记录不存在' });
     }
 
     // 事务处理
     await db.run('BEGIN TRANSACTION');
+    transactionStarted = true;
 
     // 先删除关联项
     await db.run('DELETE FROM risk_check_record_items WHERE record_id = ?', [id]);
@@ -369,12 +371,15 @@ router.delete('/check-records/:id', async (req, res) => {
     await db.run('DELETE FROM risk_check_records WHERE id = ?', [id]);
 
     await db.run('COMMIT');
+    transactionStarted = false;
 
     res.json({ success: true, message: '删除成功' });
   } catch (error) {
-    await db.run('ROLLBACK');
+    if (transactionStarted) {
+      await db.run('ROLLBACK');
+    }
     console.error('删除风控检查记录失败:', error);
-    res.json({ success: false, message: error instanceof Error ? error.message : '删除风控检查记录失败' });
+    res.status(500).json({ success: false, message: error instanceof Error ? error.message : '删除风控检查记录失败' });
   }
 });
 

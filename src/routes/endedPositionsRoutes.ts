@@ -325,7 +325,20 @@ router.get('/ended-positions/insights', async (req, res) => {
 router.get('/ended-positions', async (req, res) => {
   try {
     const db = await getDb();
-    const positions = await db.all('SELECT * FROM ended_positions ORDER BY sell_date DESC, created_at DESC');
+    const includeArchived = ['1', 'true'].includes(String(req.query.include_archived || '').toLowerCase());
+    const positions = includeArchived
+      ? await db.all('SELECT * FROM ended_positions ORDER BY sell_date DESC, created_at DESC')
+      : await db.all(`
+          SELECT ep.*
+          FROM ended_positions ep
+          LEFT JOIN categories c ON c.name = ep.category_name
+          LEFT JOIN objects o ON o.category_id = c.id AND o.name = ep.object_name
+          LEFT JOIN variants v ON v.object_id = o.id AND v.name = COALESCE(ep.variant_name, '') AND COALESCE(ep.variant_name, '') <> ''
+          WHERE COALESCE(c.is_archived, 0) = 0
+            AND COALESCE(o.is_archived, 0) = 0
+            AND (COALESCE(ep.variant_name, '') = '' OR COALESCE(v.is_archived, 0) = 0)
+          ORDER BY ep.sell_date DESC, ep.created_at DESC
+        `);
     res.json({ status: 'success', data: positions });
   } catch (error) {
     console.error('Error getting ended positions:', error);

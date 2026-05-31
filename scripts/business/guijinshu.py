@@ -8,12 +8,20 @@ from pathlib import Path
 
 import requests
 
+from source_mappings import (
+    load_enabled_source_mappings,
+    mark_source_mapping_errors,
+    mark_source_mappings_matched,
+    mark_source_mappings_seen,
+)
 
 API_URL = "https://www.dehuangshop.com/goods/getGoldAndSilver"
+SOURCE_KEY = "dehuang_metals"
 SOURCE_NAME = "德璜小程序贵金属"
+REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DB_PATH = os.environ.get(
     "BUSINESS_DB_PATH",
-    os.environ.get("DB_PATH", "/Volumes/7100/price-dashboard-data/db/price_dashboard_business_dev.db"),
+    os.environ.get("DB_PATH", str(REPO_ROOT / "data" / "price_dashboard_business_dev.db")),
 )
 
 HEADERS = {
@@ -36,6 +44,29 @@ TARGETS = {
     "黄金9999": {"category": "贵金属", "object": "黄金", "variant": "", "digits": 0},
     "白银": {"category": "贵金属", "object": "白银", "variant": "", "digits": 1},
 }
+
+
+def load_target_definitions(db_path):
+    mappings, configured = load_enabled_source_mappings(db_path, SOURCE_KEY)
+    if not configured:
+        return TARGETS
+
+    target_definitions = {}
+    for mapping in mappings:
+        external_key = str(mapping.get("external_key") or "").strip()
+        category = str(mapping.get("category_name") or "").strip()
+        object_name = str(mapping.get("object_name") or "").strip()
+        if not external_key or not category or not object_name:
+            continue
+        fallback = TARGETS.get(external_key, {})
+        meta = mapping.get("external_meta") or {}
+        target_definitions[external_key] = {
+            "category": category,
+            "object": object_name,
+            "variant": str(mapping.get("variant_name") or ""),
+            "digits": int(meta.get("digits", fallback.get("digits", 0))),
+        }
+    return target_definitions
 
 
 def parse_source_time(value):
@@ -62,8 +93,10 @@ def fetch_payload():
     return payload
 
 
-def extract_records(payload, enabled_targets):
+def extract_records(payload, enabled_targets, target_definitions):
     records = []
+    seen_keys = set()
+    missing_errors = {}
     for group in payload.get("data") or []:
         for subcategory in group.get("subcategoryList") or []:
             for config in subcategory.get("configurationList") or []:
@@ -72,9 +105,11 @@ def extract_records(payload, enabled_targets):
                     parameter = str(item.get("parameter") or "").strip()
                     if parameter not in enabled_targets:
                         continue
-                    target = TARGETS[parameter]
+                    seen_keys.add(parameter)
+                    target = target_definitions[parameter]
                     raw_price = item.get("price")
                     if raw_price is None or str(raw_price).strip() == "":
+                        missing_errors[parameter] = "本次来源出现该项，但价格为空"
                         continue
                     records.append({
                         "parameter": parameter,
@@ -87,7 +122,10 @@ def extract_records(payload, enabled_targets):
                         "source_time": source_time,
                         "source": SOURCE_NAME,
                     })
-    return records
+    missing_keys = set(enabled_targets) - seen_keys
+    for key in missing_keys:
+        missing_errors[key] = "本次来源未出现该外部项"
+    return records, sorted(seen_keys), missing_errors
 
 
 def ensure_master_data(conn, record):
@@ -215,22 +253,47 @@ def main():
     args = parser.parse_args()
 
     db_path = Path(args.db)
+    target_definitions = load_target_definitions(str(db_path))
+    if not target_definitions:
+        print(json.dumps({
+            "success": True,
+            "status": "skipped",
+            "skipped": True,
+            "message": "商品贵金属价格更新已跳过：当前没有启用的数据源映射",
+            "inserted_count": 0,
+            "updated_count": 0,
+            "skipped_count": 0,
+            "records": [],
+        }, ensure_ascii=False))
+        return
     enabled_targets = {
         item.strip()
         for item in str(args.targets).split(",")
-        if item.strip() in TARGETS
+        if item.strip() in target_definitions
     }
     if not enabled_targets:
-        raise RuntimeError(f"没有可导入的目标，可选：{', '.join(TARGETS.keys())}")
+        raise RuntimeError(f"没有可导入的目标，可选：{', '.join(target_definitions.keys())}")
     if not args.dry_run and not db_path.exists():
         raise RuntimeError(f"数据库不存在：{db_path}")
 
     payload = fetch_payload()
-    records = extract_records(payload, enabled_targets)
+    records, seen_keys, missing_errors = extract_records(payload, enabled_targets, target_definitions)
+    if not args.dry_run:
+        mark_source_mappings_seen(str(db_path), SOURCE_KEY, seen_keys)
     if not records:
+        if not args.dry_run:
+            mark_source_mapping_errors(str(db_path), SOURCE_KEY, missing_errors)
         raise RuntimeError("贵金属接口未返回可入库的黄金/白银价格")
 
     inserted, updated, skipped, results = upsert_price_records(str(db_path), records, args.dry_run)
+    matched_keys = {record["parameter"] for record in records}
+    if not args.dry_run:
+        mark_source_mappings_matched(str(db_path), SOURCE_KEY, matched_keys)
+        mark_source_mapping_errors(str(db_path), SOURCE_KEY, {
+            key: message
+            for key, message in missing_errors.items()
+            if key not in matched_keys
+        })
     print(json.dumps({
         "success": True,
         "message": f"商品贵金属价格更新完成：新增 {inserted}，更新 {updated}，跳过 {skipped}",

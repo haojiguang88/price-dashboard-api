@@ -1,5 +1,6 @@
 import express from "express";
 import getDb from "../config/database";
+import { validateActiveMasterTargetByIds } from "../utils/masterData";
 
 const router = express.Router();
 
@@ -33,12 +34,18 @@ router.get("/follows", async (req, res) => {
   try {
     const db = await getDb();
     const follows = await db.all(`
-      SELECT id, category_id, object_id,
-             CASE WHEN variant_id IS NULL OR TRIM(CAST(variant_id AS TEXT)) = '' THEN 0 ELSE CAST(variant_id AS INTEGER) END as variant_id,
-             category_name, object_name, variant_name,
-             NULL as track, 'manual' as type, 'standard' as market_type_preset, created_at
-      FROM follows
-      ORDER BY created_at DESC
+      SELECT f.id, f.category_id, f.object_id,
+             CASE WHEN f.variant_id IS NULL OR TRIM(CAST(f.variant_id AS TEXT)) = '' THEN 0 ELSE CAST(f.variant_id AS INTEGER) END as variant_id,
+             c.name AS category_name,
+             o.name AS object_name,
+             CASE WHEN CAST(f.variant_id AS INTEGER) = 0 THEN '' ELSE v.name END AS variant_name,
+             NULL as track, 'manual' as type, 'standard' as market_type_preset, f.created_at
+      FROM follows f
+      JOIN categories c ON f.category_id = c.id AND COALESCE(c.is_archived, 0) = 0
+      JOIN objects o ON f.object_id = o.id AND o.category_id = c.id AND COALESCE(o.is_archived, 0) = 0
+      LEFT JOIN variants v ON CAST(f.variant_id AS INTEGER) = v.id AND v.object_id = o.id AND COALESCE(v.is_archived, 0) = 0
+      WHERE CAST(f.variant_id AS INTEGER) = 0 OR v.id IS NOT NULL
+      ORDER BY f.created_at DESC
     `);
     res.json({ status: "success", data: follows });
   } catch (error) {
@@ -70,32 +77,15 @@ router.post("/follows", async (req, res) => {
     const object_id = objectIdResult.value as number;
     const variant_id = variantIdResult.value as number;
     
-    // 校验品类是否存在
-    const category = await db.get("SELECT * FROM categories WHERE id = ?", [category_id]);
-    if (!category) {
-      return res.status(400).json({ status: "error", message: "品类不存在" });
-    }
-    
-    // 校验对象是否存在且属于该品类
-    const object = await db.get("SELECT * FROM objects WHERE id = ? AND category_id = ?", [object_id, category_id]);
-    if (!object) {
-      return res.status(400).json({ status: "error", message: "对象不存在或不属于该品类" });
-    }
-    
-    // 校验变体
-    let variant_name = "";
-    if (variant_id > 0) {
-      const variant = await db.get("SELECT * FROM variants WHERE id = ? AND object_id = ?", [variant_id, object_id]);
-      if (!variant) {
-        return res.status(400).json({ status: "error", message: "变体不存在或不属于该对象" });
-      }
-      variant_name = variant.name;
+    const masterTarget = await validateActiveMasterTargetByIds(db, category_id, object_id, variant_id);
+    if (!masterTarget.ok) {
+      return res.status(400).json({ status: "error", message: masterTarget.message });
     }
     
     // 检查是否已关注（幂等处理）
     const existingFollow = await db.get(
       "SELECT * FROM follows WHERE category_id = ? AND object_id = ? AND variant_id = ?",
-      [category_id, object_id, variant_id]
+      [masterTarget.target.category_id, masterTarget.target.object_id, masterTarget.target.variant_id]
     );
     
     if (existingFollow) {
@@ -107,7 +97,14 @@ router.post("/follows", async (req, res) => {
     try {
       const result = await db.run(
         "INSERT INTO follows (category_id, object_id, variant_id, category_name, object_name, variant_name) VALUES (?, ?, ?, ?, ?, ?)",
-        [category_id, object_id, variant_id, category.name, object.name, variant_name]
+        [
+          masterTarget.target.category_id,
+          masterTarget.target.object_id,
+          masterTarget.target.variant_id,
+          masterTarget.target.category_name,
+          masterTarget.target.object_name,
+          masterTarget.target.variant_name
+        ]
       );
       res.json({ status: "success", message: "已关注", id: result.lastID });
     } catch (error) {
@@ -170,19 +167,24 @@ router.get("/follow-cards", async (req, res) => {
     const db = await getDb();
     
     // 查询所有品类
-    const categories = await db.all("SELECT id, name FROM categories");
+    const categories = await db.all("SELECT id, name FROM categories WHERE COALESCE(is_archived, 0) = 0 ORDER BY name ASC");
     
     const result = [];
     
     for (const category of categories) {
       // 查询该品类下的所有关注记录
       const follows = await db.all(
-        `SELECT id, category_id, object_id,
-                CASE WHEN variant_id IS NULL OR TRIM(CAST(variant_id AS TEXT)) = '' THEN 0 ELSE CAST(variant_id AS INTEGER) END as variant_id,
-                category_name, object_name, variant_name,
-                NULL as track, 'manual' as type, 'standard' as market_type_preset, created_at
-         FROM follows
-         WHERE category_id = ?`,
+        `SELECT f.id, f.category_id, f.object_id,
+                CASE WHEN f.variant_id IS NULL OR TRIM(CAST(f.variant_id AS TEXT)) = '' THEN 0 ELSE CAST(f.variant_id AS INTEGER) END as variant_id,
+                c.name AS category_name,
+                o.name AS object_name,
+                CASE WHEN CAST(f.variant_id AS INTEGER) = 0 THEN '' ELSE v.name END AS variant_name,
+                NULL as track, 'manual' as type, 'standard' as market_type_preset, f.created_at
+         FROM follows f
+         JOIN categories c ON f.category_id = c.id AND COALESCE(c.is_archived, 0) = 0
+         JOIN objects o ON f.object_id = o.id AND o.category_id = c.id AND COALESCE(o.is_archived, 0) = 0
+         LEFT JOIN variants v ON CAST(f.variant_id AS INTEGER) = v.id AND v.object_id = o.id AND COALESCE(v.is_archived, 0) = 0
+         WHERE f.category_id = ? AND (CAST(f.variant_id AS INTEGER) = 0 OR v.id IS NOT NULL)`,
         [category.id]
       );
       
@@ -190,9 +192,9 @@ router.get("/follow-cards", async (req, res) => {
       let latestDate = "";
       
       for (const follow of follows) {
-        // 查询价格记录，按date DESC, id DESC排序
+        // 查询价格记录，按最新录入优先排序
         const priceRecords = await db.all(
-          "SELECT * FROM price_records WHERE category = ? AND object_name = ? AND (variant = ? OR variant IS NULL) ORDER BY date DESC, id DESC",
+          "SELECT * FROM price_records WHERE category = ? AND object_name = ? AND COALESCE(variant, '') = ? ORDER BY date DESC, created_at DESC, id DESC",
           [follow.category_name, follow.object_name, follow.variant_name]
         );
         
@@ -219,22 +221,11 @@ router.get("/follow-cards", async (req, res) => {
             changeFromPrevious = currentPrice - previousPrice;
           }
           
-          // 找到最高价格的最后一次出现记录
-          let highestPriceRecord = null;
-          for (const record of priceRecords) {
-            if (record.price === highestPrice) {
-              highestPriceRecord = record;
-            }
-          }
+          // priceRecords 已按最新优先排序，find 返回最近一次出现记录。
+          const highestPriceRecord = priceRecords.find((record: any) => record.price === highestPrice);
           const highestDate = highestPriceRecord ? highestPriceRecord.date : currentDate;
           
-          // 找到最低价格的最后一次出现记录
-          let lowestPriceRecord = null;
-          for (const record of priceRecords) {
-            if (record.price === lowestPrice) {
-              lowestPriceRecord = record;
-            }
-          }
+          const lowestPriceRecord = priceRecords.find((record: any) => record.price === lowestPrice);
           const lowestDate = lowestPriceRecord ? lowestPriceRecord.date : currentDate;
           
           // 构建display_name

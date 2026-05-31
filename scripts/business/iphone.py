@@ -13,9 +13,9 @@ import requests
 API_URL = "https://www.dehuangshop.com/goods/data"
 CATEGORY_NAME = "苹果手机"
 SOURCE_NAME = "档口报价"
-DEFAULT_DB_PATH = os.environ.get(
-    "BUSINESS_DB_PATH",
-    os.environ.get("DB_PATH", "/Volumes/7100/price-dashboard-data/db/price_dashboard_business_dev.db"),
+DEFAULT_DB_PATH = (
+    os.environ.get("BUSINESS_DB_PATH")
+    or str(Path(__file__).resolve().parents[2] / "data" / "price_dashboard_business.db")
 )
 
 HEADERS = {
@@ -154,7 +154,7 @@ def extract_records(payload, whitelist, category):
     matched_count = 0
 
     for model_name, config in iter_iphone_configs(payload):
-        trade_date, source_time = parse_source_time(config.get("date"))
+        price_date, source_time = parse_source_time(config.get("date"))
         for item in config.get("propertyList") or []:
             source_count += 1
             parameter = str(item.get("parameter") or "").strip()
@@ -177,14 +177,14 @@ def extract_records(payload, whitelist, category):
 
             price = normalize_price(raw_price)
             matched_count += 1
-            key = (trade_date, category, object_name, variant)
+            key = (price_date, category, object_name, variant)
             records_by_key[key] = {
                 "category": category,
                 "object": object_name,
                 "variant": variant,
                 "price": price,
                 "raw_price": raw_price,
-                "trade_date": trade_date,
+                "price_date": price_date,
                 "source_time": source_time,
                 "source": SOURCE_NAME,
                 "source_model": model_name,
@@ -222,7 +222,7 @@ def upsert_price_records(db_path, records, dry_run=False):
                 LIMIT 1
                 """,
                 (
-                    record["trade_date"],
+                    record["price_date"],
                     record["category"],
                     record["object"],
                     record["variant"],
@@ -237,7 +237,7 @@ def upsert_price_records(db_path, records, dry_run=False):
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        record["trade_date"],
+                        record["price_date"],
                         record["category"],
                         record["object"],
                         record["variant"],
@@ -280,7 +280,7 @@ def upsert_price_records(db_path, records, dry_run=False):
 
 def main():
     parser = argparse.ArgumentParser(description="Fetch iPhone prices and write commodity price records")
-    parser.add_argument("--db", default=os.environ.get("DB_PATH", DEFAULT_DB_PATH), help="SQLite database path")
+    parser.add_argument("--db", default=DEFAULT_DB_PATH, help="SQLite database path")
     parser.add_argument("--category", default=CATEGORY_NAME, help="Commodity category name")
     parser.add_argument("--dry-run", action="store_true", help="Fetch and parse without writing database")
     args = parser.parse_args()

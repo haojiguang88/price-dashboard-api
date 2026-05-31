@@ -16,6 +16,22 @@ const debugAbnormalMonitorLog = (message: string, payload?: unknown) => {
   console.log(message, payload);
 };
 
+const encodeReadKeyPart = (value: unknown) => encodeURIComponent(String(value || ''));
+const decodeReadKeyPart = (value: string) => {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+};
+
+const firstQueryValue = (value: unknown): string | undefined => {
+  if (Array.isArray(value)) return firstQueryValue(value[0]);
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed || undefined;
+};
+
 // 规则类型优先级
 const rulePriority: Record<string, number> = {
   historical_new_high: 95,
@@ -25,7 +41,8 @@ const rulePriority: Record<string, number> = {
   price_change_period: 80,
   consecutive_change: 75,
   price_change_daily: 70,
-  amplitude: 60
+  amplitude: 60,
+  volatility: 60
 };
 
 // 规则方向映射
@@ -56,11 +73,14 @@ const ruleDirectionMap: Record<string, Record<string, string>> = {
   },
   amplitude: {
     default: 'neutral'
+  },
+  volatility: {
+    default: 'neutral'
   }
 };
 
 // 获取价格记录
-const getPriceRecords = async (db: any, categoryId?: string) => {
+const getPriceRecords = async (db: any, categoryFilter?: { categoryId?: string; categoryName?: string }) => {
   let query = `
     SELECT 
       pr.category as category_name, 
@@ -78,11 +98,15 @@ const getPriceRecords = async (db: any, categoryId?: string) => {
       AND (COALESCE(pr.variant, '') = '' OR COALESCE(v.is_archived, 0) = 0)
   `;
   const params: any[] = [];
+  const categoryId = categoryFilter?.categoryId;
+  const categoryName = categoryFilter?.categoryName;
 
   if (categoryId) {
-    // 这里需要根据实际情况调整，可能需要 join 分类表
     query += ' AND c.id = ?';
     params.push(categoryId);
+  } else if (categoryName) {
+    query += ' AND c.name = ?';
+    params.push(categoryName);
   }
 
   query += ' ORDER BY pr.category, pr.object_name, pr.variant, pr.date DESC, pr.created_at DESC, pr.id DESC';
@@ -470,8 +494,28 @@ const generateReadKey = (result: any): string => {
   const ruleCode = result.primary_rule?.rule_code || '';
   const effectiveDate = result.effective_date || '';
   
-  return `${targetType}|${categoryName}|${objectName}|${variantName}|${ruleCode}|${effectiveDate}`;
+  return [targetType, categoryName, objectName, variantName, ruleCode, effectiveDate]
+    .map(encodeReadKeyPart)
+    .join('|');
 };
+
+const generateLegacyReadKey = (result: any): string => {
+  const targetType = result.target_type || 'object';
+  const categoryName = result.category_name || '';
+  const objectName = result.object_name || '';
+  const variantName = result.variant_name || '';
+  const ruleCode = result.primary_rule?.rule_code || '';
+  const effectiveDate = result.effective_date || '';
+
+  return [targetType, categoryName, objectName, variantName, ruleCode, effectiveDate]
+    .map(value => String(value || ''))
+    .join('|');
+};
+
+const getReadKeyVariants = (result: any) => Array.from(new Set([
+  result.read_key,
+  generateLegacyReadKey(result)
+].filter(Boolean)));
 
 // 聚合结果
 const aggregateResults = async (db: any, groupedRecords: Record<string, any[]>) => {
@@ -568,8 +612,18 @@ const aggregateResults = async (db: any, groupedRecords: Record<string, any[]>) 
 };
 
 // 排序结果
+const normalizeSortBy = (sortBy: string) => {
+  const aliases: Record<string, string> = {
+    hit_rule_count: 'hit_count',
+    primary_rule_priority: 'priority',
+    price_date: 'date',
+    latest: 'date'
+  };
+  return aliases[sortBy] || sortBy;
+};
+
 const sortResults = (results: any[], sortBy: string) => {
-  switch (sortBy) {
+  switch (normalizeSortBy(sortBy)) {
     case 'hit_count':
       return results.sort((a, b) => b.hit_count - a.hit_count);
     case 'priority':
@@ -594,40 +648,51 @@ const sortResults = (results: any[], sortBy: string) => {
 router.get('/', async (req, res) => {
   try {
     const db = await getDb();
-    const { category_id, signal_state, rule_type, sort_by = 'default' } = req.query;
+    const categoryId = firstQueryValue(req.query.category_id);
+    const legacyCategory = firstQueryValue(req.query.category);
+    const signalState = firstQueryValue(req.query.signal_state) || firstQueryValue(req.query.signal_status);
+    const ruleType = firstQueryValue(req.query.rule_type);
+    const sortBy = firstQueryValue(req.query.sort_by) || 'default';
+    const categoryFilter = categoryId
+      ? { categoryId }
+      : legacyCategory
+        ? /^\d+$/.test(legacyCategory)
+          ? { categoryId: legacyCategory }
+          : { categoryName: legacyCategory }
+        : undefined;
 
     // 获取价格记录
-    const groupedRecords = await getPriceRecords(db, category_id as string);
+    const groupedRecords = await getPriceRecords(db, categoryFilter);
 
     // 执行规则命中
     let results = await aggregateResults(db, groupedRecords);
 
     // 过滤已读结果
     if (results.length > 0) {
-      const readKeys = results.map(result => result.read_key);
+      const readKeys = Array.from(new Set(results.flatMap(getReadKeyVariants)));
       const placeholders = readKeys.map(() => '?').join(',');
       const readRecords = await db.all(
         `SELECT read_key FROM abnormal_monitor_reads WHERE read_key IN (${placeholders})`,
         readKeys
       );
       const readKeySet = new Set(readRecords.map((record: any) => record.read_key));
-      results = results.filter(result => !readKeySet.has(result.read_key));
+      results = results.filter(result => !getReadKeyVariants(result).some(key => readKeySet.has(key)));
     }
 
     // 过滤结果
-    if (signal_state) {
-      results = results.filter(result => result.signal_state === signal_state);
+    if (signalState) {
+      results = results.filter(result => result.signal_state === signalState);
     }
 
-    if (rule_type) {
+    if (ruleType) {
       results = results.filter(result => 
-        result.primary_rule.rule_type === rule_type ||
-        result.secondary_rules.some((rule: any) => rule.rule_type === rule_type)
+        result.primary_rule.rule_type === ruleType ||
+        result.secondary_rules.some((rule: any) => rule.rule_type === ruleType)
       );
     }
 
     // 排序结果
-    results = sortResults(results, sort_by as string);
+    results = sortResults(results, sortBy);
 
     res.json({
       status: "success",
@@ -657,19 +722,23 @@ router.post('/read', async (req, res) => {
       return;
     }
 
-    const [target_type, category_name, object_name, variant_name, rule_code, effective_date] = parts;
+    const [target_type, category_name, object_name, variant_name, rule_code, effective_date] = parts.map(decodeReadKeyPart);
+    const canonicalReadKey = [
+      target_type,
+      category_name,
+      object_name,
+      variant_name,
+      rule_code,
+      effective_date
+    ].map(encodeReadKeyPart).join('|');
 
     // 写入已读记录（幂等处理）
-    try {
-      await db.run(
-        `INSERT OR IGNORE INTO abnormal_monitor_reads 
-         (read_key, target_type, category_name, object_name, variant_name, rule_code, effective_date)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        [read_key, target_type, category_name, object_name, variant_name, rule_code, effective_date]
-      );
-    } catch (error) {
-      console.error('Error inserting read record:', error);
-    }
+    await db.run(
+      `INSERT OR IGNORE INTO abnormal_monitor_reads
+       (read_key, target_type, category_name, object_name, variant_name, rule_code, effective_date)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [canonicalReadKey, target_type, category_name, object_name, variant_name, rule_code, effective_date]
+    );
 
     res.json({
       status: "success",

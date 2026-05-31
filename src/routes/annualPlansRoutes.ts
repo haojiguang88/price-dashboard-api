@@ -4,24 +4,68 @@ import getDb from '../config/database';
 const router = express.Router();
 
 // 年度计划主表相关接口
+const validAnnualPlanStatuses = ['生效中', '已归档'];
+
+const normalizeAnnualPlanOverview = (body: any) => {
+  const year = Number(body.year);
+  const title = String(body.title || '').trim();
+  const status = String(body.status || '生效中').trim();
+
+  if (!Number.isInteger(year) || year < 2000 || year > 2100) {
+    return { error: 'year 必须是 2000 到 2100 之间的整数' };
+  }
+  if (!title) {
+    return { error: 'title 不能为空' };
+  }
+  if (!validAnnualPlanStatuses.includes(status)) {
+    return { error: '年度计划状态不合法' };
+  }
+
+  return { value: { year, title, status } };
+};
+
+const archiveActiveAnnualPlansForYear = async (db: any, year: number, now: string, excludedPlanId?: number | string) => {
+  let query = "UPDATE annual_plans SET status = '已归档', updated_at = ? WHERE year = ? AND status = '生效中' AND is_deleted = 0";
+  const params: Array<string | number> = [now, year];
+  if (excludedPlanId !== undefined) {
+    query += ' AND id != ?';
+    params.push(excludedPlanId);
+  }
+  await db.run(query, params);
+};
 
 // 新增年度计划
 router.post('/annual-plans', async (req, res) => {
   try {
     const db = await getDb();
-    const { year, title, core_goal, overall_strategy, capital_principle, execution_principle, market_background, risk_note, status, note } = req.body;
+    const { core_goal, overall_strategy, capital_principle, execution_principle, market_background, risk_note, note } = req.body;
+    const normalized = normalizeAnnualPlanOverview(req.body);
     
-    if (!year || !title) {
-      return res.status(400).json({ success: false, message: '缺少必填字段: year, title' });
+    if ('error' in normalized) {
+      return res.status(400).json({ success: false, message: normalized.error });
     }
     
     const now = new Date().toISOString();
-    const result = await db.run(
-      'INSERT INTO annual_plans (year, title, core_goal, overall_strategy, capital_principle, execution_principle, market_background, risk_note, status, note, is_deleted, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [year, title, core_goal, overall_strategy, capital_principle, execution_principle, market_background, risk_note, status, note, 0, now, now]
-    );
+    await db.run('BEGIN TRANSACTION');
+    let result: any;
+    let createdRecord: any;
+
+    try {
+      if (normalized.value.status === '生效中') {
+        await archiveActiveAnnualPlansForYear(db, normalized.value.year, now);
+      }
+      result = await db.run(
+        'INSERT INTO annual_plans (year, title, core_goal, overall_strategy, capital_principle, execution_principle, market_background, risk_note, status, note, is_deleted, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        [normalized.value.year, normalized.value.title, core_goal, overall_strategy, capital_principle, execution_principle, market_background, risk_note, normalized.value.status, note, 0, now, now]
+      );
+      createdRecord = await db.get('SELECT * FROM annual_plans WHERE id = ? AND is_deleted = 0', [result.lastID]);
+      await db.run('COMMIT');
+    } catch (error) {
+      await db.run('ROLLBACK');
+      throw error;
+    }
     
-    res.json({ success: true, data: { id: result.lastID } });
+    res.json({ success: true, data: createdRecord || { id: result.lastID } });
   } catch (error) {
     console.error('Error creating annual plan:', error);
     res.status(500).json({ success: false, message: '新增年度计划失败' });
@@ -63,10 +107,11 @@ router.put('/annual-plans/:id', async (req, res) => {
   try {
     const db = await getDb();
     const { id } = req.params;
-    const { year, title, core_goal, overall_strategy, capital_principle, execution_principle, market_background, risk_note, status, note } = req.body;
+    const { core_goal, overall_strategy, capital_principle, execution_principle, market_background, risk_note, note } = req.body;
+    const normalized = normalizeAnnualPlanOverview(req.body);
     
-    if (!year || !title) {
-      return res.status(400).json({ success: false, message: '缺少必填字段: year, title' });
+    if ('error' in normalized) {
+      return res.status(400).json({ success: false, message: normalized.error });
     }
     
     const existingRecord = await db.get('SELECT * FROM annual_plans WHERE id = ? AND is_deleted = 0', [id]);
@@ -75,12 +120,26 @@ router.put('/annual-plans/:id', async (req, res) => {
     }
     
     const now = new Date().toISOString();
-    const result = await db.run(
-      'UPDATE annual_plans SET year = ?, title = ?, core_goal = ?, overall_strategy = ?, capital_principle = ?, execution_principle = ?, market_background = ?, risk_note = ?, status = ?, note = ?, updated_at = ? WHERE id = ? AND is_deleted = 0',
-      [year, title, core_goal, overall_strategy, capital_principle, execution_principle, market_background, risk_note, status, note, now, id]
-    );
+    await db.run('BEGIN TRANSACTION');
+    let result: any;
+    let updatedRecord: any;
+
+    try {
+      if (normalized.value.status === '生效中') {
+        await archiveActiveAnnualPlansForYear(db, normalized.value.year, now, id);
+      }
+      result = await db.run(
+        'UPDATE annual_plans SET year = ?, title = ?, core_goal = ?, overall_strategy = ?, capital_principle = ?, execution_principle = ?, market_background = ?, risk_note = ?, status = ?, note = ?, updated_at = ? WHERE id = ? AND is_deleted = 0',
+        [normalized.value.year, normalized.value.title, core_goal, overall_strategy, capital_principle, execution_principle, market_background, risk_note, normalized.value.status, note, now, id]
+      );
+      updatedRecord = await db.get('SELECT * FROM annual_plans WHERE id = ? AND is_deleted = 0', [id]);
+      await db.run('COMMIT');
+    } catch (error) {
+      await db.run('ROLLBACK');
+      throw error;
+    }
     
-    res.json({ success: true, data: { changes: result.changes } });
+    res.json({ success: true, data: { ...updatedRecord, changes: result.changes } });
   } catch (error) {
     console.error('Error updating annual plan:', error);
     res.status(500).json({ success: false, message: '更新年度计划失败' });
@@ -99,7 +158,17 @@ router.delete('/annual-plans/:id', async (req, res) => {
     }
     
     const now = new Date().toISOString();
-    const result = await db.run('UPDATE annual_plans SET is_deleted = 1, updated_at = ? WHERE id = ? AND is_deleted = 0', [now, id]);
+    await db.run('BEGIN TRANSACTION');
+    let result;
+
+    try {
+      result = await db.run('UPDATE annual_plans SET is_deleted = 1, updated_at = ? WHERE id = ? AND is_deleted = 0', [now, id]);
+      await db.run('UPDATE annual_plan_items SET is_deleted = 1, updated_at = ? WHERE plan_id = ? AND is_deleted = 0', [now, id]);
+      await db.run('COMMIT');
+    } catch (error) {
+      await db.run('ROLLBACK');
+      throw error;
+    }
     
     res.json({ success: true, data: { changes: result.changes } });
   } catch (error) {

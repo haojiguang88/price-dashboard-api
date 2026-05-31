@@ -173,15 +173,22 @@ export const createManualTodo = async (input: ManualTodoInput) => {
 };
 
 export const updateManualTodo = async (id: string, input: ManualTodoInput, scopeWorkspaceInput: unknown) => {
-  const payload = validateManualTodoInput(input);
   const db = await getDb();
   const requestWorkspace = normalizeWorkspace(scopeWorkspaceInput ?? input.workspace);
   const existingFilter = getScopedIdFilter(id, requestWorkspace);
   const existingTodo = await db.get(
-    `SELECT id, domain, workspace FROM manual_todos WHERE ${existingFilter.whereClause}`,
+    `SELECT id, title, priority, status, due_date, note, domain, workspace FROM manual_todos WHERE ${existingFilter.whereClause}`,
     existingFilter.params
   );
   if (!existingTodo) throw new WorkspaceCenterError(404, "手动待办不存在");
+
+  const payload = validateManualTodoInput({
+    title: input.title === undefined ? existingTodo.title : input.title,
+    priority: input.priority === undefined ? existingTodo.priority : input.priority,
+    status: input.status === undefined ? existingTodo.status : input.status,
+    due_date: input.due_date === undefined ? existingTodo.due_date : input.due_date,
+    note: input.note === undefined ? existingTodo.note : input.note
+  });
 
   const workspace = input.workspace === undefined
     ? (normalizeWorkspace(existingTodo.workspace) || "business")

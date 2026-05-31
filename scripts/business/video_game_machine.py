@@ -8,14 +8,22 @@ from pathlib import Path
 
 import requests
 
+from source_mappings import (
+    load_enabled_source_mappings,
+    mark_source_mapping_errors,
+    mark_source_mappings_matched,
+    mark_source_mappings_seen,
+    mark_source_run_error,
+)
 
 LIST_URL = "https://xcx1406.ycdongxu.com/index.php/Api/user/newphone"
 DETAIL_URL = "https://xcx1406.ycdongxu.com/index.php/Api/user/getprices"
 CATEGORY_NAME = "游戏机"
+SOURCE_KEY = "dongxu_game_console"
 SOURCE_NAME = "档口报价"
-DEFAULT_DB_PATH = os.environ.get(
-    "BUSINESS_DB_PATH",
-    os.environ.get("DB_PATH", "/Volumes/7100/price-dashboard-data/db/price_dashboard_business_dev.db"),
+DEFAULT_DB_PATH = (
+    os.environ.get("BUSINESS_DB_PATH")
+    or str(Path(__file__).resolve().parents[2] / "data" / "price_dashboard_business.db")
 )
 
 BASE_PARAMS = {
@@ -64,6 +72,34 @@ SOURCE_TARGETS = [
     {"object": "PS5港版数字", "brand": "索尼", "name": "PS5港版", "key": "数字Slim"},
     {"object": "PS5 Pro港版数字", "brand": "索尼", "name": "PS5港版", "key": "PRO数字"},
 ]
+
+
+def build_external_key(target):
+    return f"{target['brand']}|{target['name']}|{target['key']}"
+
+
+def load_source_targets(db_path):
+    mappings, configured = load_enabled_source_mappings(db_path, SOURCE_KEY)
+    if not configured:
+        return [{**target, "external_key": build_external_key(target)} for target in SOURCE_TARGETS]
+
+    targets = []
+    for mapping in mappings:
+        meta = mapping.get("external_meta") or {}
+        object_name = str(mapping.get("object_name") or "").strip()
+        brand = str(meta.get("brand") or "").strip()
+        name = str(meta.get("name") or "").strip()
+        key = str(meta.get("key") or "").strip()
+        if not object_name or not brand or not name or not key:
+            continue
+        targets.append({
+            "object": object_name,
+            "brand": brand,
+            "name": name,
+            "key": key,
+            "external_key": str(mapping.get("external_key") or f"{brand}|{name}|{key}").strip(),
+        })
+    return targets
 
 
 def now_ms():
@@ -154,12 +190,12 @@ def load_enabled_objects(db_path, category):
     return {row[0] for row in rows}
 
 
-def match_target(source_item, enabled_objects):
+def match_target(source_item, enabled_objects, source_targets):
     source_brand = str(source_item.get("brand") or "")
     source_name = normalize_text(source_item.get("mobile_name"))
     source_key = normalize_text(source_item.get("key"))
 
-    for target in SOURCE_TARGETS:
+    for target in source_targets:
         if target["object"] not in enabled_objects:
             continue
         if target["brand"] != source_brand:
@@ -168,47 +204,71 @@ def match_target(source_item, enabled_objects):
             continue
         if normalize_text(target["key"]) not in source_key:
             continue
-        return target["object"]
-    return ""
+        return target
+    return None
 
 
-def extract_records(source_items, enabled_objects, category):
+def extract_records(source_items, enabled_objects, category, source_targets):
     records_by_key = {}
     source_count = 0
     matched_count = 0
+    seen_external_keys = set()
+    missing_errors = {}
+    invalid_price_keys = set()
 
     for item in source_items:
         source_count += 1
-        object_name = match_target(item, enabled_objects)
-        if not object_name:
+        target = match_target(item, enabled_objects, source_targets)
+        if not target:
             continue
 
+        object_name = target["object"]
+        external_key = target["external_key"]
+        seen_external_keys.add(external_key)
         raw_price = item.get("price")
         if raw_price is None or str(raw_price).strip() == "":
+            invalid_price_keys.add(external_key)
             continue
-        price = normalize_price(raw_price)
+        try:
+            price = normalize_price(raw_price)
+        except (TypeError, ValueError):
+            invalid_price_keys.add(external_key)
+            continue
         if price <= 0:
+            invalid_price_keys.add(external_key)
             continue
 
-        trade_date, source_time = parse_source_time(item.get("add_time"))
+        price_date, source_time = parse_source_time(item.get("add_time"))
         matched_count += 1
-        key = (trade_date, category, object_name, "")
+        key = (price_date, category, object_name, "")
         records_by_key[key] = {
             "category": category,
             "object": object_name,
             "variant": "",
             "price": price,
             "raw_price": raw_price,
-            "trade_date": trade_date,
+            "price_date": price_date,
             "source_time": source_time,
             "source": SOURCE_NAME,
             "source_id": item.get("id"),
             "source_mobile_name": item.get("mobile_name"),
             "source_key": item.get("key"),
+            "mapping_external_key": external_key,
         }
 
     records = list(records_by_key.values())
-    return records, source_count, matched_count, max(source_count - matched_count, 0)
+    missing_external_keys = {target["external_key"] for target in source_targets} - seen_external_keys
+    for external_key in missing_external_keys:
+        missing_errors[external_key] = "本次来源未出现该外部项"
+    return (
+        records,
+        source_count,
+        matched_count,
+        max(source_count - matched_count, 0),
+        sorted(seen_external_keys),
+        missing_errors,
+        sorted(invalid_price_keys),
+    )
 
 
 def upsert_price_records(db_path, records, dry_run=False):
@@ -238,7 +298,7 @@ def upsert_price_records(db_path, records, dry_run=False):
                 LIMIT 1
                 """,
                 (
-                    record["trade_date"],
+                    record["price_date"],
                     record["category"],
                     record["object"],
                     record["variant"],
@@ -253,7 +313,7 @@ def upsert_price_records(db_path, records, dry_run=False):
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        record["trade_date"],
+                        record["price_date"],
                         record["category"],
                         record["object"],
                         record["variant"],
@@ -296,7 +356,7 @@ def upsert_price_records(db_path, records, dry_run=False):
 
 def main():
     parser = argparse.ArgumentParser(description="Fetch video game console prices and write commodity price records")
-    parser.add_argument("--db", default=os.environ.get("DB_PATH", DEFAULT_DB_PATH), help="SQLite database path")
+    parser.add_argument("--db", default=DEFAULT_DB_PATH, help="SQLite database path")
     parser.add_argument("--category", default=CATEGORY_NAME, help="Commodity category name")
     parser.add_argument("--dry-run", action="store_true", help="Fetch and parse without writing database")
     args = parser.parse_args()
@@ -307,15 +367,67 @@ def main():
 
     enabled_objects = load_enabled_objects(str(db_path), args.category)
     if not enabled_objects:
-        raise RuntimeError(f"系统里没有启用的{args.category}型号")
+        print(json.dumps({
+            "success": True,
+            "status": "skipped",
+            "skipped": True,
+            "message": f"系统里没有启用的{args.category}型号，本次游戏机价格更新已跳过",
+            "inserted_count": 0,
+            "updated_count": 0,
+            "skipped_count": 0,
+            "source_count": 0,
+            "matched_count": 0,
+            "filtered_count": 0,
+            "records": [],
+        }, ensure_ascii=False))
+        return
 
-    source_items = fetch_source_items()
-    records, source_count, matched_count, filtered_count = extract_records(source_items, enabled_objects, args.category)
+    source_targets = load_source_targets(str(db_path))
+    if not source_targets:
+        print(json.dumps({
+            "success": True,
+            "status": "skipped",
+            "skipped": True,
+            "message": "游戏机价格更新已跳过：当前没有启用的数据源映射",
+            "inserted_count": 0,
+            "updated_count": 0,
+            "skipped_count": 0,
+            "source_count": 0,
+            "matched_count": 0,
+            "filtered_count": 0,
+            "unmapped_enabled_objects": [],
+            "records": [],
+        }, ensure_ascii=False))
+        return
+    try:
+        source_items = fetch_source_items()
+        records, source_count, matched_count, filtered_count, seen_external_keys, missing_errors, invalid_price_keys = extract_records(
+            source_items,
+            enabled_objects,
+            args.category,
+            source_targets,
+        )
+    except Exception as exc:
+        if not args.dry_run:
+            mark_source_run_error(str(db_path), SOURCE_KEY, f"游戏机价格更新失败：{exc}")
+        raise
+    if not args.dry_run:
+        mark_source_mappings_seen(str(db_path), SOURCE_KEY, seen_external_keys)
     if not records:
+        if not args.dry_run:
+            mark_source_mapping_errors(str(db_path), SOURCE_KEY, missing_errors)
         raise RuntimeError("游戏机接口未返回可匹配系统型号的价格")
 
     inserted, updated, skipped, results = upsert_price_records(str(db_path), records, args.dry_run)
-    target_objects = {target["object"] for target in SOURCE_TARGETS}
+    matched_external_keys = {record["mapping_external_key"] for record in records}
+    if not args.dry_run:
+        mark_source_mappings_matched(str(db_path), SOURCE_KEY, matched_external_keys)
+        mark_source_mapping_errors(str(db_path), SOURCE_KEY, {
+            key: message
+            for key, message in missing_errors.items()
+            if key not in matched_external_keys
+        })
+    target_objects = {target["object"] for target in source_targets}
     unmapped_enabled_objects = sorted(enabled_objects - target_objects)
 
     print(json.dumps({
@@ -330,6 +442,7 @@ def main():
         "source_count": source_count,
         "matched_count": matched_count,
         "filtered_count": filtered_count,
+        "invalid_price_keys": invalid_price_keys,
         "unmapped_enabled_objects": unmapped_enabled_objects,
         "records": results,
     }, ensure_ascii=False))
