@@ -1,105 +1,15 @@
 // 迁移管理模块
 
-type MigrationScope = 'business' | 'trading' | 'cross_app';
-
 interface Migration {
   id: string;
   name: string;
-  scope?: MigrationScope;
   sql?: string;
   run?: (db: any) => Promise<void>;
 }
 
-const APP_MIGRATION_SCOPE: Exclude<MigrationScope, 'cross_app'> = 'business';
-
-const crossAppMigrationIds = new Set([
-  '20260501_007',
-  '20260507_001',
-  '20260507_002',
-  '20260507_003',
-  '20260525_003_normalize_task_timestamps',
-  '20260525_005_shared_table_workspaces',
-  '20260525_006_audit_log_workspaces',
-  '20260526_001_workspace_tags'
-]);
-
-const businessMigrationIdPrefixes = [
-  '20260416',
-  '20260417',
-  '20260418',
-  '20260423',
-  '20260424',
-  '20260425',
-  '20260507_004',
-  '20260507_006',
-  '20260512_002',
-  '20260512_003',
-  '20260515_003',
-  '20260516_001',
-  '20260516_002',
-  '20260516_003',
-  '20260516_004'
-];
-
-const tradingMigrationIdPrefixes = [
-  '20260501',
-  '20260503',
-  '20260504',
-  '20260506_002',
-  '20260506_003',
-  '20260507_005',
-  '20260512_001',
-  '20260513',
-  '20260514',
-  '20260515_001',
-  '20260515_002',
-  '20260517',
-  '20260518',
-  '20260519',
-  '20260520',
-  '20260522',
-  '20260523',
-  '20260524',
-  '20260525_001',
-  '20260525_002',
-  '20260525_004'
-];
-
-const businessMigrationPattern = /(original price|annual plan|monitor rule|abnormal monitor|position|sell_record|supply|product|commodity|iphone|pop mart|video game|rejected opportunities|risk control|record tables)/i;
-const tradingMigrationPattern = /\b(finance|financial|tushare|trend phase|candidate pool|asset universe|entry trigger|trade plans|stock|etf|fx daily|precious metal|gold|metal_)/i;
-
-const startsWithAny = (value: string, prefixes: string[]) => (
-  prefixes.some(prefix => value.startsWith(prefix))
-);
-
-const getMigrationText = (migration: Migration) => [
-  migration.id,
-  migration.name,
-  migration.sql || '',
-  migration.run ? String(migration.run) : ''
-].join('\n');
-
-const inferMigrationScope = (migration: Migration): MigrationScope => {
-  if (migration.scope) return migration.scope;
-  if (crossAppMigrationIds.has(migration.id)) return 'cross_app';
-  if (startsWithAny(migration.id, businessMigrationIdPrefixes)) return 'business';
-  if (startsWithAny(migration.id, tradingMigrationIdPrefixes)) return 'trading';
-
-  const migrationText = getMigrationText(migration);
-  if (businessMigrationPattern.test(migrationText)) return 'business';
-  if (tradingMigrationPattern.test(migrationText)) return 'trading';
-  console.warn(`Migration ${migration.id} has no explicit scope; treating it as cross-app. Add scope before changing this migration.`);
-  return 'cross_app';
-};
-
-const shouldRunMigration = (migration: Migration) => {
-  const scope = inferMigrationScope(migration);
-  return scope === 'cross_app' || scope === APP_MIGRATION_SCOPE;
-};
-
 // 迁移列表
 const migrations: Migration[] = [
-  {
+{
     id: '20260416_001',
     name: 'Create record tables',
     sql: `
@@ -163,8 +73,8 @@ const migrations: Migration[] = [
         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
       );
       
-      -- 交易复盘表
-      CREATE TABLE IF NOT EXISTS trade_reviews (
+      -- 买卖复盘表
+      CREATE TABLE IF NOT EXISTS business_reviews (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         title TEXT NOT NULL,
         track TEXT NOT NULL,
@@ -249,7 +159,7 @@ const migrations: Migration[] = [
       );
     `
   },
-  {
+{
     id: '20260417_001',
     name: 'Create original price records table',
     sql: `
@@ -270,7 +180,7 @@ const migrations: Migration[] = [
       );
     `
   },
-  {
+{
     id: '20260417_002',
     name: 'Update original price records table to use master data',
     sql: `
@@ -300,7 +210,7 @@ const migrations: Migration[] = [
       ALTER TABLE original_price_records_new RENAME TO original_price_records;
     `
   },
-  {
+{
     id: '20260418_001',
     name: 'Create annual plans tables',
     sql: `
@@ -342,16 +252,14 @@ const migrations: Migration[] = [
       );
     `
   },
-  {
+{
     id: '20260418_002',
     name: 'Add annual plan item changes table and fields',
-    sql: `
-      -- 为年度计划子项表添加新字段
-      ALTER TABLE annual_plan_items ADD COLUMN downgrade_reason TEXT;
-      ALTER TABLE annual_plan_items ADD COLUMN resume_condition TEXT;
-      
-      -- 创建年度计划子项变更表
-      CREATE TABLE IF NOT EXISTS annual_plan_item_changes (
+    run: async (db: any) => {
+      await ensureMigrationColumn(db, 'annual_plan_items', 'downgrade_reason', 'TEXT');
+      await ensureMigrationColumn(db, 'annual_plan_items', 'resume_condition', 'TEXT');
+      await dbExec(db, `
+        CREATE TABLE IF NOT EXISTS annual_plan_item_changes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         plan_item_id INTEGER NOT NULL,
         change_date TEXT NOT NULL,
@@ -370,9 +278,10 @@ const migrations: Migration[] = [
         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (plan_item_id) REFERENCES annual_plan_items (id)
       );
-    `
+      `);
+    }
   },
-  {
+{
     id: '20260418_003',
     name: 'Reconstruct annual plans tables',
     sql: `
@@ -446,15 +355,14 @@ const migrations: Migration[] = [
       );
     `
   },
-  {
+{
     id: '20260423_001',
     name: 'Add ended_position_id to sell_records',
-    sql: `
-      -- 为 sell_records 表添加 ended_position_id 字段
-      ALTER TABLE sell_records ADD COLUMN ended_position_id INTEGER;
-    `
+    run: async (db: any) => {
+      await ensureMigrationColumn(db, 'sell_records', 'ended_position_id', 'INTEGER');
+    }
   },
-  {
+{
     id: '20260424_001',
     name: 'Create monitor rules table',
     sql: `
@@ -475,7 +383,7 @@ const migrations: Migration[] = [
       );
     `
   },
-  {
+{
     id: '20260425_001',
     name: 'Create abnormal monitor reads table',
     sql: `
@@ -493,7 +401,7 @@ const migrations: Migration[] = [
       );
     `
   },
-  {
+{
     id: '20260425_001_seed_historical_rules',
     name: 'Seed global historical high/low monitor rules',
     sql: `
@@ -540,206 +448,18 @@ const migrations: Migration[] = [
       );
     `
   },
-  {
+{
     id: '20260425_002',
     name: 'Add source_id to positions table',
-    sql: `
-      -- 为 positions 表添加 source_id 字段
-      ALTER TABLE positions ADD COLUMN source_id TEXT;
-    `
+    run: async (db: any) => {
+      await ensureMigrationColumn(db, 'positions', 'source_id', 'TEXT');
+    }
   },
-  {
-    id: '20260501_001',
-    name: 'Add new fields for crash grading v1',
-    sql: `
-      -- 添加股灾分级v1所需字段
-      ALTER TABLE financial_market_regime ADD COLUMN entry_permission TEXT;
-      ALTER TABLE financial_market_regime ADD COLUMN entry_reason TEXT;
-      ALTER TABLE financial_market_regime ADD COLUMN low_120 REAL;
-      ALTER TABLE financial_market_regime ADD COLUMN drawdown_20 REAL;
-      ALTER TABLE financial_market_regime ADD COLUMN drawdown_60 REAL;
-      ALTER TABLE financial_market_regime ADD COLUMN drawdown_120 REAL;
-      ALTER TABLE financial_market_regime ADD COLUMN distance_to_ma60 REAL;
-      ALTER TABLE financial_market_regime ADD COLUMN below_ma60_days INTEGER;
-      ALTER TABLE financial_market_regime ADD COLUMN rule_version TEXT DEFAULT 'market_regime_v1';
-    `
-  },
-  {
-    id: '20260501_002',
-    name: 'Create trend phase results table',
-    sql: `
-      -- 趋势阶段结果表
-      CREATE TABLE IF NOT EXISTS financial_trend_phase_results (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        symbol TEXT NOT NULL,
-        asset_type TEXT NOT NULL,
-        source TEXT NOT NULL,
-        trade_date TEXT NOT NULL,
-        close REAL,
-        ma20 REAL,
-        ma60 REAL,
-        bias60 REAL,
-        ret5 REAL,
-        ret20 REAL,
-        range20 REAL,
-        cross60_10 INTEGER,
-        trend_phase_code TEXT NOT NULL,
-        trend_phase_reason TEXT NOT NULL,
-        rule_version TEXT NOT NULL,
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(symbol, asset_type, source, trade_date, rule_version)
-      );
-      
-      CREATE INDEX IF NOT EXISTS idx_trend_phase_symbol_date
-      ON financial_trend_phase_results(symbol, trade_date);
-    `
-  },
-  {
-    id: '20260501_003',
-    name: 'Add reason_code and reason_details fields to trend phase results',
-    sql: `
-      -- 添加 reason_code 字段
-      ALTER TABLE financial_trend_phase_results 
-      ADD COLUMN reason_code TEXT;
-      
-      -- 添加 reason_details 字段
-      ALTER TABLE financial_trend_phase_results 
-      ADD COLUMN reason_details TEXT;
-    `
-  },
-  {
-    id: '20260501_004',
-    name: 'Create financial candidate pool table',
-    sql: `
-      -- 金融自动备选池
-      CREATE TABLE IF NOT EXISTS financial_candidate_pool (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        symbol TEXT NOT NULL,
-        name TEXT,
-        asset_type TEXT NOT NULL,
-        source TEXT NOT NULL,
-        trade_date TEXT NOT NULL,
-        close REAL,
-        ma20 REAL,
-        ma60 REAL,
-        ma120 REAL,
-        distance_to_ma60 REAL,
-        above_ma60_days INTEGER,
-        structure_status TEXT NOT NULL,
-        structure_reason TEXT,
-        safe_zone_status TEXT NOT NULL,
-        safe_zone_reason TEXT,
-        trend_phase_code TEXT,
-        trend_phase_reason TEXT,
-        market_regime TEXT,
-        entry_permission TEXT,
-        plan_profile TEXT,
-        plan_profile_label TEXT,
-        final_status TEXT NOT NULL,
-        pool_status TEXT NOT NULL DEFAULT 'active',
-        priority TEXT NOT NULL DEFAULT 'medium',
-        invalidation_line REAL,
-        candidate_reason TEXT,
-        risk_note TEXT,
-        rule_version TEXT NOT NULL DEFAULT 'candidate_pool_v1',
-        first_selected_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        last_checked_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(symbol, asset_type, source, rule_version)
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_financial_candidate_pool_status
-      ON financial_candidate_pool(pool_status, last_checked_at);
-
-      CREATE INDEX IF NOT EXISTS idx_financial_candidate_pool_symbol
-      ON financial_candidate_pool(symbol, asset_type, source);
-    `
-  },
-  {
-    id: '20260501_005',
-    name: 'Create financial asset universe table',
-    sql: `
-      -- 金融资产库/白名单：记录哪些标的需要拉取，哪些已经有本地数据
-      CREATE TABLE IF NOT EXISTS financial_asset_universe (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        symbol TEXT NOT NULL,
-        name TEXT,
-        asset_type TEXT NOT NULL,
-        universe_type TEXT NOT NULL,
-        source TEXT NOT NULL DEFAULT 'tushare',
-        enabled INTEGER NOT NULL DEFAULT 1,
-        update_status TEXT NOT NULL DEFAULT 'pending',
-        total_count INTEGER NOT NULL DEFAULT 0,
-        first_trade_date TEXT,
-        last_trade_date TEXT,
-        last_updated TEXT,
-        last_fetch_at TEXT,
-        last_fetch_message TEXT,
-        local_data_ready INTEGER NOT NULL DEFAULT 0,
-        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(symbol, asset_type, universe_type, source)
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_financial_asset_universe_type
-      ON financial_asset_universe(universe_type, asset_type, enabled);
-
-      CREATE INDEX IF NOT EXISTS idx_financial_asset_universe_status
-      ON financial_asset_universe(update_status, last_fetch_at);
-
-      INSERT OR IGNORE INTO financial_asset_universe (symbol, name, asset_type, universe_type, source)
-      VALUES
-        ('000300', '沪深300', 'index', 'broad_index', 'tushare'),
-        ('510300', '沪深300ETF', 'etf', 'broad_etf', 'tushare'),
-        ('510500', '中证500ETF', 'etf', 'broad_etf', 'tushare'),
-        ('159915', '创业板ETF', 'etf', 'broad_etf', 'tushare'),
-        ('588000', '科创50ETF', 'etf', 'broad_etf', 'tushare'),
-        ('512880', '证券ETF', 'etf', 'industry_etf', 'tushare'),
-        ('512480', '半导体ETF', 'etf', 'industry_etf', 'tushare'),
-        ('512170', '医疗ETF', 'etf', 'industry_etf', 'tushare'),
-        ('515790', '光伏ETF', 'etf', 'industry_etf', 'tushare'),
-        ('515030', '新能源车ETF', 'etf', 'industry_etf', 'tushare'),
-        ('600519', '贵州茅台', 'stock', 'stock_whitelist', 'tushare'),
-        ('300750', '宁德时代', 'stock', 'stock_whitelist', 'tushare'),
-        ('601318', '中国平安', 'stock', 'stock_whitelist', 'tushare'),
-        ('600036', '招商银行', 'stock', 'stock_whitelist', 'tushare');
-    `
-  },
-  {
-    id: '20260501_006',
-    name: 'Seed small batch stock universe',
-    sql: `
-      -- 第二步小批量：先放入一组沪深300代表性成分，不直接全市场请求
-      INSERT OR IGNORE INTO financial_asset_universe (symbol, name, asset_type, universe_type, source)
-      VALUES
-        ('600519', '贵州茅台', 'stock', 'hs300_component', 'tushare'),
-        ('300750', '宁德时代', 'stock', 'hs300_component', 'tushare'),
-        ('601318', '中国平安', 'stock', 'hs300_component', 'tushare'),
-        ('600036', '招商银行', 'stock', 'hs300_component', 'tushare'),
-        ('000858', '五粮液', 'stock', 'hs300_component', 'tushare'),
-        ('000333', '美的集团', 'stock', 'hs300_component', 'tushare'),
-        ('002594', '比亚迪', 'stock', 'hs300_component', 'tushare'),
-        ('601899', '紫金矿业', 'stock', 'hs300_component', 'tushare'),
-        ('600030', '中信证券', 'stock', 'hs300_component', 'tushare'),
-        ('601166', '兴业银行', 'stock', 'hs300_component', 'tushare'),
-        ('000651', '格力电器', 'stock', 'hs300_component', 'tushare'),
-        ('300760', '迈瑞医疗', 'stock', 'hs300_component', 'tushare'),
-        ('601398', '工商银行', 'stock', 'hs300_component', 'tushare'),
-        ('600900', '长江电力', 'stock', 'hs300_component', 'tushare'),
-        ('600276', '恒瑞医药', 'stock', 'hs300_component', 'tushare'),
-        ('601288', '农业银行', 'stock', 'hs300_component', 'tushare'),
-        ('601857', '中国石油', 'stock', 'hs300_component', 'tushare'),
-        ('002475', '立讯精密', 'stock', 'hs300_component', 'tushare'),
-        ('600309', '万华化学', 'stock', 'hs300_component', 'tushare'),
-        ('300059', '东方财富', 'stock', 'hs300_component', 'tushare');
-    `
-  },
-  {
+{
     id: '20260501_007',
     name: 'Create task center tables',
     sql: `
-      -- 任务中心：统一管理行情、备选池、贵金属、彩票等定时任务
+      -- 任务中心：统一管理生意系统定时任务
       CREATE TABLE IF NOT EXISTS task_center_tasks (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         task_key TEXT NOT NULL UNIQUE,
@@ -748,7 +468,7 @@ const migrations: Migration[] = [
         task_type TEXT NOT NULL,
         enabled INTEGER NOT NULL DEFAULT 0,
         schedule_time TEXT NOT NULL DEFAULT '16:00',
-        schedule_days TEXT NOT NULL DEFAULT 'trade_days',
+        schedule_days TEXT NOT NULL DEFAULT 'work_days',
         priority INTEGER NOT NULL DEFAULT 50,
         config_json TEXT,
         last_status TEXT NOT NULL DEFAULT 'pending',
@@ -778,313 +498,9 @@ const migrations: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_task_center_runs_task
       ON task_center_runs(task_id, started_at);
 
-      INSERT OR IGNORE INTO task_center_tasks
-        (task_key, name, domain, task_type, enabled, schedule_time, schedule_days, priority, config_json, last_status, last_message)
-      VALUES
-        (
-          'metals_daily_update',
-          '贵金属每日行情更新',
-          'metals',
-          'metals_daily_update',
-          0,
-          '16:10',
-          'every_day',
-          30,
-          '{"symbols":["XAUUSD","SGE_AGTD"]}',
-          'pending',
-          '收盘后更新黄金与白银贵金属日线并刷新贵金属状态'
-        ),
-        (
-          'lottery_daily_update',
-          '彩票数据更新',
-          'lottery',
-          'placeholder',
-          0,
-          '21:30',
-          'every_day',
-          40,
-          '{}',
-          'pending',
-          '预留任务：后续接入彩票开奖数据源'
-        );
     `
   },
-  {
-    id: '20260501_008',
-    name: 'Add candidate pool priority score and block reasons',
-    sql: `
-      ALTER TABLE financial_candidate_pool
-      ADD COLUMN priority_score INTEGER NOT NULL DEFAULT 0;
-
-      ALTER TABLE financial_candidate_pool
-      ADD COLUMN forbidden_reason TEXT;
-
-      ALTER TABLE financial_candidate_pool
-      ADD COLUMN downgrade_reason TEXT;
-
-      UPDATE financial_candidate_pool
-      SET priority_score = CASE priority
-        WHEN 'high' THEN 80
-        WHEN 'medium' THEN 65
-        WHEN 'low' THEN 45
-        ELSE 50
-      END
-      WHERE priority_score = 0;
-    `
-  },
-  {
-    id: '20260501_009',
-    name: 'Create financial trade plans table',
-    sql: `
-      CREATE TABLE IF NOT EXISTS financial_trade_plans (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        plan_name TEXT NOT NULL,
-        symbol TEXT NOT NULL,
-        name TEXT,
-        asset_type TEXT NOT NULL,
-        source TEXT NOT NULL DEFAULT 'tushare',
-        trade_date TEXT,
-        status TEXT NOT NULL DEFAULT 'draft',
-        total_capital REAL NOT NULL DEFAULT 0,
-        base_amount REAL NOT NULL DEFAULT 0,
-        tactical_amount REAL NOT NULL DEFAULT 0,
-        observation_amount REAL NOT NULL DEFAULT 0,
-        base_ratio INTEGER NOT NULL DEFAULT 0,
-        tactical_ratio INTEGER NOT NULL DEFAULT 0,
-        observation_ratio INTEGER NOT NULL DEFAULT 0,
-        principle_snapshot TEXT,
-        entry_action TEXT,
-        trigger_score INTEGER NOT NULL DEFAULT 0,
-        trigger_type TEXT,
-        trigger_reason TEXT,
-        structure_score INTEGER,
-        structure_score_bucket TEXT,
-        structure_level TEXT,
-        structure_status TEXT,
-        safe_zone_status TEXT,
-        trend_phase_code TEXT,
-        trend_action TEXT,
-        market_regime TEXT,
-        entry_permission TEXT,
-        close_price REAL,
-        ma20 REAL,
-        ma60 REAL,
-        invalidation_line REAL,
-        max_loss_percent REAL,
-        suggested_entry_zone TEXT,
-        entry_reason TEXT,
-        trigger_snapshot_json TEXT,
-        is_bought INTEGER NOT NULL DEFAULT 0,
-        buy_date TEXT,
-        buy_price REAL,
-        buy_amount REAL,
-        perf_5d REAL,
-        perf_10d REAL,
-        perf_20d REAL,
-        perf_60d REAL,
-        stopped_out INTEGER NOT NULL DEFAULT 0,
-        entered_main_rise INTEGER NOT NULL DEFAULT 0,
-        false_breakout INTEGER NOT NULL DEFAULT 0,
-        chased_high INTEGER NOT NULL DEFAULT 0,
-        feedback_note TEXT,
-        note TEXT,
-        is_deleted INTEGER NOT NULL DEFAULT 0,
-        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_financial_trade_plans_symbol
-      ON financial_trade_plans(symbol, asset_type, source);
-
-      CREATE INDEX IF NOT EXISTS idx_financial_trade_plans_stats
-      ON financial_trade_plans(structure_score_bucket, trend_phase_code, trigger_type);
-    `
-  },
-  {
-    id: '20260501_010',
-    name: 'Create financial execution and action suggestion tables',
-    sql: `
-      CREATE TABLE IF NOT EXISTS financial_trade_executions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        plan_id INTEGER NOT NULL,
-        symbol TEXT NOT NULL,
-        action_type TEXT NOT NULL,
-        sleeve_type TEXT NOT NULL,
-        execution_date TEXT NOT NULL,
-        execution_price REAL NOT NULL,
-        execution_amount REAL NOT NULL,
-        execution_quantity REAL,
-        trigger_phase TEXT,
-        trigger_rule TEXT,
-        position_decision TEXT,
-        note TEXT,
-        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (plan_id) REFERENCES financial_trade_plans(id)
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_financial_trade_executions_plan
-      ON financial_trade_executions(plan_id, execution_date);
-
-      CREATE TABLE IF NOT EXISTS financial_action_suggestions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        plan_id INTEGER NOT NULL,
-        symbol TEXT NOT NULL,
-        trade_date TEXT,
-        suggestion_date TEXT NOT NULL,
-        action_code TEXT NOT NULL,
-        action_label TEXT NOT NULL,
-        action_reason TEXT,
-        priority TEXT NOT NULL DEFAULT 'normal',
-        structure_score INTEGER,
-        trend_phase_code TEXT,
-        trigger_score INTEGER,
-        entry_action TEXT,
-        close_price REAL,
-        invalidation_line REAL,
-        base_position_amount REAL NOT NULL DEFAULT 0,
-        tactical_position_amount REAL NOT NULL DEFAULT 0,
-        observation_position_amount REAL NOT NULL DEFAULT 0,
-        suggestion_snapshot_json TEXT,
-        is_confirmed INTEGER NOT NULL DEFAULT 0,
-        confirm_note TEXT,
-        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (plan_id) REFERENCES financial_trade_plans(id)
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_financial_action_suggestions_plan
-      ON financial_action_suggestions(plan_id, suggestion_date);
-    `
-  },
-  {
-    id: '20260503_001',
-    name: 'Create financial candidate review drafts',
-    sql: `
-      CREATE TABLE IF NOT EXISTS financial_candidate_reviews (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        candidate_id INTEGER NOT NULL,
-        symbol TEXT NOT NULL,
-        name TEXT,
-        asset_type TEXT NOT NULL,
-        source TEXT NOT NULL,
-        trade_date TEXT,
-        rule_version TEXT NOT NULL,
-        model_key TEXT,
-        model_target TEXT,
-        model_probability REAL,
-        lane_key TEXT,
-        lane_label TEXT,
-        suggested_action_key TEXT,
-        suggested_action_label TEXT,
-        review_status TEXT NOT NULL DEFAULT 'draft',
-        draft_json TEXT NOT NULL,
-        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_financial_candidate_reviews_candidate
-      ON financial_candidate_reviews(candidate_id, created_at);
-    `
-  },
-  {
-    id: '20260503_002',
-    name: 'Create financial entry trigger observations',
-    sql: `
-      CREATE TABLE IF NOT EXISTS financial_entry_trigger_observations (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        symbol TEXT NOT NULL,
-        name TEXT,
-        asset_type TEXT NOT NULL,
-        source TEXT NOT NULL,
-        trade_date TEXT,
-        observation_status TEXT NOT NULL DEFAULT 'watching',
-        entry_action TEXT,
-        action_label TEXT,
-        trigger_score INTEGER,
-        trigger_reason TEXT,
-        structure_score INTEGER,
-        trend_phase_code TEXT,
-        market_regime TEXT,
-        entry_permission TEXT,
-        close_price REAL,
-        ma20 REAL,
-        ma60 REAL,
-        invalidation_line REAL,
-        snapshot_json TEXT NOT NULL,
-        note TEXT,
-        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_financial_entry_trigger_observations_symbol
-      ON financial_entry_trigger_observations(symbol, asset_type, source, observation_status);
-    `
-  },
-  {
-    id: '20260503_003',
-    name: 'Skip standalone secondary confirmation scan task',
-    sql: `
-      -- 金融日终流水线已包含二次确认扫描，避免新库再生成重复任务。
-      SELECT 1;
-    `
-  },
-  {
-    id: '20260504_001',
-    name: 'Create finance daily pipeline task',
-    sql: `
-      INSERT OR IGNORE INTO task_center_tasks
-        (task_key, name, domain, task_type, enabled, schedule_time, schedule_days, priority, config_json, last_status, last_message)
-      VALUES
-        (
-          'finance_daily_pipeline',
-          '金融日终流水线',
-          'finance',
-          'finance_daily_pipeline',
-          0,
-          '16:30',
-          'trade_days',
-          8,
-          '{"source":"tushare","active_plan_limit":50,"candidate_limit":20,"universe_limit":"all","interval_ms":1200,"secondary_scan_limit":80,"market_symbols":["000300","000905","399006","000688"]}',
-          'pending',
-          '一键串联市场总闸、日线更新、备选池、入场触发和持仓建议；只更新建议，不自动买卖'
-        );
-    `
-  },
-  {
-    id: '20260506_002',
-    name: 'Wire metals daily update task executor',
-    sql: `
-      UPDATE task_center_tasks
-      SET task_type = 'metals_daily_update',
-          config_json = CASE
-            WHEN config_json IS NULL OR config_json = '{}' OR config_json = '' THEN '{"symbols":["XAUUSD","SGE_AGTD"]}'
-            ELSE config_json
-          END,
-          last_status = CASE
-            WHEN last_message = '任务已创建，执行器待接入' THEN 'pending'
-            ELSE last_status
-          END,
-          last_message = CASE
-            WHEN last_message = '任务已创建，执行器待接入' THEN '收盘后更新黄金与白银贵金属日线并刷新贵金属状态'
-            ELSE last_message
-          END,
-          updated_at = CURRENT_TIMESTAMP
-      WHERE task_key = 'metals_daily_update';
-    `
-  },
-  {
-    id: '20260506_003',
-    name: 'Remove task center jobs covered by finance pipeline',
-    sql: `
-      DELETE FROM task_center_runs
-      WHERE task_key IN ('finance_daily_close_update', 'finance_secondary_confirmation_scan');
-
-      DELETE FROM task_center_tasks
-      WHERE task_key IN ('finance_daily_close_update', 'finance_secondary_confirmation_scan');
-    `
-  },
-  {
+{
     id: '20260507_001',
     name: 'Create analysis annotations',
     sql: `
@@ -1104,7 +520,7 @@ const migrations: Migration[] = [
       ON analysis_annotations(module, entity_type, annotation_key);
     `
   },
-  {
+{
     id: '20260507_002',
     name: 'Create audit logs',
     sql: `
@@ -1129,7 +545,7 @@ const migrations: Migration[] = [
       ON audit_logs(module, action, status);
     `
   },
-  {
+{
     id: '20260507_003',
     name: 'Create user preferences',
     sql: `
@@ -1147,7 +563,7 @@ const migrations: Migration[] = [
       ON user_preferences(user_key, preference_key);
     `
   },
-  {
+{
     id: '20260507_004',
     name: 'Create rejected opportunities',
     sql: `
@@ -1182,50 +598,19 @@ const migrations: Migration[] = [
       ON rejected_opportunities(track, decision_quality, later_status);
     `
   },
-  {
-    id: '20260507_005',
-    name: 'Make finance daily pipeline cover full universe',
-    sql: `
-      UPDATE task_center_tasks
-      SET config_json = '{"source":"tushare","active_plan_limit":50,"candidate_limit":20,"universe_limit":"all","interval_ms":1200,"secondary_scan_limit":80,"market_symbols":["000300","000905","399006","000688"]}',
-          last_message = CASE
-            WHEN task_key = 'finance_daily_pipeline'
-            THEN '金融日终流水线已改为：先更新持仓/计划和备选池，最后全量补齐A股/ETF资产库日线'
-            ELSE last_message
-          END,
-          updated_at = CURRENT_TIMESTAMP
-      WHERE task_key = 'finance_daily_pipeline';
-    `
-  },
-  {
+{
     id: '20260507_006',
     name: 'Link risk control records',
-    sql: `
-      ALTER TABLE risk_check_records
-      ADD COLUMN parent_record_id INTEGER;
-
-      CREATE INDEX IF NOT EXISTS idx_risk_check_records_parent_record_id
-      ON risk_check_records(parent_record_id);
-    `
+    run: async (db: any) => {
+      if (!(await migrationTableExists(db, 'risk_check_records'))) return;
+      await ensureMigrationColumn(db, 'risk_check_records', 'parent_record_id', 'INTEGER');
+      await dbExec(db, `
+        CREATE INDEX IF NOT EXISTS idx_risk_check_records_parent_record_id
+        ON risk_check_records(parent_record_id);
+      `);
+    }
   },
-  {
-    id: '20260512_001',
-    name: 'Unify finance funnel schedule after close',
-    sql: `
-      UPDATE task_center_tasks
-      SET schedule_time = '16:45',
-          last_message = '收盘后按同一日线口径补跑漏斗；日终流水线已包含该步骤，不自动建仓',
-          updated_at = CURRENT_TIMESTAMP
-      WHERE task_key = 'finance_candidate_funnel_pipeline'
-        AND schedule_time = '09:30';
-
-      UPDATE task_center_tasks
-      SET last_message = '金融日终流水线按收盘日线口径执行：先更新本地日线，再刷新市场总闸、备选池、入池漏斗、入场触发和持仓建议',
-          updated_at = CURRENT_TIMESTAMP
-      WHERE task_key = 'finance_daily_pipeline';
-    `
-  },
-  {
+{
     id: '20260512_002',
     name: 'Create product supply events',
     sql: `
@@ -1239,7 +624,7 @@ const migrations: Migration[] = [
         countdown_status TEXT NOT NULL DEFAULT '未记录',
         scale_note TEXT,
         date_certainty TEXT NOT NULL DEFAULT 'confirmed',
-        trading_scope TEXT NOT NULL DEFAULT 'normal',
+        participation_scope TEXT NOT NULL DEFAULT 'normal',
         source_note TEXT,
         is_deleted INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -1255,7 +640,7 @@ const migrations: Migration[] = [
 
       INSERT OR IGNORE INTO product_supply_events (
         product_name, event_date, event_date_label, event_type, channel_region,
-        countdown_status, scale_note, date_certainty, trading_scope, source_note
+        countdown_status, scale_note, date_certainty, participation_scope, source_note
       ) VALUES
         ('白裙子', '2024-03-08', '2024-03-08', '首发', '小程序送到家', '未记录', '单价159', 'confirmed', 'normal', '用户迁移样板'),
         ('白裙子', '2025-10-12', '2025-10-12', '补货', '新加坡、泰国', '未记录', '天量', 'confirmed', 'normal', '用户迁移样板'),
@@ -1283,11 +668,11 @@ const migrations: Migration[] = [
         ('醒醒', '2026-03-05', '2026-03-05', '首发', '小程序送到家', '未记录', '发售价499', 'confirmed', 'normal', '用户迁移样板'),
         ('醒醒', '2026-03-18', '2026-03-18', '补货', '国内送到家', '无倒计时', '突袭补货', 'confirmed', 'normal', '用户迁移样板'),
         ('醒醒', '2026-04-23T10:00:00', '2026-04-23 10:00', '补货', '国内送到家', '有倒计时', '量暂时看不出来', 'confirmed', 'normal', '用户迁移样板'),
-        ('mokoko美人鱼', '2026-04-29', '2026-04-29', '首发', '送到家', '有倒计时', '量不大；低开后被人为拉盘暴涨', 'confirmed', 'record_only', '当前只记录不参与交易'),
-        ('mokoko美人鱼', '2026-05-10', '2026-05-10', '补货', '送到家', '有倒计时', '量不大；补后价格被砸下去；当前只记录不参与', 'confirmed', 'record_only', '当前只记录不参与交易');
+        ('mokoko美人鱼', '2026-04-29', '2026-04-29', '首发', '送到家', '有倒计时', '量不大；低开后被人为拉盘暴涨', 'confirmed', 'record_only', '当前只记录，不参与买卖判断'),
+        ('mokoko美人鱼', '2026-05-10', '2026-05-10', '补货', '送到家', '有倒计时', '量不大；补后价格被砸下去；当前只记录不参与', 'confirmed', 'record_only', '当前只记录，不参与买卖判断');
     `
   },
-  {
+{
     id: '20260512_003',
     name: 'Create product supply products',
     sql: `
@@ -1309,512 +694,18 @@ const migrations: Migration[] = [
       WHERE is_deleted = 0;
     `
   },
-  {
-    id: '20260513_001',
-    name: 'Create Tushare supplemental finance data',
-    sql: `
-      CREATE TABLE IF NOT EXISTS financial_stock_basic_metrics (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        symbol TEXT NOT NULL,
-        source TEXT NOT NULL DEFAULT 'tushare',
-        trade_date TEXT NOT NULL,
-        total_mv_yuan REAL,
-        circ_mv_yuan REAL,
-        turnover_rate REAL,
-        pe REAL,
-        pb REAL,
-        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(symbol, source, trade_date)
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_financial_stock_basic_metrics_symbol
-      ON financial_stock_basic_metrics(symbol, source, trade_date);
-
-      ALTER TABLE financial_stock_basic_metrics ADD COLUMN close REAL;
-      ALTER TABLE financial_stock_basic_metrics ADD COLUMN turnover_rate_f REAL;
-      ALTER TABLE financial_stock_basic_metrics ADD COLUMN volume_ratio REAL;
-      ALTER TABLE financial_stock_basic_metrics ADD COLUMN pe_ttm REAL;
-      ALTER TABLE financial_stock_basic_metrics ADD COLUMN ps REAL;
-      ALTER TABLE financial_stock_basic_metrics ADD COLUMN ps_ttm REAL;
-      ALTER TABLE financial_stock_basic_metrics ADD COLUMN dv_ratio REAL;
-      ALTER TABLE financial_stock_basic_metrics ADD COLUMN dv_ttm REAL;
-      ALTER TABLE financial_stock_basic_metrics ADD COLUMN total_share REAL;
-      ALTER TABLE financial_stock_basic_metrics ADD COLUMN float_share REAL;
-      ALTER TABLE financial_stock_basic_metrics ADD COLUMN free_share REAL;
-
-      CREATE TABLE IF NOT EXISTS financial_moneyflow (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        symbol TEXT NOT NULL,
-        source TEXT NOT NULL DEFAULT 'tushare',
-        trade_date TEXT NOT NULL,
-        buy_sm_amount REAL,
-        sell_sm_amount REAL,
-        buy_md_amount REAL,
-        sell_md_amount REAL,
-        buy_lg_amount REAL,
-        sell_lg_amount REAL,
-        buy_elg_amount REAL,
-        sell_elg_amount REAL,
-        net_mf_amount REAL,
-        net_mf_vol REAL,
-        raw_json TEXT,
-        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(symbol, source, trade_date)
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_financial_moneyflow_symbol_date
-      ON financial_moneyflow(symbol, source, trade_date);
-
-      CREATE TABLE IF NOT EXISTS financial_moneyflow_ths (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        symbol TEXT NOT NULL,
-        name TEXT,
-        source TEXT NOT NULL DEFAULT 'tushare',
-        trade_date TEXT NOT NULL,
-        latest REAL,
-        pct_change REAL,
-        net_amount REAL,
-        net_amount_rate REAL,
-        buy_lg_amount REAL,
-        buy_lg_amount_rate REAL,
-        buy_md_amount REAL,
-        buy_md_amount_rate REAL,
-        raw_json TEXT,
-        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(symbol, source, trade_date)
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_financial_moneyflow_ths_symbol_date
-      ON financial_moneyflow_ths(symbol, source, trade_date);
-
-      CREATE TABLE IF NOT EXISTS financial_limit_events (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        symbol TEXT NOT NULL,
-        name TEXT,
-        source TEXT NOT NULL DEFAULT 'tushare',
-        trade_date TEXT NOT NULL,
-        limit_status TEXT,
-        limit_type TEXT,
-        close REAL,
-        pct_chg REAL,
-        first_time TEXT,
-        last_time TEXT,
-        open_times INTEGER,
-        fd_amount REAL,
-        fc_ratio REAL,
-        fl_ratio REAL,
-        raw_json TEXT,
-        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(symbol, source, trade_date, limit_status)
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_financial_limit_events_date
-      ON financial_limit_events(trade_date, limit_status);
-
-      CREATE TABLE IF NOT EXISTS financial_limit_prices (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        symbol TEXT NOT NULL,
-        source TEXT NOT NULL DEFAULT 'tushare',
-        trade_date TEXT NOT NULL,
-        up_limit REAL,
-        down_limit REAL,
-        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(symbol, source, trade_date)
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_financial_limit_prices_symbol_date
-      ON financial_limit_prices(symbol, source, trade_date);
-
-      CREATE TABLE IF NOT EXISTS financial_sw_industries (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        index_code TEXT NOT NULL,
-        industry_name TEXT,
-        level TEXT,
-        parent_code TEXT,
-        src TEXT NOT NULL DEFAULT 'SW2021',
-        raw_json TEXT,
-        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(index_code, src)
-      );
-
-      CREATE TABLE IF NOT EXISTS financial_sw_industry_members (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        symbol TEXT NOT NULL,
-        name TEXT,
-        l1_code TEXT,
-        l1_name TEXT,
-        l2_code TEXT,
-        l2_name TEXT,
-        l3_code TEXT,
-        l3_name TEXT,
-        in_date TEXT,
-        out_date TEXT,
-        is_new TEXT,
-        src TEXT NOT NULL DEFAULT 'SW2021',
-        raw_json TEXT,
-        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(symbol, src, l1_code, l2_code, l3_code)
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_financial_sw_members_symbol
-      ON financial_sw_industry_members(symbol, src, is_new);
-
-      CREATE TABLE IF NOT EXISTS financial_sw_industry_daily (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        index_code TEXT NOT NULL,
-        name TEXT,
-        source TEXT NOT NULL DEFAULT 'tushare',
-        trade_date TEXT NOT NULL,
-        open REAL,
-        high REAL,
-        low REAL,
-        close REAL,
-        pre_close REAL,
-        change_amount REAL,
-        pct_change REAL,
-        volume REAL,
-        amount REAL,
-        raw_json TEXT,
-        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(index_code, source, trade_date)
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_financial_sw_daily_code_date
-      ON financial_sw_industry_daily(index_code, source, trade_date);
-
-      INSERT OR IGNORE INTO task_center_tasks
-        (task_key, name, domain, task_type, enabled, schedule_time, schedule_days, priority, config_json, last_status, last_message)
-      VALUES
-        (
-          'finance_tushare_supplemental_update',
-          'Tushare辅助数据补全',
-          'finance',
-          'finance_tushare_supplemental_update',
-          1,
-          '17:00',
-          'trade_days',
-          12,
-          '{"days":120,"sections":["daily_basic","moneyflow","moneyflow_ths","limits","sw"],"delay_seconds":0.15}',
-          'pending',
-          '收盘后补每日指标、资金流、涨跌停和申万行业数据，用于训练和辅助分析'
-        );
-    `
-  },
-  {
-    id: '20260514_001_finance_experiment_prediction_snapshots',
-    name: 'Create finance experiment prediction snapshots and future labels',
-    sql: `
-      CREATE TABLE IF NOT EXISTS finance_experiment_prediction_snapshots (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        experiment_key TEXT NOT NULL,
-        symbol TEXT NOT NULL,
-        name TEXT,
-        asset_type TEXT NOT NULL DEFAULT '',
-        source TEXT NOT NULL DEFAULT '',
-        universe_type TEXT,
-        trade_date TEXT NOT NULL,
-        close REAL,
-        market_regime TEXT,
-        experiment_score INTEGER,
-        rule_score INTEGER,
-        model_probability REAL,
-        model_score INTEGER,
-        direction_probability REAL,
-        direction_score INTEGER,
-        hardness_probability REAL,
-        hardness_score INTEGER,
-        raw_hardness_probability REAL,
-        raw_hardness_score INTEGER,
-        raw_model_accept INTEGER NOT NULL DEFAULT 0,
-        discipline_model_accept INTEGER NOT NULL DEFAULT 0,
-        discipline_blocked INTEGER NOT NULL DEFAULT 0,
-        discipline_adjustment REAL,
-        feature_label TEXT,
-        rotation_label TEXT,
-        rotation_reason TEXT,
-        discipline_label TEXT,
-        discipline_reason TEXT,
-        crowding_label TEXT,
-        crowding_reason TEXT,
-        feature_snapshot_json TEXT,
-        artifact_json TEXT,
-        no_lookahead_note TEXT,
-        saved_from TEXT NOT NULL DEFAULT 'latest_prediction_pool',
-        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(experiment_key, symbol, asset_type, source, trade_date, saved_from)
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_finance_experiment_snapshots_scope
-      ON finance_experiment_prediction_snapshots(experiment_key, saved_from, trade_date DESC, asset_type, source);
-
-      CREATE INDEX IF NOT EXISTS idx_finance_experiment_snapshots_symbol
-      ON finance_experiment_prediction_snapshots(symbol, asset_type, source, trade_date DESC, saved_from);
-
-      CREATE INDEX IF NOT EXISTS idx_finance_experiment_snapshots_saved_from
-      ON finance_experiment_prediction_snapshots(saved_from, experiment_key, market_regime, trade_date DESC);
-
-      CREATE TABLE IF NOT EXISTS finance_experiment_prediction_labels (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        snapshot_id INTEGER NOT NULL,
-        experiment_key TEXT NOT NULL,
-        symbol TEXT NOT NULL,
-        asset_type TEXT NOT NULL DEFAULT '',
-        source TEXT NOT NULL DEFAULT '',
-        trade_date TEXT NOT NULL,
-        base_close REAL,
-        horizon_days INTEGER NOT NULL DEFAULT 20,
-        available_future_days INTEGER NOT NULL DEFAULT 0,
-        horizon_end_date TEXT,
-        forward_return_5d REAL,
-        forward_return_10d REAL,
-        forward_return_20d REAL,
-        max_forward_return REAL,
-        max_drawdown REAL,
-        drawdown_discipline_hit INTEGER NOT NULL DEFAULT 0,
-        direction_outcome TEXT,
-        hardness_outcome TEXT,
-        label_status TEXT NOT NULL DEFAULT 'pending',
-        label_reason TEXT,
-        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (snapshot_id) REFERENCES finance_experiment_prediction_snapshots(id) ON DELETE CASCADE,
-        UNIQUE(snapshot_id, horizon_days)
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_finance_experiment_labels_scope
-      ON finance_experiment_prediction_labels(experiment_key, label_status, trade_date DESC);
-    `
-  },
-  {
-    id: '20260514_002_finance_pipeline_prediction_snapshots',
-    name: 'Update finance daily pipeline task description for experiment prediction snapshots',
-    sql: `
-      UPDATE task_center_tasks
-      SET last_message = '收盘后串联日线、市场总闸、备选池、入场触发、持仓建议、实验预测池落库和后验标签；只更新建议，不自动买卖',
-          updated_at = CURRENT_TIMESTAMP
-      WHERE task_key = 'finance_daily_pipeline';
-    `
-  },
-  {
-    id: '20260514_003_finance_flow_auto_settlement',
-    name: 'Make finance flow queues auto settle after close',
-    sql: `
-      UPDATE task_center_tasks
-      SET config_json = '{"source":"tushare","active_plan_limit":50,"candidate_limit":300,"universe_limit":"all","interval_ms":1200,"secondary_scan_limit":200,"model_recheck_limit":200,"market_symbols":["000300","000905","399006","000688"],"prediction_pool_limit":40,"prediction_label_limit":600,"prediction_horizon_days":20}',
-          last_message = '收盘后自动串联日线、市场总闸、备选池、模型复核、入池漏斗、入场触发、持仓建议、实验预测池和后验标签；计划生成与仓位填写仍保留人工确认',
-          updated_at = CURRENT_TIMESTAMP
-      WHERE task_key = 'finance_daily_pipeline';
-
-      UPDATE task_center_tasks
-      SET config_json = '{"source":"tushare","candidate_limit":300,"secondary_scan_limit":200}',
-          last_message = '收盘后自动推进走势阶段、单标的判断和入场触发观察；不自动生成买入计划',
-          updated_at = CURRENT_TIMESTAMP
-      WHERE task_key = 'finance_candidate_funnel_pipeline';
-    `
-  },
-  {
-    id: '20260515_001_finance_pipeline_after_supplemental',
-    name: 'Move finance daily pipeline after supplemental data update',
-    sql: `
-      UPDATE task_center_tasks
-      SET schedule_time = '17:10',
-          last_message = '17:10 收盘后执行：先等 Tushare 辅助数据补全，再串联日线、市场总闸、备选池、模型复核、入池漏斗、入场触发、持仓建议、实验预测池和后验标签；计划生成与仓位填写仍保留人工确认',
-          updated_at = CURRENT_TIMESTAMP
-      WHERE task_key = 'finance_daily_pipeline';
-
-      UPDATE task_center_tasks
-      SET schedule_time = '17:25',
-          last_message = '17:25 收盘后兜底补跑漏斗；日终流水线已包含该步骤，不自动生成买入计划',
-          updated_at = CURRENT_TIMESTAMP
-      WHERE task_key = 'finance_candidate_funnel_pipeline';
-    `
-  },
-  {
-    id: '20260515_002_finance_research_inputs',
-    name: 'Create finance research input records',
-    sql: `
-      CREATE TABLE IF NOT EXISTS finance_research_inputs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        symbol TEXT NOT NULL,
-        name TEXT,
-        asset_type TEXT NOT NULL DEFAULT 'stock',
-        visible_date TEXT NOT NULL,
-        report_date TEXT,
-        source_type TEXT,
-        finance_change TEXT,
-        industry_logic TEXT,
-        capital_consensus TEXT,
-        evidence_source TEXT,
-        certainty TEXT NOT NULL DEFAULT 'unknown',
-        tags_json TEXT,
-        notes TEXT,
-        is_archived INTEGER NOT NULL DEFAULT 0,
-        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_finance_research_inputs_scope
-      ON finance_research_inputs(visible_date DESC, symbol, asset_type, is_archived);
-    `
-  },
-  {
-    id: '20260524_001_financial_report_structured',
-    name: 'Create Tushare financial report structured facts',
-    sql: `
-      CREATE TABLE IF NOT EXISTS financial_report_structured (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        symbol TEXT NOT NULL,
-        name TEXT,
-        source TEXT NOT NULL DEFAULT 'tushare',
-        end_date TEXT NOT NULL,
-        ann_date TEXT,
-        f_ann_date TEXT,
-        report_type TEXT,
-        comp_type TEXT,
-        total_revenue REAL,
-        revenue REAL,
-        operate_profit REAL,
-        total_profit REAL,
-        net_profit REAL,
-        net_profit_parent REAL,
-        basic_eps REAL,
-        total_assets REAL,
-        total_liab REAL,
-        total_equity REAL,
-        money_cap REAL,
-        inventories REAL,
-        accounts_receiv REAL,
-        contract_liab REAL,
-        n_cashflow_act REAL,
-        c_fr_sale_sg REAL,
-        free_cashflow REAL,
-        roe REAL,
-        grossprofit_margin REAL,
-        netprofit_margin REAL,
-        debt_to_assets REAL,
-        current_ratio REAL,
-        quick_ratio REAL,
-        revenue_yoy REAL,
-        netprofit_yoy REAL,
-        ocf_yoy REAL,
-        ocf_to_net_profit REAL,
-        raw_income_json TEXT,
-        raw_balance_json TEXT,
-        raw_cashflow_json TEXT,
-        raw_indicator_json TEXT,
-        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(symbol, source, end_date)
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_financial_report_structured_period
-      ON financial_report_structured(end_date DESC, source, symbol);
-
-      CREATE INDEX IF NOT EXISTS idx_financial_report_structured_visible
-      ON financial_report_structured(f_ann_date DESC, ann_date DESC, symbol);
-
-      INSERT OR IGNORE INTO task_center_tasks
-        (task_key, name, domain, task_type, enabled, schedule_time, schedule_days, priority, config_json, last_status, last_message)
-      VALUES
-        (
-          'finance_tushare_financial_reports_update',
-          'Tushare财报结构化补全',
-          'finance',
-          'finance_tushare_financial_reports_update',
-          1,
-          '20:30',
-          'every_day',
-          13,
-          '{"period_count":8,"sections":["income_vip","balancesheet_vip","cashflow_vip","fina_indicator_vip"],"delay_seconds":0.3,"limit":5000}',
-          'pending',
-          '拉取 Tushare 5000积分可用的利润表、资产负债表、现金流量表和财务指标，先落结构化表，研究输入草稿仍需人工确认'
-        );
-    `
-  },
-  {
-    id: '20260525_001_finance_research_pdf_extractions',
-    name: 'Create finance research announcement PDF extractions',
-    sql: `
-      CREATE TABLE IF NOT EXISTS finance_research_pdf_extractions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        research_input_id INTEGER NOT NULL,
-        symbol TEXT NOT NULL,
-        source_url TEXT NOT NULL,
-        source_hash TEXT NOT NULL,
-        cache_path TEXT,
-        status TEXT NOT NULL,
-        section_business TEXT,
-        section_operations TEXT,
-        section_risks TEXT,
-        extracted_chars INTEGER,
-        extracted_pages INTEGER,
-        warning_json TEXT,
-        error_message TEXT,
-        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(research_input_id, source_hash)
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_finance_research_pdf_extractions_symbol
-      ON finance_research_pdf_extractions(symbol, updated_at DESC);
-    `
-  },
-  {
+{
     id: '20260515_003_rejected_opportunity_review_category',
     name: 'Add review category to rejected opportunities',
-    sql: `
-      ALTER TABLE rejected_opportunities
-      ADD COLUMN review_category TEXT NOT NULL DEFAULT 'correct_reject';
-
-      CREATE INDEX IF NOT EXISTS idx_rejected_opportunities_review_category
-      ON rejected_opportunities(review_category, decision_quality, later_status);
-    `
+    run: async (db: any) => {
+      await ensureMigrationColumn(db, 'rejected_opportunities', 'review_category', "TEXT NOT NULL DEFAULT 'correct_reject'");
+      await dbExec(db, `
+        CREATE INDEX IF NOT EXISTS idx_rejected_opportunities_review_category
+        ON rejected_opportunities(review_category, decision_quality, later_status);
+      `);
+    }
   },
-  {
-    id: '20260516_001_commodity_metals_price_task',
-    name: 'Add commodity metals price update task',
-    sql: `
-      INSERT OR IGNORE INTO task_center_tasks
-        (task_key, name, domain, task_type, enabled, schedule_time, schedule_days, priority, config_json, last_status, last_message)
-      VALUES
-        (
-          'commodity_metals_price_update',
-          '商品贵金属价格更新',
-          'price',
-          'commodity_metals_price_update',
-          1,
-          '17:35',
-          'every_day',
-          32,
-          '{"targets":["黄金9999","白银"]}',
-          'pending',
-          '每天抓取德璜小程序黄金/白银价格，并写入商品价格工作台；黄金按整数，白银保留一位小数'
-        );
-
-      UPDATE task_center_tasks
-      SET task_type = 'commodity_metals_price_update',
-          domain = 'price',
-          schedule_time = CASE WHEN schedule_time IS NULL OR schedule_time = '' THEN '17:35' ELSE schedule_time END,
-          schedule_days = 'every_day',
-          config_json = CASE
-            WHEN config_json IS NULL OR config_json = '{}' OR config_json = '' THEN '{"targets":["黄金9999","白银"]}'
-            ELSE config_json
-          END,
-          last_message = '每天抓取德璜小程序黄金/白银价格，并写入商品价格工作台；黄金按整数，白银保留一位小数',
-          updated_at = CURRENT_TIMESTAMP
-      WHERE task_key = 'commodity_metals_price_update';
-    `
-  },
-  {
+{
     id: '20260516_002_iphone_price_task',
     name: 'Add iPhone commodity price update task',
     sql: `
@@ -1849,7 +740,7 @@ const migrations: Migration[] = [
       WHERE task_key = 'iphone_price_update';
     `
   },
-  {
+{
     id: '20260516_003_video_game_machine_price_task',
     name: 'Add video game machine commodity price update task',
     sql: `
@@ -1884,7 +775,7 @@ const migrations: Migration[] = [
       WHERE task_key = 'video_game_machine_price_update';
     `
   },
-  {
+{
     id: '20260516_004_popmart_price_task',
     name: 'Add Pop Mart commodity price update task',
     sql: `
@@ -1919,631 +810,9 @@ const migrations: Migration[] = [
       WHERE task_key = 'popmart_price_update';
     `
   },
-  {
-    id: '20260517_001_metal_rule_lab_samples',
-    name: 'Create precious metal rule lab samples',
-    sql: `
-      CREATE TABLE IF NOT EXISTS metal_rule_lab_samples (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        symbol TEXT NOT NULL,
-        asset_name TEXT,
-        source TEXT,
-        trade_date TEXT NOT NULL,
-        rule_version TEXT NOT NULL,
-        close REAL,
-        state_code TEXT,
-        state_label TEXT,
-        state_reason TEXT,
-        short_label TEXT,
-        mid_label TEXT,
-        long_label TEXT,
-        cycle_label TEXT,
-        distance_to_ma60 REAL,
-        recent_return_5 REAL,
-        recent_return_20 REAL,
-        drawdown_20 REAL,
-        range_ratio_5 REAL,
-        range_ratio_20 REAL,
-        lower_low INTEGER,
-        abnormal_move INTEGER,
-        behavior_tags_json TEXT,
-        state_continuation_days INTEGER,
-        safe_confirmation_days INTEGER,
-        safe_zone_days INTEGER,
-        signal_maturity TEXT,
-        signal_maturity_label TEXT,
-        gold_gate_pass INTEGER,
-        gold_state_code TEXT,
-        no_flying_knife_blocked INTEGER,
-        rule_signal TEXT,
-        rule_action TEXT,
-        rule_action_label TEXT,
-        rule_action_reason TEXT,
-        label_status TEXT,
-        future_return_3d REAL,
-        future_return_5d REAL,
-        future_return_10d REAL,
-        future_return_20d REAL,
-        future_max_drawdown_20d REAL,
-        break_recent_low_20d INTEGER,
-        survived_3d INTEGER,
-        survived_5d INTEGER,
-        short_lived_signal INTEGER,
-        future_state_3d TEXT,
-        future_state_5d TEXT,
-        future_state_10d TEXT,
-        future_state_20d TEXT,
-        snapshot_json TEXT NOT NULL,
-        saved_from TEXT NOT NULL DEFAULT 'manual_replay',
-        replay_start_date TEXT,
-        replay_end_date TEXT,
-        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(symbol, trade_date, rule_version)
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_metal_rule_lab_samples_scope
-      ON metal_rule_lab_samples(symbol, trade_date DESC, rule_version);
-
-      CREATE INDEX IF NOT EXISTS idx_metal_rule_lab_samples_labels
-      ON metal_rule_lab_samples(symbol, label_status, rule_signal, rule_action, trade_date DESC);
-
-      CREATE INDEX IF NOT EXISTS idx_metal_rule_lab_samples_outcomes
-      ON metal_rule_lab_samples(symbol, short_lived_signal, no_flying_knife_blocked, gold_gate_pass, trade_date DESC);
-    `
-  },
-  {
-    id: '20260517_002_finance_latest_date_indexes',
-    name: 'Add finance latest-date indexes',
-    sql: `
-      CREATE INDEX IF NOT EXISTS idx_financial_daily_prices_scope_date
-      ON financial_daily_prices(source, asset_type, trade_date DESC);
-    `
-  },
-  {
-    id: '20260518_001_finance_experiment_prediction_saved_from_unique',
-    name: 'Upgrade experiment prediction snapshot unique key with saved_from',
-    run: migratePredictionSnapshotSavedFromUnique
-  },
-  {
-    id: '20260518_002_finance_supplemental_after_close',
-    name: 'Move finance supplemental data update after 17:00 close window',
-    sql: `
-      UPDATE task_center_tasks
-      SET schedule_time = '17:00',
-          last_message = '17:00 收盘后补每日指标、资金流、涨跌停和申万行业数据；日终流水线 17:10 接着统一流转',
-          updated_at = CURRENT_TIMESTAMP
-      WHERE task_key = 'finance_tushare_supplemental_update'
-        AND schedule_time < '17:00';
-    `
-  },
-  {
-    id: '20260518_003_finance_rejected_candidate_cleanup',
-    name: 'Set rejected active finance candidates to expired',
-    sql: `
-      UPDATE financial_candidate_pool
-      SET pool_status = 'expired',
-          final_status = CASE
-            WHEN COALESCE(final_status, '') = '' THEN 'REJECTED'
-            ELSE final_status
-          END,
-          review_action = CASE
-            WHEN COALESCE(review_action, '') = '' THEN 'auto_status_cleanup'
-            ELSE review_action
-          END,
-          updated_at = CURRENT_TIMESTAMP
-      WHERE pool_status = 'active'
-        AND asset_type IN ('stock', 'etf')
-        AND COALESCE(review_status, '') = 'rejected';
-    `
-  },
-  {
-    id: '20260518_004_fx_daily_rates',
-    name: 'Create FX daily rates and USD CNY auxiliary task',
-    sql: `
-      CREATE TABLE IF NOT EXISTS fx_daily_rates (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        trade_date TEXT NOT NULL,
-        ts_code TEXT NOT NULL,
-        source TEXT NOT NULL DEFAULT 'tushare_fxcm',
-        usd_cny_mid REAL NOT NULL,
-        bid_open REAL,
-        bid_close REAL,
-        bid_high REAL,
-        bid_low REAL,
-        ask_open REAL,
-        ask_close REAL,
-        ask_high REAL,
-        ask_low REAL,
-        tick_qty REAL,
-        usd_cny_change_5d REAL,
-        usd_cny_change_20d REAL,
-        cny_state TEXT NOT NULL DEFAULT '人民币震荡',
-        fx_tailwind_for_silver TEXT NOT NULL DEFAULT '中性',
-        raw_json TEXT,
-        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(trade_date, ts_code, source)
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_fx_daily_rates_scope
-      ON fx_daily_rates(ts_code, source, trade_date DESC);
-
-      CREATE INDEX IF NOT EXISTS idx_fx_daily_rates_tailwind
-      ON fx_daily_rates(fx_tailwind_for_silver, cny_state, trade_date DESC);
-
-      INSERT OR IGNORE INTO task_center_tasks
-        (task_key, name, domain, task_type, enabled, schedule_time, schedule_days, priority, config_json, last_status, last_message)
-      VALUES
-        (
-          'fx_daily_rates_update',
-          'USD/CNY汇率辅助更新',
-          'finance',
-          'fx_daily_rates_update',
-          1,
-          '17:25',
-          'every_day',
-          36,
-          '{"ts_code":"USDCNH.FXCM","source":"tushare_fxcm"}',
-          'pending',
-          '每天从 Tushare 拉取 USDCNH.FXCM，生成人民币升贬值与白银汇率顺风/逆风标签'
-        );
-
-      UPDATE task_center_tasks
-      SET task_type = 'fx_daily_rates_update',
-          domain = 'finance',
-          schedule_time = CASE WHEN schedule_time IS NULL OR schedule_time = '' THEN '17:25' ELSE schedule_time END,
-          schedule_days = 'every_day',
-          config_json = CASE
-            WHEN config_json IS NULL OR config_json = '{}' OR config_json = '' THEN '{"ts_code":"USDCNH.FXCM","source":"tushare_fxcm"}'
-            ELSE config_json
-          END,
-          last_message = '每天从 Tushare 拉取 USDCNH.FXCM，生成人民币升贬值与白银汇率顺风/逆风标签',
-          updated_at = CURRENT_TIMESTAMP
-      WHERE task_key = 'fx_daily_rates_update';
-    `
-  },
-  {
-    id: '20260518_005_finance_market_regime_dedupe',
-    name: 'Deduplicate finance market regime rows and enforce unique daily regime',
-    sql: `
-      UPDATE financial_market_regime
-      SET rule_version = 'market_regime_v1'
-      WHERE rule_version IS NULL OR TRIM(rule_version) = '';
-
-      DELETE FROM financial_market_regime
-      WHERE id NOT IN (
-        SELECT MAX(id)
-        FROM financial_market_regime
-        GROUP BY symbol, trade_date, rule_version
-      );
-
-      CREATE UNIQUE INDEX IF NOT EXISTS idx_financial_market_regime_unique_daily
-      ON financial_market_regime(symbol, trade_date, rule_version);
-    `
-  },
-  {
-    id: '20260518_006_finance_daily_pipeline_wait_full_universe',
-    name: 'Make finance daily pipeline wait for full universe daily close update',
-    run: async (db: any) => {
-      const taskTable = await dbGet<{ name: string }>(
-        db,
-        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'task_center_tasks'"
-      );
-      if (!taskTable) return;
-
-      const task = await dbGet<{ config_json?: string | null }>(
-        db,
-        "SELECT config_json FROM task_center_tasks WHERE task_key = 'finance_daily_pipeline'"
-      );
-      if (!task) return;
-
-      let config: Record<string, any> = {};
-      try {
-        config = task.config_json ? JSON.parse(task.config_json) : {};
-      } catch {
-        config = {};
-      }
-      config.wait_full_universe = true;
-
-	      await dbRun(
-	        db,
-	        `UPDATE task_center_tasks
-	         SET config_json = ?,
-	             last_message = CASE
-	               WHEN COALESCE(last_status, 'pending') IN ('pending', '')
-	                 OR last_message IS NULL
-	                 OR last_message LIKE '17:%'
-	                 OR last_message LIKE '收盘后%'
-	                 THEN '17:10 收盘后等待全市场日线补齐完成，再扫候选、模型复核、漏斗、实验预测池和后验标签；计划生成与仓位填写仍人工确认'
-	               ELSE last_message
-	             END,
-	             updated_at = CURRENT_TIMESTAMP
-	         WHERE task_key = 'finance_daily_pipeline'`,
-	        [JSON.stringify(config)]
-      );
-    }
-  },
-  {
-    id: '20260518_007_finance_decision_snapshots_trade_date',
-    name: 'Clamp finance decision sample snapshots to latest trading date',
-    run: async (db: any) => {
-      const snapshotTable = await dbGet<{ name: string }>(
-        db,
-        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'finance_decision_sample_snapshots'"
-      );
-      if (!snapshotTable) return;
-
-      const latest = await dbGet<{ trade_date?: string | null }>(
-        db,
-        `SELECT MAX(trade_date) AS trade_date
-         FROM (
-           SELECT trade_date
-           FROM financial_daily_prices
-           WHERE trade_date IS NOT NULL
-             AND COALESCE(source, 'tushare') = 'tushare'
-             AND asset_type IN ('stock', 'etf')
-           UNION ALL
-           SELECT trade_date
-           FROM financial_market_regime
-           WHERE trade_date IS NOT NULL
-         )`
-      );
-      const targetDate = latest?.trade_date;
-      if (!targetDate) return;
-
-      await dbExec(db, 'BEGIN TRANSACTION');
-      try {
-        await dbRun(
-          db,
-          `DELETE FROM finance_decision_sample_snapshots
-           WHERE snapshot_date = ?
-             AND sample_id IN (
-               SELECT sample_id
-               FROM finance_decision_sample_snapshots
-               WHERE snapshot_date > ?
-             )`,
-          [targetDate, targetDate]
-        );
-        await dbRun(
-          db,
-          `UPDATE finance_decision_sample_snapshots
-           SET snapshot_date = ?,
-               updated_at = CURRENT_TIMESTAMP
-           WHERE snapshot_date > ?`,
-          [targetDate, targetDate]
-        );
-        await dbExec(db, 'COMMIT');
-      } catch (error) {
-        await dbExec(db, 'ROLLBACK');
-        throw error;
-      }
-    }
-  },
-  {
-    id: '20260519_001_finance_candidate_final_status_alignment',
-    name: 'Align active finance candidate final status with review status',
-    sql: `
-      UPDATE financial_candidate_pool
-      SET final_status = 'WAIT',
-          updated_at = CURRENT_TIMESTAMP
-      WHERE pool_status = 'active'
-        AND asset_type IN ('stock', 'etf')
-        AND review_status IN ('trend_blocked', 'structure_watch', 'wait_confirmation', 'unreviewed', 'drafted')
-        AND final_status = 'READY_FOR_PLAN';
-    `
-  },
-  {
-    id: '20260519_003_finance_model_recheck_settled_alignment',
-    name: 'Align settled model recheck candidates with rejected final status',
-    sql: `
-      UPDATE financial_candidate_pool
-      SET final_status = 'REJECTED',
-          updated_at = CURRENT_TIMESTAMP
-      WHERE review_action = 'auto_model_recheck_settled'
-        AND review_status = 'rejected'
-        AND final_status = 'READY_FOR_PLAN';
-    `
-  },
-  {
-    id: '20260519_004_finance_expired_candidate_final_status_alignment',
-    name: 'Align expired finance candidate final status as rejected',
-    sql: `
-      UPDATE financial_candidate_pool
-      SET final_status = 'REJECTED',
-          updated_at = CURRENT_TIMESTAMP
-      WHERE pool_status = 'expired'
-        AND asset_type IN ('stock', 'etf')
-        AND COALESCE(final_status, '') <> 'REJECTED';
-    `
-  },
-  {
-    id: '20260519_002_precious_metals_training_pipeline',
-    name: 'Create precious metals training pipeline task and silver gate audit',
-    sql: `
-      CREATE TABLE IF NOT EXISTS metal_training_gate_runs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        symbol TEXT NOT NULL,
-        gate_key TEXT NOT NULL,
-        status TEXT NOT NULL,
-        passed INTEGER NOT NULL DEFAULT 0,
-        metrics_json TEXT,
-        checks_json TEXT,
-        thresholds_json TEXT,
-        reason TEXT,
-        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_metal_training_gate_runs_symbol
-      ON metal_training_gate_runs(symbol, gate_key, created_at DESC);
-
-      INSERT OR IGNORE INTO task_center_tasks
-        (task_key, name, domain, task_type, enabled, schedule_time, schedule_days, priority, config_json, last_status, last_message)
-      VALUES
-        (
-          'precious_metals_training_pipeline',
-          '贵金属训练流水线',
-          'metals',
-          'precious_metals_training_pipeline',
-          1,
-          '18:10',
-          'every_day',
-          38,
-          '{"symbols":["XAUUSD","SGE_AGTD"],"refresh_prices":true,"refresh_fx":true,"refresh_macro":true,"replay_limit":1500,"train_gold":true,"train_silver_if_gate_pass":false,"silver_gate":{"min_main_signal_count":300,"min_block_signal_count":300,"min_short_lived_edge":0.03,"min_drawdown_edge":0.005,"min_fx_coverage":0.8}}',
-          'pending',
-          '独立贵金属训练流水线：更新行情/汇率、回放落库、白银分层验收、黄金训练；白银必须过训练闸门才允许后续辅助模型训练'
-        );
-
-      UPDATE task_center_tasks
-      SET domain = 'metals',
-          task_type = 'precious_metals_training_pipeline',
-          schedule_time = CASE WHEN schedule_time IS NULL OR schedule_time = '' THEN '18:10' ELSE schedule_time END,
-          schedule_days = CASE WHEN schedule_days IS NULL OR schedule_days = '' THEN 'every_day' ELSE schedule_days END,
-          config_json = CASE
-            WHEN config_json IS NULL OR config_json = '{}' OR config_json = '' THEN '{"symbols":["XAUUSD","SGE_AGTD"],"refresh_prices":true,"refresh_fx":true,"refresh_macro":true,"replay_limit":1500,"train_gold":true,"train_silver_if_gate_pass":false,"silver_gate":{"min_main_signal_count":300,"min_block_signal_count":300,"min_short_lived_edge":0.03,"min_drawdown_edge":0.005,"min_fx_coverage":0.8}}'
-            ELSE config_json
-          END,
-          last_message = CASE
-            WHEN last_status IS NULL OR last_status = 'pending' THEN '独立贵金属训练流水线：更新行情/汇率、回放落库、白银分层验收、黄金训练；白银必须过训练闸门才允许后续辅助模型训练'
-            ELSE last_message
-          END,
-          updated_at = CURRENT_TIMESTAMP
-      WHERE task_key = 'precious_metals_training_pipeline';
-    `
-  },
-  {
-    id: '20260520_001_gold_rule_contrast_reports',
-    name: 'Create gold rule contrast reports',
-    sql: `
-      CREATE TABLE IF NOT EXISTS metal_rule_contrast_reports (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        symbol TEXT NOT NULL,
-        report_key TEXT NOT NULL,
-        report_date TEXT,
-        rule_version TEXT NOT NULL,
-        status TEXT NOT NULL,
-        conclusion_label TEXT,
-        conclusion_text TEXT,
-        metrics_json TEXT,
-        checks_json TEXT,
-        report_json TEXT NOT NULL,
-        saved_from TEXT NOT NULL DEFAULT 'manual',
-        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_metal_rule_contrast_reports_scope
-      ON metal_rule_contrast_reports(symbol, report_key, created_at DESC);
-    `
-  },
-  {
-    id: '20260520_002_gold_model_validation_reports',
-    name: 'Create gold model validation reports',
-    sql: `
-      CREATE TABLE IF NOT EXISTS metal_model_validation_reports (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        symbol TEXT NOT NULL,
-        domain TEXT NOT NULL,
-        model_run_id INTEGER,
-        report_key TEXT NOT NULL,
-        status TEXT NOT NULL,
-        conclusion_label TEXT,
-        conclusion_text TEXT,
-        metrics_json TEXT,
-        checks_json TEXT,
-        report_json TEXT NOT NULL,
-        saved_from TEXT NOT NULL DEFAULT 'manual',
-        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_metal_model_validation_reports_scope
-      ON metal_model_validation_reports(symbol, report_key, created_at DESC);
-
-      CREATE INDEX IF NOT EXISTS idx_metal_model_validation_reports_run
-      ON metal_model_validation_reports(domain, model_run_id, created_at DESC);
-    `
-  },
-  {
-    id: '20260522_001_finance_experiment_prediction_task',
-    name: 'Add independent finance experiment prediction snapshot task',
-    sql: `
-      INSERT OR IGNORE INTO task_center_tasks
-        (task_key, name, domain, task_type, enabled, schedule_time, schedule_days, priority, config_json, last_status, last_message)
-      VALUES
-        (
-          'finance_experiment_prediction_snapshots',
-          '五模型实验预测池落库',
-          'finance',
-          'finance_experiment_prediction_snapshots',
-          1,
-          '17:35',
-          'trade_days',
-          42,
-          '{"prediction_pool_limit":40,"prediction_label_limit":600,"prediction_horizon_days":20}',
-          'pending',
-          '金融日终流水线的独立兜底任务：只滚动五模型 latest_prediction_pool 和后验标签，不推进备选池、入场触发或买入计划。'
-        );
-
-      UPDATE task_center_tasks
-      SET name = '五模型实验预测池落库',
-          domain = 'finance',
-          task_type = 'finance_experiment_prediction_snapshots',
-          enabled = 1,
-          schedule_time = CASE WHEN schedule_time IS NULL OR schedule_time = '' THEN '17:35' ELSE schedule_time END,
-          schedule_days = 'trade_days',
-          priority = 42,
-          config_json = CASE
-            WHEN config_json IS NULL OR config_json = '{}' OR config_json = '' THEN '{"prediction_pool_limit":40,"prediction_label_limit":600,"prediction_horizon_days":20}'
-            ELSE config_json
-          END,
-          last_message = '金融日终流水线的独立兜底任务：只滚动五模型 latest_prediction_pool 和后验标签，不推进备选池、入场触发或买入计划。',
-          updated_at = CURRENT_TIMESTAMP
-      WHERE task_key = 'finance_experiment_prediction_snapshots';
-    `
-  },
-  {
-    id: '20260523_001_finance_workflow_summary_indexes',
-    name: 'Add finance workflow summary date indexes',
-    sql: `
-      CREATE INDEX IF NOT EXISTS idx_financial_stock_basic_metrics_trade_date
-      ON financial_stock_basic_metrics(trade_date DESC, source);
-
-      CREATE INDEX IF NOT EXISTS idx_financial_sw_industry_daily_trade_date
-      ON financial_sw_industry_daily(trade_date DESC, source);
-
-      CREATE INDEX IF NOT EXISTS idx_financial_market_breadth_daily_trade_date
-      ON financial_market_breadth_daily(trade_date DESC);
-
-      CREATE INDEX IF NOT EXISTS idx_financial_limit_events_trade_date
-      ON financial_limit_events(trade_date DESC);
-
-      CREATE INDEX IF NOT EXISTS idx_financial_market_regime_trade_date
-      ON financial_market_regime(trade_date DESC);
-    `
-  },
-  {
-    id: '20260525_001_metal_action_samples',
-    name: 'Create precious metal action samples',
-    sql: `
-      CREATE TABLE IF NOT EXISTS metal_action_samples (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        symbol TEXT NOT NULL,
-        asset_name TEXT,
-        source TEXT,
-        trade_date TEXT NOT NULL,
-        action_version TEXT NOT NULL,
-        source_sample_id INTEGER,
-        source_rule_version TEXT,
-        action_key TEXT NOT NULL,
-        action_label TEXT NOT NULL,
-        action_permission TEXT NOT NULL DEFAULT 'observe',
-        action_reason TEXT,
-        guardrail_key TEXT,
-        guardrail_label TEXT,
-        guardrail_reason TEXT,
-        close REAL,
-        state_code TEXT,
-        state_label TEXT,
-        state_reason TEXT,
-        signal_maturity TEXT,
-        signal_maturity_label TEXT,
-        rule_signal TEXT,
-        rule_action TEXT,
-        rule_action_label TEXT,
-        price_position_code TEXT,
-        price_position_label TEXT,
-        distance_to_ma60 REAL,
-        recent_return_5 REAL,
-        recent_return_20 REAL,
-        drawdown_20 REAL,
-        range_ratio_5 REAL,
-        range_ratio_20 REAL,
-        lower_low INTEGER,
-        abnormal_move INTEGER,
-        daily_return REAL,
-        drop_pct_1d REAL,
-        drop_pct_5d REAL,
-        drop_pct_20d REAL,
-        state_continuation_days INTEGER,
-        safe_confirmation_days INTEGER,
-        safe_zone_days INTEGER,
-        gold_state_code TEXT,
-        gold_state_label TEXT,
-        gold_close REAL,
-        gold_distance_to_ma60 REAL,
-        gold_recent_return_5 REAL,
-        gold_recent_return_20 REAL,
-        gold_safe_confirmation_days INTEGER,
-        silver_state_code TEXT,
-        silver_state_label TEXT,
-        silver_close REAL,
-        silver_distance_to_ma60 REAL,
-        silver_recent_return_5 REAL,
-        silver_recent_return_20 REAL,
-        silver_safe_confirmation_days INTEGER,
-        label_status TEXT,
-        future_rebound_3d INTEGER,
-        future_rebound_5d INTEGER,
-        future_return_3d REAL,
-        future_return_5d REAL,
-        future_return_10d REAL,
-        future_return_20d REAL,
-        future_max_drawdown_20d REAL,
-        break_recent_low_20d INTEGER,
-        survived_3d INTEGER,
-        survived_5d INTEGER,
-        short_lived_signal INTEGER,
-        future_state_3d TEXT,
-        future_state_5d TEXT,
-        future_state_10d TEXT,
-        future_state_20d TEXT,
-        outcome_label TEXT,
-        snapshot_json TEXT NOT NULL,
-        saved_from TEXT NOT NULL DEFAULT 'manual_action_replay',
-        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(symbol, trade_date, action_version)
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_metal_action_samples_scope
-      ON metal_action_samples(symbol, trade_date DESC, action_version);
-
-      CREATE INDEX IF NOT EXISTS idx_metal_action_samples_action
-      ON metal_action_samples(action_key, action_permission, label_status, trade_date DESC);
-
-      CREATE INDEX IF NOT EXISTS idx_metal_action_samples_outcome
-      ON metal_action_samples(symbol, action_key, short_lived_signal, break_recent_low_20d, trade_date DESC);
-    `
-  },
-  {
-    id: '20260525_002_metal_action_sample_reports',
-    name: 'Create precious metal action sample validation reports',
-    sql: `
-      CREATE TABLE IF NOT EXISTS metal_action_sample_reports (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        report_key TEXT NOT NULL,
-        report_date TEXT,
-        action_version TEXT NOT NULL,
-        status TEXT NOT NULL,
-        conclusion_label TEXT,
-        conclusion_text TEXT,
-        metrics_json TEXT,
-        checks_json TEXT,
-        report_json TEXT NOT NULL,
-        saved_from TEXT NOT NULL DEFAULT 'manual_generate',
-        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_metal_action_sample_reports_scope
-      ON metal_action_sample_reports(report_key, action_version, created_at DESC);
-    `
-  },
-  {
+{
     id: '20260525_003_normalize_task_timestamps',
-    name: 'Normalize task and training timestamps',
+    name: 'Normalize task center timestamps',
     run: async (db) => {
       const normalizeTimestampColumns = async (tableName: string, columnNames: string[]) => {
         const table = await dbGet<any>(
@@ -2553,231 +822,105 @@ const migrations: Migration[] = [
         );
         if (!table) return;
 
-        const columns = await dbAll<any>(db, `PRAGMA table_info(${tableName})`);
+        const columns = await dbAll<any>(db, `PRAGMA table_info(${quoteMigrationIdentifier(tableName)})`);
         const existingColumns = new Set(columns.map((column: any) => String(column.name)));
         for (const columnName of columnNames) {
           if (!existingColumns.has(columnName)) continue;
+          const quotedColumn = quoteMigrationIdentifier(columnName);
           await dbRun(
             db,
-            `UPDATE ${tableName}
-             SET ${columnName} = strftime('%Y-%m-%dT%H:%M:%fZ', REPLACE(REPLACE(${columnName}, 'T', ' '), 'Z', ''))
-             WHERE ${columnName} IS NOT NULL
-               AND TRIM(${columnName}) != ''
-               AND datetime(REPLACE(REPLACE(${columnName}, 'T', ' '), 'Z', '')) IS NOT NULL
-               AND (${columnName} NOT LIKE '%T%' OR ${columnName} NOT LIKE '%Z')`
+            `UPDATE ${quoteMigrationIdentifier(tableName)}
+             SET ${quotedColumn} = strftime('%Y-%m-%dT%H:%M:%fZ', REPLACE(REPLACE(${quotedColumn}, 'T', ' '), 'Z', ''))
+             WHERE ${quotedColumn} IS NOT NULL
+               AND TRIM(${quotedColumn}) != ''
+               AND datetime(REPLACE(REPLACE(${quotedColumn}, 'T', ' '), 'Z', '')) IS NOT NULL
+               AND (${quotedColumn} NOT LIKE '%T%' OR ${quotedColumn} NOT LIKE '%Z')`
           );
         }
       };
 
       await normalizeTimestampColumns('task_center_runs', ['started_at', 'finished_at', 'created_at']);
       await normalizeTimestampColumns('task_center_tasks', ['last_run_at', 'next_run_at', 'created_at', 'updated_at']);
-      await normalizeTimestampColumns('model_training_runs', ['started_at', 'finished_at', 'created_at', 'updated_at']);
       await dbExec(db, `
         CREATE INDEX IF NOT EXISTS idx_task_center_runs_task_started_at_normalized
         ON task_center_runs(task_key, started_at DESC, id DESC);
-
-        CREATE INDEX IF NOT EXISTS idx_model_training_runs_domain_started_at_normalized
-        ON model_training_runs(domain, started_at DESC, id DESC);
       `);
     }
   },
-  {
-    id: '20260525_004_metal_macro_factors',
-    name: 'Create precious metal macro factors',
-    sql: `
-      CREATE TABLE IF NOT EXISTS metal_macro_factors (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        trade_date TEXT NOT NULL,
-        source TEXT NOT NULL DEFAULT 'tushare_macro',
-        usd_cnh_mid REAL,
-        usd_cnh_change_5d REAL,
-        usd_cnh_change_20d REAL,
-        cny_state TEXT,
-        fx_tailwind_for_silver TEXT,
-        dxy_proxy REAL,
-        dxy_proxy_source TEXT,
-        dxy_proxy_change_5d REAL,
-        dxy_proxy_change_20d REAL,
-        dollar_state TEXT,
-        dollar_tailwind_for_gold TEXT,
-        dollar_tailwind_for_silver TEXT,
-        us10y_yield REAL,
-        us10y_change_5d REAL,
-        us10y_change_20d REAL,
-        us10y_state TEXT,
-        rate_tailwind_for_gold TEXT,
-        us10y_real_yield REAL,
-        real_yield_change_5d REAL,
-        real_yield_change_20d REAL,
-        real_yield_state TEXT,
-        real_rate_tailwind_for_gold TEXT,
-        raw_fx_json TEXT,
-        raw_rate_json TEXT,
-        raw_real_rate_json TEXT,
-        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(trade_date, source)
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_metal_macro_factors_date
-      ON metal_macro_factors(trade_date DESC, source);
-
-      CREATE INDEX IF NOT EXISTS idx_metal_macro_factors_states
-      ON metal_macro_factors(fx_tailwind_for_silver, dollar_tailwind_for_gold, real_rate_tailwind_for_gold, trade_date DESC);
-
-      INSERT OR IGNORE INTO task_center_tasks
-        (task_key, name, domain, task_type, enabled, schedule_time, schedule_days, priority, config_json, last_status, last_message)
-      VALUES
-        (
-          'metal_macro_factors_update',
-          '贵金属宏观因子更新',
-          'metals',
-          'metal_macro_factors_update',
-          1,
-          '17:30',
-          'every_day',
-          37,
-          '{"source":"tushare_macro"}',
-          'pending',
-          '每天从 Tushare 拉取 USDCNH、合成美元指数代理、美国10Y和美国10Y实际利率，生成贵金属顺逆风标签'
-        );
-
-      UPDATE task_center_tasks
-      SET name = '贵金属宏观因子更新',
-          domain = 'metals',
-          task_type = 'metal_macro_factors_update',
-          enabled = 1,
-          schedule_time = CASE WHEN schedule_time IS NULL OR schedule_time = '' THEN '17:30' ELSE schedule_time END,
-          schedule_days = CASE WHEN schedule_days IS NULL OR schedule_days = '' THEN 'every_day' ELSE schedule_days END,
-          priority = 37,
-          config_json = CASE
-            WHEN config_json IS NULL OR config_json = '{}' OR config_json = '' THEN '{"source":"tushare_macro"}'
-            ELSE config_json
-          END,
-          last_message = CASE
-            WHEN last_status IS NULL OR last_status = 'pending' THEN '每天从 Tushare 拉取 USDCNH、合成美元指数代理、美国10Y和美国10Y实际利率，生成贵金属顺逆风标签'
-            ELSE last_message
-          END,
-          updated_at = CURRENT_TIMESTAMP
-      WHERE task_key = 'metal_macro_factors_update';
-    `
-  },
-  {
+{
     id: '20260525_005_shared_table_workspaces',
-    name: 'Add workspace boundary to cross-app task and todo tables',
+    name: 'Set business workspace on task and todo tables',
     run: async (db: any) => {
-      // Historical compatibility: the migration id and legacy 'platform' value are kept unchanged
-      // so old single-app databases can still be normalized without replaying applied migrations.
-      await ensureMigrationColumn(db, 'task_center_tasks', 'workspace', "TEXT NOT NULL DEFAULT 'platform'");
+      await dbExec(db, `
+        CREATE TABLE IF NOT EXISTS manual_todos (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          title TEXT NOT NULL,
+          priority TEXT NOT NULL,
+          status TEXT NOT NULL,
+          due_date TEXT,
+          note TEXT,
+          domain TEXT NOT NULL DEFAULT 'business',
+          workspace TEXT NOT NULL DEFAULT 'business',
+          track TEXT,
+          type TEXT DEFAULT 'manual',
+          market_type_preset TEXT DEFAULT 'standard',
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+      `);
+
+      await ensureMigrationColumn(db, 'task_center_tasks', 'workspace', "TEXT NOT NULL DEFAULT 'business'");
       await ensureMigrationColumn(db, 'task_center_runs', 'domain', 'TEXT');
-      await ensureMigrationColumn(db, 'task_center_runs', 'workspace', "TEXT NOT NULL DEFAULT 'platform'");
+      await ensureMigrationColumn(db, 'task_center_runs', 'workspace', "TEXT NOT NULL DEFAULT 'business'");
       await ensureMigrationColumn(db, 'manual_todos', 'domain', "TEXT NOT NULL DEFAULT 'business'");
       await ensureMigrationColumn(db, 'manual_todos', 'workspace', "TEXT NOT NULL DEFAULT 'business'");
 
       await dbExec(db, `
         UPDATE task_center_tasks
-        SET workspace = CASE
-          WHEN lower(COALESCE(domain, '')) IN ('finance', 'metals', 'stock', 'etf')
-            OR lower(COALESCE(task_key, '')) LIKE 'finance_%'
-            OR lower(COALESCE(task_type, '')) LIKE 'finance_%'
-            OR lower(COALESCE(task_key, '')) IN ('metals_daily_update', 'fx_daily_rates_update', 'metal_macro_factors_update', 'precious_metals_training_pipeline')
-            THEN 'trading'
-          WHEN lower(COALESCE(domain, '')) IN ('business', 'price', 'commodity')
-            OR lower(COALESCE(task_key, '')) IN ('iphone_price_update', 'video_game_machine_price_update', 'popmart_price_update', 'commodity_metals_price_update')
-            OR lower(COALESCE(task_type, '')) LIKE 'commodity_%'
-            THEN 'business'
-          ELSE 'platform'
-        END
-        WHERE workspace IS NULL OR workspace = '' OR workspace = 'platform';
+        SET workspace = 'business'
+        WHERE workspace IS NULL OR workspace = '';
 
         UPDATE task_center_runs
-        SET domain = (
-              SELECT t.domain
-              FROM task_center_tasks t
-              WHERE t.id = task_center_runs.task_id
-              LIMIT 1
+        SET domain = COALESCE(
+              NULLIF((
+                SELECT t.domain
+                FROM task_center_tasks t
+                WHERE t.id = task_center_runs.task_id
+                LIMIT 1
+              ), ''),
+              NULLIF(domain, ''),
+              'business'
             ),
-            workspace = (
-              SELECT t.workspace
-              FROM task_center_tasks t
-              WHERE t.id = task_center_runs.task_id
-              LIMIT 1
-            )
+            workspace = 'business'
         WHERE EXISTS (
           SELECT 1 FROM task_center_tasks t WHERE t.id = task_center_runs.task_id
         );
 
         UPDATE task_center_runs
-        SET domain = (
-              SELECT t.domain
-              FROM task_center_tasks t
-              WHERE t.task_key = task_center_runs.task_key
-              LIMIT 1
+        SET domain = COALESCE(
+              NULLIF((
+                SELECT t.domain
+                FROM task_center_tasks t
+                WHERE t.task_key = task_center_runs.task_key
+                LIMIT 1
+              ), ''),
+              NULLIF(domain, ''),
+              'business'
             ),
-            workspace = (
-              SELECT t.workspace
-              FROM task_center_tasks t
-              WHERE t.task_key = task_center_runs.task_key
-              LIMIT 1
-            )
+            workspace = 'business'
         WHERE EXISTS (
           SELECT 1 FROM task_center_tasks t WHERE t.task_key = task_center_runs.task_key
-        )
-          AND (domain IS NULL OR domain = '' OR workspace IS NULL OR workspace = '' OR workspace = 'platform');
+        );
 
         UPDATE task_center_runs
-        SET domain = CASE
-          WHEN lower(COALESCE(task_key, '')) LIKE 'finance_%' THEN 'finance'
-          WHEN lower(COALESCE(task_key, '')) LIKE 'metal_%'
-            OR lower(COALESCE(task_key, '')) LIKE 'metals_%'
-            OR lower(COALESCE(task_key, '')) LIKE 'precious_metals_%' THEN 'metals'
-          WHEN lower(COALESCE(task_key, '')) LIKE 'commodity_%'
-            OR lower(COALESCE(task_key, '')) IN ('iphone_price_update', 'video_game_machine_price_update', 'popmart_price_update') THEN 'price'
-          ELSE 'platform'
-        END
-        WHERE domain IS NULL OR domain = '';
-
-        UPDATE task_center_runs
-        SET workspace = CASE
-          WHEN lower(COALESCE(domain, '')) IN ('finance', 'metals', 'stock', 'etf')
-            OR lower(COALESCE(task_key, '')) LIKE 'finance_%'
-            OR lower(COALESCE(task_key, '')) LIKE 'metal_%'
-            OR lower(COALESCE(task_key, '')) LIKE 'metals_%'
-            OR lower(COALESCE(task_key, '')) LIKE 'precious_metals_%'
-            THEN 'trading'
-          WHEN lower(COALESCE(domain, '')) IN ('business', 'price', 'commodity')
-            OR lower(COALESCE(task_key, '')) IN ('iphone_price_update', 'video_game_machine_price_update', 'popmart_price_update', 'commodity_metals_price_update')
-            OR lower(COALESCE(task_key, '')) LIKE 'commodity_%'
-            THEN 'business'
-          ELSE 'platform'
-        END
-        WHERE workspace IS NULL OR workspace = '' OR workspace = 'platform';
+        SET domain = COALESCE(NULLIF(domain, ''), 'business'),
+            workspace = 'business'
+        WHERE workspace IS NULL OR workspace = '';
 
         UPDATE manual_todos
-        SET workspace = CASE
-          WHEN lower(COALESCE(title, '') || ' ' || COALESCE(note, '')) LIKE '%etf%'
-            OR COALESCE(title, '') || ' ' || COALESCE(note, '') LIKE '%金融%'
-            OR COALESCE(title, '') || ' ' || COALESCE(note, '') LIKE '%股票%'
-            OR COALESCE(title, '') || ' ' || COALESCE(note, '') LIKE '%A股%'
-            OR COALESCE(title, '') || ' ' || COALESCE(note, '') LIKE '%入场%'
-            OR COALESCE(title, '') || ' ' || COALESCE(note, '') LIKE '%模型%'
-            OR COALESCE(title, '') || ' ' || COALESCE(note, '') LIKE '%信号%'
-            OR COALESCE(title, '') || ' ' || COALESCE(note, '') LIKE '%白银%'
-            OR COALESCE(title, '') || ' ' || COALESCE(note, '') LIKE '%黄金%'
-            OR COALESCE(title, '') || ' ' || COALESCE(note, '') LIKE '%贵金属%'
-            OR lower(COALESCE(title, '') || ' ' || COALESCE(note, '')) LIKE '%tushare%'
-            OR lower(COALESCE(title, '') || ' ' || COALESCE(note, '')) LIKE '%lof%'
-            THEN 'trading'
-          ELSE 'business'
-        END
-        WHERE workspace IS NULL OR workspace = '' OR workspace = 'business';
-
-        UPDATE manual_todos
-        SET domain = CASE
-          WHEN workspace = 'trading' THEN 'finance'
-          WHEN domain IS NULL OR domain = '' THEN 'business'
-          ELSE domain
-        END;
+        SET domain = COALESCE(NULLIF(domain, ''), 'business'),
+            workspace = 'business'
+        WHERE workspace IS NULL OR workspace = '';
 
         CREATE INDEX IF NOT EXISTS idx_task_center_tasks_workspace_schedule
         ON task_center_tasks(workspace, enabled, schedule_time, priority);
@@ -2790,54 +933,25 @@ const migrations: Migration[] = [
       `);
     }
   },
-  {
+{
     id: '20260525_006_audit_log_workspaces',
-    name: 'Add workspace boundary to audit logs',
+    name: 'Set business workspace on audit logs',
     run: async (db: any) => {
       await ensureMigrationColumn(db, 'audit_logs', 'domain', "TEXT NOT NULL DEFAULT 'business'");
       await ensureMigrationColumn(db, 'audit_logs', 'workspace', "TEXT NOT NULL DEFAULT 'business'");
 
       await dbExec(db, `
         UPDATE audit_logs
-        SET workspace = CASE
-          WHEN lower(COALESCE(path, '')) LIKE '/finance%'
-            OR lower(COALESCE(path, '')) LIKE '/model-training%'
-            OR lower(COALESCE(path, '')) LIKE '/experiments%'
-            OR COALESCE(module, '') LIKE '%金融%'
-            OR COALESCE(module, '') LIKE '%模型%'
-            OR COALESCE(target, '') LIKE '%金融%'
-            OR COALESCE(target, '') LIKE '%入池%'
-            OR COALESCE(target, '') LIKE '%贵金属%'
-            THEN 'trading'
-          WHEN lower(COALESCE(path, '')) LIKE '/price%'
-            OR lower(COALESCE(path, '')) LIKE '/plan%'
-            OR lower(COALESCE(path, '')) LIKE '/position%'
-            OR lower(COALESCE(path, '')) LIKE '/risk-control%'
-            OR lower(COALESCE(path, '')) LIKE '/review%'
-            OR lower(COALESCE(path, '')) LIKE '/rules%'
-            OR COALESCE(module, '') LIKE '%商品%'
-            OR COALESCE(module, '') LIKE '%价格%'
-            OR COALESCE(target, '') LIKE '%iPhone%'
-            OR COALESCE(target, '') LIKE '%Pop Mart%'
-            THEN 'business'
-          ELSE workspace
-        END
-        WHERE workspace IS NULL OR workspace = '' OR workspace = 'business';
-
-        UPDATE audit_logs
-        SET domain = CASE
-          WHEN workspace = 'trading' THEN 'finance'
-          WHEN workspace = 'platform' THEN 'platform'
-          ELSE 'business'
-        END
-        WHERE domain IS NULL OR domain = '' OR domain = 'business';
+        SET domain = COALESCE(NULLIF(domain, ''), 'business'),
+            workspace = 'business'
+        WHERE workspace IS NULL OR workspace = '';
 
         CREATE INDEX IF NOT EXISTS idx_audit_logs_workspace_timestamp
         ON audit_logs(workspace, timestamp DESC, created_at DESC);
       `);
     }
   },
-  {
+{
     id: '20260526_001_workspace_tags',
     name: 'Create workspace scoped tags',
     sql: `
@@ -2854,7 +968,1121 @@ const migrations: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_workspace_tags_workspace_name
       ON workspace_tags(workspace, name);
     `
+  },
+{
+    id: '20260530_001_remove_non_business_task_seed_residue',
+    name: 'Remove non-business task seeds from business task center',
+    sql: `
+      DELETE FROM task_center_runs
+      WHERE task_key IN ('metals_daily_update', 'lottery_daily_update')
+         OR task_id IN (
+           SELECT id FROM task_center_tasks
+           WHERE task_key IN ('metals_daily_update', 'lottery_daily_update')
+         );
+
+      DELETE FROM task_center_tasks
+      WHERE task_key IN ('metals_daily_update', 'lottery_daily_update');
+    `
+  },
+{
+    id: '20260530_002_remove_skipped_business_migration_markers',
+    name: 'Remove skipped trading migration markers from business DB',
+    sql: `
+      DELETE FROM migrations
+      WHERE name LIKE '[skipped:business] %';
+    `
+  },
+{
+    id: '20260530_003_remove_commodity_metals_task_from_business_db',
+    name: 'Keep commodity metals task in business task center',
+    sql: `
+      SELECT 1;
+    `
+  },
+{
+    id: '20260530_004_rename_product_supply_participation_scope',
+    name: 'Rename product supply participation scope',
+    run: async (db: any) => {
+      const columns = await dbAll<any>(db, 'PRAGMA table_info(product_supply_events)');
+      const columnNames = new Set(columns.map((column: any) => String(column.name)));
+      if (columnNames.has('trading_scope') && !columnNames.has('participation_scope')) {
+        await dbExec(db, 'ALTER TABLE product_supply_events RENAME COLUMN trading_scope TO participation_scope');
+      } else if (!columnNames.has('participation_scope')) {
+        await dbExec(db, "ALTER TABLE product_supply_events ADD COLUMN participation_scope TEXT NOT NULL DEFAULT 'normal'");
+      } else if (columnNames.has('trading_scope')) {
+        await dbExec(db, `
+          UPDATE product_supply_events
+          SET participation_scope = COALESCE(NULLIF(participation_scope, ''), trading_scope, 'normal')
+          WHERE participation_scope IS NULL OR participation_scope = '';
+        `);
+      }
+
+      await dbExec(db, `
+        UPDATE product_supply_events
+        SET source_note = REPLACE(source_note, '当前只记录不参与交易', '当前只记录，不参与买卖判断'),
+            updated_at = CURRENT_TIMESTAMP
+        WHERE source_note LIKE '%当前只记录不参与交易%';
+      `);
+    }
+  },
+{
+    id: '20260530_005_rename_trade_reviews_to_business_reviews',
+    name: 'Rename trade reviews to business reviews',
+    run: async (db: any) => {
+      const oldTable = await dbGet<any>(
+        db,
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+        ['trade_reviews']
+      );
+      const newTable = await dbGet<any>(
+        db,
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+        ['business_reviews']
+      );
+
+      if (oldTable && !newTable) {
+        await dbExec(db, 'ALTER TABLE trade_reviews RENAME TO business_reviews');
+      } else if (!newTable) {
+        await dbExec(db, `
+          CREATE TABLE IF NOT EXISTS business_reviews (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            track TEXT NOT NULL,
+            project_name TEXT,
+            review_date TEXT,
+            result_type TEXT,
+            summary_conclusion TEXT,
+            background TEXT,
+            judgment_at_that_time TEXT,
+            action_at_that_time TEXT,
+            later_outcome TEXT,
+            root_cause_type TEXT,
+            exposed_problem TEXT,
+            extracted_lesson TEXT,
+            short_lesson TEXT,
+            note TEXT,
+            is_deleted INTEGER DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+          );
+        `);
+      }
+    }
+  },
+{
+    id: '20260530_006_normalize_task_center_work_days',
+    name: 'Normalize task center work day schedule',
+    sql: `
+      UPDATE task_center_tasks
+      SET schedule_days = 'work_days',
+          updated_at = CURRENT_TIMESTAMP
+      WHERE schedule_days = 'trade_days';
+    `
+  },
+  {
+    id: '20260530_007_normalize_annual_plan_change_columns',
+    name: 'Normalize annual plan change columns',
+    run: async (db: any) => {
+      const table = await dbGet<any>(
+        db,
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+        ['annual_plan_item_changes']
+      );
+      if (!table) return;
+
+      await ensureMigrationColumn(db, 'annual_plan_item_changes', 'old_role', 'TEXT');
+      await ensureMigrationColumn(db, 'annual_plan_item_changes', 'new_role', 'TEXT');
+      await ensureMigrationColumn(db, 'annual_plan_item_changes', 'old_action', 'TEXT');
+      await ensureMigrationColumn(db, 'annual_plan_item_changes', 'new_action', 'TEXT');
+      await ensureMigrationColumn(db, 'annual_plan_item_changes', 'reason', 'TEXT');
+      await ensureMigrationColumn(db, 'annual_plan_item_changes', 'next_action', 'TEXT');
+
+      const columns = await dbAll<any>(db, 'PRAGMA table_info(annual_plan_item_changes)');
+      const columnNames = new Set(columns.map((column: any) => String(column.name)));
+      const copyPairs: Array<[string, string]> = [
+        ['old_role_type', 'old_role'],
+        ['new_role_type', 'new_role'],
+        ['old_action_type', 'old_action'],
+        ['new_action_type', 'new_action'],
+        ['change_reason', 'reason']
+      ];
+
+      for (const [fromColumn, toColumn] of copyPairs) {
+        if (!columnNames.has(fromColumn) || !columnNames.has(toColumn)) continue;
+        await dbExec(db, `
+          UPDATE annual_plan_item_changes
+          SET ${toColumn} = COALESCE(NULLIF(${toColumn}, ''), ${fromColumn})
+          WHERE ${toColumn} IS NULL OR ${toColumn} = '';
+        `);
+      }
+    }
+  },
+  {
+    id: '20260530_008_enforce_single_active_annual_plan',
+    name: 'Enforce single active annual plan per year',
+    sql: `
+      UPDATE annual_plans
+      SET status = '已归档',
+          updated_at = CURRENT_TIMESTAMP
+      WHERE is_deleted = 0
+        AND status = '生效中'
+        AND id NOT IN (
+          SELECT keep_id FROM (
+            SELECT year, MAX(id) AS keep_id
+            FROM annual_plans
+            WHERE is_deleted = 0 AND status = '生效中'
+            GROUP BY year
+          )
+        );
+
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_annual_plans_active_year
+      ON annual_plans(year)
+      WHERE is_deleted = 0 AND status = '生效中';
+    `
+  },
+  {
+    id: '20260530_009_clean_business_task_center_runtime_config',
+    name: 'Clean business task center runtime config',
+    run: async (db: any) => {
+      const table = await dbGet<any>(
+        db,
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+        ['task_center_tasks']
+      );
+      if (!table) return;
+
+      const obsoleteTaskKeys = [
+        'metals_daily_update',
+        'lottery_daily_update'
+      ];
+      const placeholders = obsoleteTaskKeys.map(() => '?').join(', ');
+      const runsTable = await dbGet<any>(
+        db,
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+        ['task_center_runs']
+      );
+      if (runsTable) {
+        await dbRun(
+          db,
+          `DELETE FROM task_center_runs
+           WHERE task_key IN (${placeholders})
+              OR task_id IN (
+                SELECT id FROM task_center_tasks WHERE task_key IN (${placeholders})
+              )`,
+          [...obsoleteTaskKeys, ...obsoleteTaskKeys]
+        );
+      }
+      await dbRun(
+        db,
+        `DELETE FROM task_center_tasks WHERE task_key IN (${placeholders})`,
+        obsoleteTaskKeys
+      );
+
+      const rows = await dbAll<any>(
+        db,
+        `SELECT id, config_json
+         FROM task_center_tasks
+         WHERE config_json LIKE '%"db"%'
+            OR config_json LIKE '%db_path%'
+            OR config_json LIKE '%database_path%'
+            OR config_json LIKE '%/Volumes%'
+            OR config_json LIKE '%7100%'`
+      );
+      const runtimePathKeys = ['db', 'db_path', 'database_path'];
+      for (const row of rows) {
+        let config: Record<string, any>;
+        try {
+          config = JSON.parse(String(row.config_json || '{}'));
+        } catch {
+          continue;
+        }
+        let changed = false;
+        for (const key of runtimePathKeys) {
+          if (Object.prototype.hasOwnProperty.call(config, key)) {
+            delete config[key];
+            changed = true;
+          }
+        }
+        if (!changed) continue;
+        await dbRun(
+          db,
+          `UPDATE task_center_tasks
+           SET config_json = ?, updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?`,
+          [JSON.stringify(config), row.id]
+        );
+      }
+    }
+  },
+  {
+    id: '20260530_010_restore_commodity_metals_price_task',
+    name: 'Restore commodity metals price update task',
+    sql: `
+      INSERT OR IGNORE INTO task_center_tasks
+        (task_key, name, domain, workspace, task_type, enabled, schedule_time, schedule_days, priority, config_json, last_status, last_message)
+      VALUES
+        (
+          'commodity_metals_price_update',
+          '商品贵金属价格更新',
+          'price',
+          'business',
+          'commodity_metals_price_update',
+          1,
+          '17:35',
+          'every_day',
+          32,
+          '{"targets":["黄金9999","白银"]}',
+          'pending',
+          '每天抓取德璜小程序黄金/白银价格，并写入商品价格工作台；黄金按整数，白银保留一位小数'
+        );
+
+      UPDATE task_center_tasks
+      SET name = '商品贵金属价格更新',
+          task_type = 'commodity_metals_price_update',
+          domain = 'price',
+          workspace = 'business',
+          enabled = 1,
+          schedule_time = CASE WHEN schedule_time IS NULL OR schedule_time = '' THEN '17:35' ELSE schedule_time END,
+          schedule_days = 'every_day',
+          priority = 32,
+          config_json = CASE
+            WHEN config_json IS NULL OR config_json = '{}' OR config_json = '' THEN '{"targets":["黄金9999","白银"]}'
+            ELSE config_json
+          END,
+          last_message = '每天抓取德璜小程序黄金/白银价格，并写入商品价格工作台；黄金按整数，白银保留一位小数',
+          updated_at = CURRENT_TIMESTAMP
+      WHERE task_key = 'commodity_metals_price_update';
+    `
+  },
+  {
+    id: '20260530_011_create_source_mappings',
+    name: 'Create source mappings',
+    run: async (db: any) => {
+      await dbExec(db, `
+        CREATE TABLE IF NOT EXISTS source_mappings (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          source_key TEXT NOT NULL,
+          source_name TEXT NOT NULL,
+          external_key TEXT NOT NULL,
+          external_name TEXT,
+          external_meta_json TEXT,
+          category_id INTEGER,
+          object_id INTEGER,
+          variant_id INTEGER NOT NULL DEFAULT 0,
+          category_name TEXT,
+          object_name TEXT,
+          variant_name TEXT,
+          status TEXT NOT NULL DEFAULT 'enabled',
+          last_seen_at TEXT,
+          last_matched_at TEXT,
+          last_error TEXT,
+          note TEXT,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(source_key, external_key)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_source_mappings_source_status
+          ON source_mappings(source_key, status);
+
+        CREATE INDEX IF NOT EXISTS idx_source_mappings_target
+          ON source_mappings(category_id, object_id, variant_id);
+      `);
+
+      const rows = [
+        {
+          source_key: 'dehuang_metals',
+          source_name: '德璜小程序贵金属',
+          external_key: '黄金9999',
+          external_name: '黄金9999',
+          category_name: '贵金属',
+          object_name: '黄金',
+          variant_name: '',
+          external_meta_json: { digits: 0 }
+        },
+        {
+          source_key: 'dehuang_metals',
+          source_name: '德璜小程序贵金属',
+          external_key: '白银',
+          external_name: '白银',
+          category_name: '贵金属',
+          object_name: '白银',
+          variant_name: '',
+          external_meta_json: { digits: 1 }
+        },
+        { source_key: 'qiandao_popmart', source_name: '千岛泡泡玛特', external_key: '929006833488630705', external_name: 'XG限定', category_name: '泡泡玛特', object_name: 'XG限定', variant_name: '', external_meta_json: { query: 'XG限定', spu_id: '929006833488630705' } },
+        { source_key: 'qiandao_popmart', source_name: '千岛泡泡玛特', external_key: '789523968431240995', external_name: 'Magic of Pumpkin', category_name: '泡泡玛特', object_name: '万圣节', variant_name: '', external_meta_json: { query: 'Magic of Pumpkin', spu_id: '789523968431240995' } },
+        { source_key: 'qiandao_popmart', source_name: '千岛泡泡玛特', external_key: '875239228831738922', external_name: '向往之处', category_name: '泡泡玛特', object_name: '嘎子姐', variant_name: '', external_meta_json: { query: '向往之处', spu_id: '875239228831738922' } },
+        { source_key: 'qiandao_popmart', source_name: '千岛泡泡玛特', external_key: '704852597684613737', external_name: 'MOKOKO 春花', category_name: '泡泡玛特', object_name: '大春花', variant_name: '', external_meta_json: { query: 'MOKOKO 春花', spu_id: '704852597684613737' } },
+        { source_key: 'qiandao_popmart', source_name: '千岛泡泡玛特', external_key: '675597453717760702', external_name: '大甜心', category_name: '泡泡玛特', object_name: '大甜心', variant_name: '', external_meta_json: { query: '大甜心', spu_id: '675597453717760702' } },
+        { source_key: 'qiandao_popmart', source_name: '千岛泡泡玛特', external_key: '778075948925892646', external_name: '大米兰', category_name: '泡泡玛特', object_name: '大米兰', variant_name: '', external_meta_json: { query: '大米兰', spu_id: '778075948925892646' } },
+        { source_key: 'qiandao_popmart', source_name: '千岛泡泡玛特', external_key: '927988138113005044', external_name: '姜饼人1/8', category_name: '泡泡玛特', object_name: '姜饼人', variant_name: '', external_meta_json: { query: '姜饼人1/8', spu_id: '927988138113005044' } },
+        { source_key: 'qiandao_popmart', source_name: '千岛泡泡玛特', external_key: '672953785382971923', external_name: '小甜心', category_name: '泡泡玛特', object_name: '小甜心', variant_name: '', external_meta_json: { query: '小甜心', spu_id: '672953785382971923' } },
+        { source_key: 'qiandao_popmart', source_name: '千岛泡泡玛特', external_key: '681855448701274650', external_name: 'Catch Me If You Like Me', category_name: '泡泡玛特', object_name: '情人节', variant_name: '', external_meta_json: { query: 'Catch Me If You Like Me', spu_id: '681855448701274650' } },
+        { source_key: 'qiandao_popmart', source_name: '千岛泡泡玛特', external_key: '650794262396462371', external_name: '拿铁', category_name: '泡泡玛特', object_name: '拿铁', variant_name: '', external_meta_json: { query: '拿铁', spu_id: '650794262396462371' } },
+        { source_key: 'qiandao_popmart', source_name: '千岛泡泡玛特', external_key: '954718264364114252', external_name: '星星人礼盒', category_name: '泡泡玛特', object_name: '星星人礼盒', variant_name: '', external_meta_json: { query: '星星人礼盒', spu_id: '954718264364114252' } },
+        { source_key: 'qiandao_popmart', source_name: '千岛泡泡玛特', external_key: '897177903526088129', external_name: '晒晒', category_name: '泡泡玛特', object_name: '晒晒', variant_name: '', external_meta_json: { query: '晒晒', spu_id: '897177903526088129' } },
+        { source_key: 'qiandao_popmart', source_name: '千岛泡泡玛特', external_key: '915985249635145047', external_name: '毛球', category_name: '泡泡玛特', object_name: '毛球', variant_name: '', external_meta_json: { query: '毛球', spu_id: '915985249635145047' } },
+        { source_key: 'qiandao_popmart', source_name: '千岛泡泡玛特', external_key: '704906800172085180', external_name: 'FALL INTO SPRING', category_name: '泡泡玛特', object_name: '白裙子', variant_name: '', external_meta_json: { query: 'FALL INTO SPRING', spu_id: '704906800172085180' } },
+        { source_key: 'qiandao_popmart', source_name: '千岛泡泡玛特', external_key: '740254741795247881', external_name: 'The Blue Diamond', category_name: '泡泡玛特', object_name: '蓝裙子', variant_name: '', external_meta_json: { query: 'The Blue Diamond', spu_id: '740254741795247881' } },
+        { source_key: 'qiandao_popmart', source_name: '千岛泡泡玛特', external_key: '970617028555622512', external_name: '醒醒', category_name: '泡泡玛特', object_name: '醒醒', variant_name: '', external_meta_json: { query: '醒醒', spu_id: '970617028555622512' } },
+        { source_key: 'qiandao_popmart', source_name: '千岛泡泡玛特', external_key: '801090280999627960', external_name: '闪闪', category_name: '泡泡玛特', object_name: '闪闪', variant_name: '', external_meta_json: { query: '闪闪', spu_id: '801090280999627960' } },
+        { source_key: 'qiandao_popmart', source_name: '千岛泡泡玛特', external_key: '593651152747287737', external_name: 'JUMP FOR JOY', category_name: '泡泡玛特', object_name: '飞行员', variant_name: '', external_meta_json: { query: 'JUMP FOR JOY', spu_id: '593651152747287737' } },
+        { source_key: 'dongxu_game_console', source_name: '东旭游戏机档口', external_key: '任天堂|日版OLED|红蓝', external_name: 'Switch OLED日版红蓝', category_name: '游戏机', object_name: 'Switch OLED日版红蓝', variant_name: '', external_meta_json: { brand: '任天堂', name: '日版OLED', key: '红蓝' } },
+        { source_key: 'dongxu_game_console', source_name: '东旭游戏机档口', external_key: '任天堂|日版OLED|白色', external_name: 'Switch OLED日版黑白', category_name: '游戏机', object_name: 'Switch OLED日版黑白', variant_name: '', external_meta_json: { brand: '任天堂', name: '日版OLED', key: '白色' } },
+        { source_key: 'dongxu_game_console', source_name: '东旭游戏机档口', external_key: '任天堂|日版续航|灰色', external_name: 'Switch日版续航灰', category_name: '游戏机', object_name: 'Switch日版续航灰', variant_name: '', external_meta_json: { brand: '任天堂', name: '日版续航', key: '灰色' } },
+        { source_key: 'dongxu_game_console', source_name: '东旭游戏机档口', external_key: '任天堂|日版续航|红蓝', external_name: 'Switch日版续航红蓝', category_name: '游戏机', object_name: 'Switch日版续航红蓝', variant_name: '', external_meta_json: { brand: '任天堂', name: '日版续航', key: '红蓝' } },
+        { source_key: 'dongxu_game_console', source_name: '东旭游戏机档口', external_key: '任天堂|港版OLED|红蓝', external_name: 'Switch OLED港版红蓝', category_name: '游戏机', object_name: 'Switch OLED港版红蓝', variant_name: '', external_meta_json: { brand: '任天堂', name: '港版OLED', key: '红蓝' } },
+        { source_key: 'dongxu_game_console', source_name: '东旭游戏机档口', external_key: '任天堂|港版OLED|白色', external_name: 'Switch OLED港版黑白', category_name: '游戏机', object_name: 'Switch OLED港版黑白', variant_name: '', external_meta_json: { brand: '任天堂', name: '港版OLED', key: '白色' } },
+        { source_key: 'dongxu_game_console', source_name: '东旭游戏机档口', external_key: '任天堂|Switch2港版LCD|单机标准版', external_name: 'NS2港版单机原盒', category_name: '游戏机', object_name: 'NS2港版单机原盒', variant_name: '', external_meta_json: { brand: '任天堂', name: 'Switch2港版LCD', key: '单机标准版' } },
+        { source_key: 'dongxu_game_console', source_name: '东旭游戏机档口', external_key: '任天堂|Switch2港版LCD|马里奥赛车世界套装', external_name: 'NS2港版捆绑马车同捆', category_name: '游戏机', object_name: 'NS2港版捆绑马车同捆', variant_name: '', external_meta_json: { brand: '任天堂', name: 'Switch2港版LCD', key: '马里奥赛车世界套装' } },
+        { source_key: 'dongxu_game_console', source_name: '东旭游戏机档口', external_key: '任天堂|Switch2新加坡版|单机', external_name: 'NS2新加坡单机原盒', category_name: '游戏机', object_name: 'NS2新加坡单机原盒', variant_name: '', external_meta_json: { brand: '任天堂', name: 'Switch2新加坡版', key: '单机' } },
+        { source_key: 'dongxu_game_console', source_name: '东旭游戏机档口', external_key: '任天堂|Switch2新加坡版|马里奥套装', external_name: 'NS2新加坡同捆', category_name: '游戏机', object_name: 'NS2新加坡同捆', variant_name: '', external_meta_json: { brand: '任天堂', name: 'Switch2新加坡版', key: '马里奥套装' } },
+        { source_key: 'dongxu_game_console', source_name: '东旭游戏机档口', external_key: '索尼|PS5国行|光驱Slim', external_name: 'PS5国行光驱slim', category_name: '游戏机', object_name: 'PS5国行光驱slim', variant_name: '', external_meta_json: { brand: '索尼', name: 'PS5国行', key: '光驱Slim' } },
+        { source_key: 'dongxu_game_console', source_name: '东旭游戏机档口', external_key: '索尼|PS5国行|数字Slim', external_name: 'PS5国行数字slim', category_name: '游戏机', object_name: 'PS5国行数字slim', variant_name: '', external_meta_json: { brand: '索尼', name: 'PS5国行', key: '数字Slim' } },
+        { source_key: 'dongxu_game_console', source_name: '东旭游戏机档口', external_key: '索尼|PS5国行|PRO数字', external_name: 'PS5 Pro国行数字', category_name: '游戏机', object_name: 'PS5 Pro国行数字', variant_name: '', external_meta_json: { brand: '索尼', name: 'PS5国行', key: 'PRO数字' } },
+        { source_key: 'dongxu_game_console', source_name: '东旭游戏机档口', external_key: '索尼|PS5日版|光驱Slim', external_name: 'PS5日版光驱slim', category_name: '游戏机', object_name: 'PS5日版光驱slim', variant_name: '', external_meta_json: { brand: '索尼', name: 'PS5日版', key: '光驱Slim' } },
+        { source_key: 'dongxu_game_console', source_name: '东旭游戏机档口', external_key: '索尼|PS5日版|数字Slim', external_name: 'PS5日版数字slim', category_name: '游戏机', object_name: 'PS5日版数字slim', variant_name: '', external_meta_json: { brand: '索尼', name: 'PS5日版', key: '数字Slim' } },
+        { source_key: 'dongxu_game_console', source_name: '东旭游戏机档口', external_key: '索尼|PS5日版|PRO数字', external_name: 'PS5 Pro日版数字', category_name: '游戏机', object_name: 'PS5 Pro日版数字', variant_name: '', external_meta_json: { brand: '索尼', name: 'PS5日版', key: 'PRO数字' } },
+        { source_key: 'dongxu_game_console', source_name: '东旭游戏机档口', external_key: '索尼|PS5港版|光驱Slim', external_name: 'PS5港版光驱slim', category_name: '游戏机', object_name: 'PS5港版光驱slim', variant_name: '', external_meta_json: { brand: '索尼', name: 'PS5港版', key: '光驱Slim' } },
+        { source_key: 'dongxu_game_console', source_name: '东旭游戏机档口', external_key: '索尼|PS5港版|数字Slim', external_name: 'PS5港版数字', category_name: '游戏机', object_name: 'PS5港版数字', variant_name: '', external_meta_json: { brand: '索尼', name: 'PS5港版', key: '数字Slim' } },
+        { source_key: 'dongxu_game_console', source_name: '东旭游戏机档口', external_key: '索尼|PS5港版|PRO数字', external_name: 'PS5 Pro港版数字', category_name: '游戏机', object_name: 'PS5 Pro港版数字', variant_name: '', external_meta_json: { brand: '索尼', name: 'PS5港版', key: 'PRO数字' } }
+      ];
+
+      for (const row of rows) {
+        const category = await dbGet<any>(
+          db,
+          "SELECT id, name FROM categories WHERE name = ? AND COALESCE(is_archived, 0) = 0",
+          [row.category_name]
+        );
+        const object = category
+          ? await dbGet<any>(
+            db,
+            "SELECT id, name FROM objects WHERE category_id = ? AND name = ? AND COALESCE(is_archived, 0) = 0",
+            [category.id, row.object_name]
+          )
+          : null;
+        const variant = object && row.variant_name
+          ? await dbGet<any>(
+            db,
+            "SELECT id, name FROM variants WHERE object_id = ? AND name = ? AND COALESCE(is_archived, 0) = 0",
+            [object.id, row.variant_name]
+          )
+          : null;
+        const status = category && object && (!row.variant_name || variant) ? 'enabled' : 'unmapped';
+        await dbRun(
+          db,
+          `INSERT OR IGNORE INTO source_mappings
+             (source_key, source_name, external_key, external_name, external_meta_json,
+              category_id, object_id, variant_id, category_name, object_name, variant_name,
+              status, note)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            row.source_key,
+            row.source_name,
+            row.external_key,
+            row.external_name,
+            JSON.stringify(row.external_meta_json || {}),
+            category?.id || null,
+            object?.id || null,
+            variant?.id || 0,
+            category?.name || row.category_name,
+            object?.name || row.object_name,
+            variant?.name || row.variant_name || '',
+            status,
+            status === 'enabled' ? '' : '初始化时未找到对应主数据，请在数据源映射页面确认'
+          ]
+        );
+      }
+    }
+  },
+  {
+    id: '20260530_012_add_annual_plan_soft_links',
+    name: 'Add annual plan soft links',
+    run: async (db: any) => {
+      const addAnnualPlanLink = async (tableName: string, indexName: string) => {
+        if (!(await migrationTableExists(db, tableName))) return;
+        await ensureMigrationColumn(db, tableName, 'annual_plan_item_id', 'INTEGER');
+        await dbExec(
+          db,
+          `CREATE INDEX IF NOT EXISTS ${quoteMigrationIdentifier(indexName)}
+           ON ${quoteMigrationIdentifier(tableName)}(annual_plan_item_id);`
+        );
+      };
+
+      await addAnnualPlanLink('buying_plans', 'idx_buying_plans_annual_plan_item');
+      await addAnnualPlanLink('selling_plans', 'idx_selling_plans_annual_plan_item');
+      await addAnnualPlanLink('watchlist_items', 'idx_watchlist_items_annual_plan_item');
+      await addAnnualPlanLink('business_reviews', 'idx_business_reviews_annual_plan_item');
+    }
+  },
+  {
+    id: '20260531_001_create_category_profiles',
+    name: 'Create category profiles',
+    run: async (db: any) => {
+      await dbExec(db, `
+        CREATE TABLE IF NOT EXISTS category_profiles (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          category_id INTEGER,
+          category_name TEXT NOT NULL,
+          business_style TEXT,
+          operation_scene TEXT,
+          supply_mode TEXT,
+          sales_mode TEXT,
+          price_pattern TEXT,
+          risk_points TEXT,
+          operating_discipline TEXT,
+          data_caliber TEXT,
+          experience_notes TEXT,
+          decision_notes TEXT,
+          extra_json TEXT DEFAULT '{}',
+          status TEXT NOT NULL DEFAULT 'active',
+          note TEXT,
+          is_deleted INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE SET NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_category_profiles_category
+          ON category_profiles(category_id, category_name, status, is_deleted);
+      `);
+    }
+  },
+  {
+    id: '20260531_002_create_price_quality_alert_reviews',
+    name: 'Create price quality alert review states',
+    run: async (db: any) => {
+      await dbExec(db, `
+        CREATE TABLE IF NOT EXISTS price_quality_alert_reviews (
+          alert_key TEXT PRIMARY KEY,
+          status TEXT NOT NULL DEFAULT 'pending',
+          note TEXT,
+          reviewed_at TEXT,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_price_records_series_date
+          ON price_records(category, object_name, variant, date, id);
+
+        CREATE INDEX IF NOT EXISTS idx_price_quality_alert_reviews_status
+          ON price_quality_alert_reviews(status, updated_at DESC);
+      `);
+    }
+  },
+  {
+    id: '20260531_003_seed_longchao_source_mapping',
+    name: 'Seed Longchao source mapping',
+    run: async (db: any) => {
+      if (!(await migrationTableExists(db, 'source_mappings'))) return;
+
+      const category = await dbGet<any>(
+        db,
+        "SELECT id, name FROM categories WHERE name = ? AND COALESCE(is_archived, 0) = 0",
+        ['纪念钞']
+      );
+      const object = category
+        ? await dbGet<any>(
+          db,
+          "SELECT id, name FROM objects WHERE category_id = ? AND name = ? AND COALESCE(is_archived, 0) = 0",
+          [category.id, '龙钞']
+        )
+        : null;
+      const variant = object
+        ? await dbGet<any>(
+          db,
+          "SELECT id, name FROM variants WHERE object_id = ? AND name = ? AND COALESCE(is_archived, 0) = 0",
+          [object.id, '散张']
+        )
+        : null;
+      const status = category && object && variant ? 'enabled' : 'unmapped';
+
+      await dbRun(
+        db,
+        `INSERT OR IGNORE INTO source_mappings
+           (source_key, source_name, external_key, external_name, external_meta_json,
+            category_id, object_id, variant_id, category_name, object_name, variant_name,
+            status, note)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          'airmb_longchao_presale',
+          '爱藏龙钞散张',
+          '1|3|散张',
+          '龙钞散张',
+          JSON.stringify({ goods_id: '1', cat_id: '3', page_size: 100 }),
+          category?.id || null,
+          object?.id || null,
+          variant?.id || 0,
+          category?.name || '纪念钞',
+          object?.name || '龙钞',
+          variant?.name || '散张',
+          status,
+          status === 'enabled' ? '' : '初始化时未找到纪念钞/龙钞/散张主数据，请在数据源映射页面确认'
+        ]
+      );
+    }
+  },
+  {
+    id: '20260531_004_split_longchao_standard_10_variants',
+    name: 'Split Longchao standard 10 variants',
+    run: async (db: any) => {
+      if (!(await migrationTableExists(db, 'categories'))) return;
+      if (!(await migrationTableExists(db, 'objects'))) return;
+      if (!(await migrationTableExists(db, 'variants'))) return;
+
+      const category = await dbGet<any>(
+        db,
+        "SELECT id, name FROM categories WHERE name = ? AND COALESCE(is_archived, 0) = 0",
+        ['纪念钞']
+      );
+      const object = category
+        ? await dbGet<any>(
+          db,
+          "SELECT id, name FROM objects WHERE category_id = ? AND name = ? AND COALESCE(is_archived, 0) = 0",
+          [category.id, '龙钞']
+        )
+        : null;
+
+      const sourceMappingsExists = await migrationTableExists(db, 'source_mappings');
+      const renameVariant = async (fromName: string, toName: string) => {
+        if (!object) return null;
+        const from = await dbGet<any>(
+          db,
+          "SELECT id, name FROM variants WHERE object_id = ? AND name = ?",
+          [object.id, fromName]
+        );
+        let to = await dbGet<any>(
+          db,
+          "SELECT id, name FROM variants WHERE object_id = ? AND name = ?",
+          [object.id, toName]
+        );
+
+        if (from && !to) {
+          await dbRun(
+            db,
+            "UPDATE variants SET name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            [toName, from.id]
+          );
+          to = { ...from, name: toName };
+        } else if (from && to && from.id !== to.id) {
+          if (sourceMappingsExists) {
+            await dbRun(
+              db,
+              `UPDATE source_mappings
+               SET variant_id = ?,
+                   variant_name = ?,
+                   updated_at = CURRENT_TIMESTAMP
+               WHERE variant_id = ?`,
+              [to.id, toName, from.id]
+            );
+          }
+          await dbRun(
+            db,
+            `UPDATE variants
+             SET is_archived = 1,
+                 archived_at = COALESCE(archived_at, CURRENT_TIMESTAMP),
+                 updated_at = CURRENT_TIMESTAMP,
+                 note = TRIM(COALESCE(note, '') || CASE WHEN COALESCE(note, '') = '' THEN '' ELSE '\n' END || ?)
+             WHERE id = ?`,
+            [`已合并到${toName}`, from.id]
+          );
+        }
+
+        return to;
+      };
+
+      const standardWith4 = await renameVariant('标十', '标10带4');
+      await renameVariant('标十无4', '标10不带4');
+
+      if (await migrationTableExists(db, 'price_records')) {
+        await dbRun(
+          db,
+          `UPDATE price_records
+           SET variant = '标10带4',
+               updated_at = CURRENT_TIMESTAMP
+           WHERE category = '纪念钞'
+             AND object_name = '龙钞'
+             AND variant = '标十'`
+        );
+        await dbRun(
+          db,
+          `UPDATE price_records
+           SET variant = '标10不带4',
+               updated_at = CURRENT_TIMESTAMP
+           WHERE category = '纪念钞'
+             AND object_name = '龙钞'
+             AND variant = '标十无4'`
+        );
+      }
+
+      if (sourceMappingsExists) {
+        const newMapping = await dbGet<any>(
+          db,
+          "SELECT id FROM source_mappings WHERE source_key = ? AND external_key = ?",
+          ['airmb_longchao_presale', '1|13|标10带4']
+        );
+        const oldMapping = await dbGet<any>(
+          db,
+          `SELECT id
+           FROM source_mappings
+           WHERE source_key = ?
+             AND external_key IN ('1|13|标十', '1|13|标10', '1|13|标十带4')
+           ORDER BY id
+           LIMIT 1`,
+          ['airmb_longchao_presale']
+        );
+
+        await dbRun(
+          db,
+          "UPDATE source_mappings SET source_name = ?, updated_at = CURRENT_TIMESTAMP WHERE source_key = ?",
+          ['爱藏龙钞', 'airmb_longchao_presale']
+        );
+        await dbRun(
+          db,
+          `UPDATE source_mappings
+           SET variant_name = '标10带4',
+               external_name = CASE
+                 WHEN external_name IN ('龙钞标十', '龙钞标10') THEN '龙钞标10带4'
+                 ELSE REPLACE(external_name, '标十', '标10带4')
+               END,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE source_key = 'airmb_longchao_presale'
+             AND variant_name IN ('标十', '标10')`
+        );
+        await dbRun(
+          db,
+          `UPDATE source_mappings
+           SET variant_name = '标10不带4',
+               external_name = REPLACE(REPLACE(external_name, '标十无4', '标10不带4'), '标10无4', '标10不带4'),
+               updated_at = CURRENT_TIMESTAMP
+           WHERE source_key = 'airmb_longchao_presale'
+             AND variant_name IN ('标十无4', '标10无4')`
+        );
+
+        if (oldMapping && !newMapping) {
+          await dbRun(
+            db,
+            `UPDATE source_mappings
+             SET external_key = '1|13|标10带4',
+                 external_name = '龙钞标10带4',
+                 external_meta_json = ?,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?`,
+            [JSON.stringify({ goods_id: '1', cat_id: '13', page_size: 100 }), oldMapping.id]
+          );
+        } else if (oldMapping && newMapping) {
+          await dbRun(
+            db,
+            `UPDATE source_mappings
+             SET status = 'disabled',
+                 note = '已拆分为 1|13|标10带4，保留旧映射用于追溯',
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?`,
+            [oldMapping.id]
+          );
+        }
+
+        const mappingStatus = category && object && standardWith4 ? 'enabled' : 'unmapped';
+        await dbRun(
+          db,
+          `INSERT OR IGNORE INTO source_mappings
+             (source_key, source_name, external_key, external_name, external_meta_json,
+              category_id, object_id, variant_id, category_name, object_name, variant_name,
+              status, note)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            'airmb_longchao_presale',
+            '爱藏龙钞',
+            '1|13|标10带4',
+            '龙钞标10带4',
+            JSON.stringify({ goods_id: '1', cat_id: '13', page_size: 100 }),
+            category?.id || null,
+            object?.id || null,
+            standardWith4?.id || 0,
+            category?.name || '纪念钞',
+            object?.name || '龙钞',
+            standardWith4?.name || '标10带4',
+            mappingStatus,
+            mappingStatus === 'enabled' ? '' : '初始化时未找到纪念钞/龙钞/标10带4主数据，请在数据源映射页面确认'
+          ]
+        );
+        await dbRun(
+          db,
+          `UPDATE source_mappings
+           SET source_name = ?,
+               external_name = ?,
+               external_meta_json = ?,
+               category_id = ?,
+               object_id = ?,
+               variant_id = ?,
+               category_name = ?,
+               object_name = ?,
+               variant_name = ?,
+               status = ?,
+               note = ?,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE source_key = ?
+             AND external_key = ?`,
+          [
+            '爱藏龙钞',
+            '龙钞标10带4',
+            JSON.stringify({ goods_id: '1', cat_id: '13', page_size: 100 }),
+            category?.id || null,
+            object?.id || null,
+            standardWith4?.id || 0,
+            category?.name || '纪念钞',
+            object?.name || '龙钞',
+            standardWith4?.name || '标10带4',
+            mappingStatus,
+            mappingStatus === 'enabled' ? '' : '初始化时未找到纪念钞/龙钞/标10带4主数据，请在数据源映射页面确认',
+            'airmb_longchao_presale',
+            '1|13|标10带4'
+          ]
+        );
+      }
+
+      if (await migrationTableExists(db, 'category_profiles')) {
+        await dbRun(
+          db,
+          `UPDATE category_profiles
+           SET business_style = REPLACE(REPLACE(business_style, '标十无4', '标10不带4'), '标十', '标10带4'),
+               operation_scene = REPLACE(REPLACE(operation_scene, '标十无4', '标10不带4'), '标十', '标10带4'),
+               supply_mode = REPLACE(REPLACE(supply_mode, '标十无4', '标10不带4'), '标十', '标10带4'),
+               sales_mode = REPLACE(REPLACE(sales_mode, '标十无4', '标10不带4'), '标十', '标10带4'),
+               price_pattern = REPLACE(REPLACE(price_pattern, '标十无4', '标10不带4'), '标十', '标10带4'),
+               risk_points = REPLACE(REPLACE(risk_points, '标十无4', '标10不带4'), '标十', '标10带4'),
+               operating_discipline = REPLACE(REPLACE(operating_discipline, '标十无4', '标10不带4'), '标十', '标10带4'),
+               data_caliber = REPLACE(REPLACE(data_caliber, '标十无4', '标10不带4'), '标十', '标10带4'),
+               experience_notes = REPLACE(REPLACE(experience_notes, '标十无4', '标10不带4'), '标十', '标10带4'),
+               decision_notes = REPLACE(REPLACE(decision_notes, '标十无4', '标10不带4'), '标十', '标10带4'),
+               extra_json = REPLACE(REPLACE(extra_json, '标十无4', '标10不带4'), '标十', '标10带4'),
+               note = REPLACE(REPLACE(note, '标十无4', '标10不带4'), '标十', '标10带4'),
+               updated_at = CURRENT_TIMESTAMP
+           WHERE category_name = '纪念钞'`
+        );
+      }
+    }
+  },
+  {
+    id: '20260531_005_seed_longchao_standard_10_no4_source_mapping',
+    name: 'Seed Longchao standard 10 no-4 source mapping',
+    run: async (db: any) => {
+      if (!(await migrationTableExists(db, 'source_mappings'))) return;
+
+      const category = await dbGet<any>(
+        db,
+        "SELECT id, name FROM categories WHERE name = ? AND COALESCE(is_archived, 0) = 0",
+        ['纪念钞']
+      );
+      const object = category
+        ? await dbGet<any>(
+          db,
+          "SELECT id, name FROM objects WHERE category_id = ? AND name = ? AND COALESCE(is_archived, 0) = 0",
+          [category.id, '龙钞']
+        )
+        : null;
+      const variant = object
+        ? await dbGet<any>(
+          db,
+          "SELECT id, name FROM variants WHERE object_id = ? AND name = ? AND COALESCE(is_archived, 0) = 0",
+          [object.id, '标10不带4']
+        )
+        : null;
+      const status = category && object && variant ? 'enabled' : 'unmapped';
+      const metaJson = JSON.stringify({ goods_id: '1', cat_id: '63', page_size: 100 });
+
+      const targetMapping = await dbGet<any>(
+        db,
+        "SELECT id FROM source_mappings WHERE source_key = ? AND external_key = ?",
+        ['airmb_longchao_presale', '1|63|标10不带4']
+      );
+      const oldMapping = await dbGet<any>(
+        db,
+        `SELECT id
+         FROM source_mappings
+         WHERE source_key = ?
+           AND external_key IN ('1|63|标10无四', '1|63|标10无4', '1|63|标十无4', '1|63|标十无四')
+         ORDER BY id
+         LIMIT 1`,
+        ['airmb_longchao_presale']
+      );
+
+      await dbRun(
+        db,
+        "UPDATE source_mappings SET source_name = ?, updated_at = CURRENT_TIMESTAMP WHERE source_key = ?",
+        ['爱藏龙钞', 'airmb_longchao_presale']
+      );
+
+      if (oldMapping && !targetMapping) {
+        await dbRun(
+          db,
+          `UPDATE source_mappings
+           SET external_key = '1|63|标10不带4',
+               external_name = '龙钞标10无四',
+               external_meta_json = ?,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?`,
+          [metaJson, oldMapping.id]
+        );
+      } else if (oldMapping && targetMapping) {
+        await dbRun(
+          db,
+          `UPDATE source_mappings
+           SET status = 'disabled',
+               note = '已拆分为 1|63|标10不带4，保留旧映射用于追溯',
+               updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?`,
+          [oldMapping.id]
+        );
+      }
+
+      await dbRun(
+        db,
+        `INSERT OR IGNORE INTO source_mappings
+           (source_key, source_name, external_key, external_name, external_meta_json,
+            category_id, object_id, variant_id, category_name, object_name, variant_name,
+            status, note)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          'airmb_longchao_presale',
+          '爱藏龙钞',
+          '1|63|标10不带4',
+          '龙钞标10无四',
+          metaJson,
+          category?.id || null,
+          object?.id || null,
+          variant?.id || 0,
+          category?.name || '纪念钞',
+          object?.name || '龙钞',
+          variant?.name || '标10不带4',
+          status,
+          status === 'enabled' ? '源头口径为标10无四；系统主数据统一为标10不带4' : '初始化时未找到纪念钞/龙钞/标10不带4主数据，请在数据源映射页面确认'
+        ]
+      );
+      await dbRun(
+        db,
+        `UPDATE source_mappings
+         SET source_name = ?,
+             external_name = ?,
+             external_meta_json = ?,
+             category_id = ?,
+             object_id = ?,
+             variant_id = ?,
+             category_name = ?,
+             object_name = ?,
+             variant_name = ?,
+             status = ?,
+             note = ?,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE source_key = ?
+           AND external_key = ?`,
+        [
+          '爱藏龙钞',
+          '龙钞标10无四',
+          metaJson,
+          category?.id || null,
+          object?.id || null,
+          variant?.id || 0,
+          category?.name || '纪念钞',
+          object?.name || '龙钞',
+          variant?.name || '标10不带4',
+          status,
+          status === 'enabled' ? '源头口径为标10无四；系统主数据统一为标10不带4' : '初始化时未找到纪念钞/龙钞/标10不带4主数据，请在数据源映射页面确认',
+          'airmb_longchao_presale',
+          '1|63|标10不带4'
+        ]
+      );
+    }
+  },
+  {
+    id: '20260531_006_remove_invalid_longchao_standard_10_sample_prices',
+    name: 'Remove invalid Longchao standard 10 sample prices',
+    run: async (db: any) => {
+      if (!(await migrationTableExists(db, 'price_records'))) return;
+
+      await dbRun(
+        db,
+        `DELETE FROM price_records
+         WHERE category = '纪念钞'
+           AND object_name = '龙钞'
+           AND variant IN ('标10带4', '标10不带4')
+           AND source = '爱藏参考'
+           AND price < 100`
+      );
+    }
+  },
+  {
+    id: '20260531_007_seed_longyinbi_xintai_source_mapping',
+    name: 'Seed Longyinbi Xintai source mapping',
+    run: async (db: any) => {
+      if (!(await migrationTableExists(db, 'categories'))) return;
+      if (!(await migrationTableExists(db, 'objects'))) return;
+      if (!(await migrationTableExists(db, 'variants'))) return;
+      if (!(await migrationTableExists(db, 'source_mappings'))) return;
+
+      let category = await dbGet<any>(
+        db,
+        "SELECT id, name FROM categories WHERE name = ? AND COALESCE(is_archived, 0) = 0",
+        ['纪念币']
+      );
+      if (!category) {
+        await dbRun(
+          db,
+          "INSERT INTO categories (name, created_at, updated_at) VALUES (?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+          ['纪念币']
+        );
+        category = await dbGet<any>(
+          db,
+          "SELECT id, name FROM categories WHERE name = ?",
+          ['纪念币']
+        );
+      }
+
+      let object = category
+        ? await dbGet<any>(
+          db,
+          "SELECT id, name FROM objects WHERE category_id = ? AND name = ? AND COALESCE(is_archived, 0) = 0",
+          [category.id, '龙银币']
+        )
+        : null;
+      if (category && !object) {
+        await dbRun(
+          db,
+          "INSERT OR IGNORE INTO objects (category_id, name, created_at, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+          [category.id, '龙银币']
+        );
+        object = await dbGet<any>(
+          db,
+          "SELECT id, name FROM objects WHERE category_id = ? AND name = ?",
+          [category.id, '龙银币']
+        );
+      }
+
+      let variant = object
+        ? await dbGet<any>(
+          db,
+          "SELECT id, name FROM variants WHERE object_id = ? AND name = ? AND COALESCE(is_archived, 0) = 0",
+          [object.id, '2025年信泰评级']
+        )
+        : null;
+      if (object && !variant) {
+        await dbRun(
+          db,
+          "INSERT OR IGNORE INTO variants (object_id, name, created_at, updated_at, note) VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?)",
+          [object.id, '2025年信泰评级', '源头为 2025 龙银币裸币，入库按信泰评级参考价=裸币+100']
+        );
+        variant = await dbGet<any>(
+          db,
+          "SELECT id, name FROM variants WHERE object_id = ? AND name = ?",
+          [object.id, '2025年信泰评级']
+        );
+      }
+
+      if (await migrationTableExists(db, 'price_records')) {
+        await dbRun(
+          db,
+          `UPDATE price_records
+           SET object_name = '龙银币',
+               variant = '2025年信泰评级',
+               note = TRIM(COALESCE(note, '') || CASE WHEN COALESCE(note, '') = '' THEN '' ELSE '\n' END || '历史口径从龙银币裸币/2025年迁移为龙银币/2025年信泰评级'),
+               updated_at = CURRENT_TIMESTAMP
+           WHERE category = '纪念币'
+             AND object_name = '龙银币裸币'
+             AND variant = '2025年'`
+        );
+      }
+
+      const oldObject = category
+        ? await dbGet<any>(
+          db,
+          "SELECT id FROM objects WHERE category_id = ? AND name = ?",
+          [category.id, '龙银币裸币']
+        )
+        : null;
+      if (oldObject) {
+        await dbRun(
+          db,
+          `UPDATE variants
+           SET is_archived = 1,
+               archived_at = COALESCE(archived_at, CURRENT_TIMESTAMP),
+               note = TRIM(COALESCE(note, '') || CASE WHEN COALESCE(note, '') = '' THEN '' ELSE '\n' END || '已改用 龙银币 / 2025年信泰评级；裸币源头只作为加价参考'),
+               updated_at = CURRENT_TIMESTAMP
+           WHERE object_id = ?
+             AND name = '2025年'`,
+          [oldObject.id]
+        );
+      }
+
+      const status = category && object && variant ? 'enabled' : 'unmapped';
+      const externalKey = '7|1369|2025龙银币裸币|信泰+100';
+      const metaJson = JSON.stringify({
+        goods_id: '7',
+        cat_id: '1369',
+        page_size: 100,
+        price_offset: 100,
+        price_offset_reason: '信泰评级参考价=裸币源头价+100'
+      });
+
+      await dbRun(
+        db,
+        `INSERT OR IGNORE INTO source_mappings
+           (source_key, source_name, external_key, external_name, external_meta_json,
+            category_id, object_id, variant_id, category_name, object_name, variant_name,
+            status, note)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          'airmb_longyinbi_presale',
+          '爱藏龙银币',
+          externalKey,
+          '2025龙银币裸币',
+          metaJson,
+          category?.id || null,
+          object?.id || null,
+          variant?.id || 0,
+          category?.name || '纪念币',
+          object?.name || '龙银币',
+          variant?.name || '2025年信泰评级',
+          status,
+          status === 'enabled' ? '源头为裸币；入库为信泰评级参考价，价格=裸币+100' : '初始化时未找到纪念币/龙银币/2025年信泰评级主数据，请在数据源映射页面确认'
+        ]
+      );
+      await dbRun(
+        db,
+        `UPDATE source_mappings
+         SET source_name = ?,
+             external_name = ?,
+             external_meta_json = ?,
+             category_id = ?,
+             object_id = ?,
+             variant_id = ?,
+             category_name = ?,
+             object_name = ?,
+             variant_name = ?,
+             status = ?,
+             note = ?,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE source_key = ?
+           AND external_key = ?`,
+        [
+          '爱藏龙银币',
+          '2025龙银币裸币',
+          metaJson,
+          category?.id || null,
+          object?.id || null,
+          variant?.id || 0,
+          category?.name || '纪念币',
+          object?.name || '龙银币',
+          variant?.name || '2025年信泰评级',
+          status,
+          status === 'enabled' ? '源头为裸币；入库为信泰评级参考价，价格=裸币+100' : '初始化时未找到纪念币/龙银币/2025年信泰评级主数据，请在数据源映射页面确认',
+          'airmb_longyinbi_presale',
+          externalKey
+        ]
+      );
+    }
   }
+
 ];
 
 function dbRun(db: any, sql: string, params: any[] = []): Promise<void> {
@@ -2919,199 +2147,21 @@ function dbClose(db: any): Promise<void> {
 
 const quoteMigrationIdentifier = (value: string) => `"${value.replace(/"/g, '""')}"`;
 
+async function migrationTableExists(db: any, tableName: string): Promise<boolean> {
+  const table = await dbGet<any>(
+    db,
+    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+    [tableName]
+  );
+  return Boolean(table);
+}
+
 async function ensureMigrationColumn(db: any, tableName: string, column: string, definition: string): Promise<void> {
+  if (!(await migrationTableExists(db, tableName))) return;
   const columns = await dbAll<any>(db, `PRAGMA table_info(${quoteMigrationIdentifier(tableName)})`);
   const exists = columns.some((item: any) => String(item.name) === column);
   if (!exists) {
     await dbExec(db, `ALTER TABLE ${quoteMigrationIdentifier(tableName)} ADD COLUMN ${quoteMigrationIdentifier(column)} ${definition}`);
-  }
-}
-
-async function ensurePredictionSnapshotMigrationColumn(db: any, column: string, definition: string): Promise<void> {
-  const columns = await dbAll<any>(db, `PRAGMA table_info(finance_experiment_prediction_snapshots)`);
-  const exists = columns.some((item: any) => String(item.name) === column);
-  if (!exists) {
-    await dbExec(db, `ALTER TABLE finance_experiment_prediction_snapshots ADD COLUMN ${quoteMigrationIdentifier(column)} ${definition}`);
-  }
-}
-
-async function hasPredictionSnapshotSavedFromUnique(db: any): Promise<boolean> {
-  const indexes = await dbAll<any>(db, `PRAGMA index_list(finance_experiment_prediction_snapshots)`);
-  const expectedColumns = new Set(['experiment_key', 'symbol', 'asset_type', 'source', 'trade_date', 'saved_from']);
-  for (const index of indexes) {
-    if (!Number(index.unique)) continue;
-    const columns = await dbAll<any>(db, `PRAGMA index_info(${quoteMigrationIdentifier(String(index.name))})`);
-    const names = columns.map((column: any) => String(column.name));
-    if (names.length === expectedColumns.size && names.every((name: string) => expectedColumns.has(name))) {
-      return true;
-    }
-  }
-  return false;
-}
-
-async function recreatePredictionSnapshotMigrationIndexes(db: any): Promise<void> {
-  await dbExec(db, `
-    DROP INDEX IF EXISTS idx_finance_experiment_snapshots_scope;
-    DROP INDEX IF EXISTS idx_finance_experiment_snapshots_symbol;
-    DROP INDEX IF EXISTS idx_finance_experiment_snapshots_saved_from;
-
-    CREATE INDEX IF NOT EXISTS idx_finance_experiment_snapshots_scope
-    ON finance_experiment_prediction_snapshots(experiment_key, saved_from, trade_date DESC, asset_type, source);
-
-    CREATE INDEX IF NOT EXISTS idx_finance_experiment_snapshots_symbol
-    ON finance_experiment_prediction_snapshots(symbol, asset_type, source, trade_date DESC, saved_from);
-
-    CREATE INDEX IF NOT EXISTS idx_finance_experiment_snapshots_saved_from
-    ON finance_experiment_prediction_snapshots(saved_from, experiment_key, market_regime, trade_date DESC);
-  `);
-}
-
-async function migratePredictionSnapshotSavedFromUnique(db: any): Promise<void> {
-  await dbExec(db, `
-    CREATE TABLE IF NOT EXISTS finance_experiment_prediction_snapshots (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      experiment_key TEXT NOT NULL,
-      symbol TEXT NOT NULL,
-      name TEXT,
-      asset_type TEXT NOT NULL DEFAULT '',
-      source TEXT NOT NULL DEFAULT '',
-      universe_type TEXT,
-      trade_date TEXT NOT NULL,
-      close REAL,
-      market_regime TEXT,
-      experiment_score INTEGER,
-      rule_score INTEGER,
-      model_probability REAL,
-      model_score INTEGER,
-      direction_probability REAL,
-      direction_score INTEGER,
-      hardness_probability REAL,
-      hardness_score INTEGER,
-      raw_hardness_probability REAL,
-      raw_hardness_score INTEGER,
-      raw_model_accept INTEGER NOT NULL DEFAULT 0,
-      discipline_model_accept INTEGER NOT NULL DEFAULT 0,
-      discipline_blocked INTEGER NOT NULL DEFAULT 0,
-      discipline_adjustment REAL,
-      feature_label TEXT,
-      rotation_label TEXT,
-      rotation_reason TEXT,
-      discipline_label TEXT,
-      discipline_reason TEXT,
-      crowding_label TEXT,
-      crowding_reason TEXT,
-      feature_snapshot_json TEXT,
-      artifact_json TEXT,
-      no_lookahead_note TEXT,
-      saved_from TEXT NOT NULL DEFAULT 'latest_prediction_pool',
-      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      UNIQUE(experiment_key, symbol, asset_type, source, trade_date, saved_from)
-    );
-  `);
-
-  const requiredColumns = [
-    ['saved_from', "TEXT NOT NULL DEFAULT 'latest_prediction_pool'"],
-    ['raw_hardness_probability', 'REAL'],
-    ['raw_hardness_score', 'INTEGER'],
-    ['raw_model_accept', 'INTEGER NOT NULL DEFAULT 0'],
-    ['discipline_model_accept', 'INTEGER NOT NULL DEFAULT 0'],
-    ['discipline_blocked', 'INTEGER NOT NULL DEFAULT 0'],
-    ['discipline_adjustment', 'REAL']
-  ];
-  for (const [column, definition] of requiredColumns) {
-    await ensurePredictionSnapshotMigrationColumn(db, column, definition);
-  }
-
-  const hasSavedFromUnique = await hasPredictionSnapshotSavedFromUnique(db);
-  if (hasSavedFromUnique) {
-    await recreatePredictionSnapshotMigrationIndexes(db);
-    return;
-  }
-
-  await dbExec(db, 'PRAGMA foreign_keys = OFF');
-  try {
-    await dbExec(db, 'BEGIN TRANSACTION');
-    await dbExec(db, `
-      DROP TABLE IF EXISTS finance_experiment_prediction_snapshots_next;
-
-      CREATE TABLE finance_experiment_prediction_snapshots_next (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        experiment_key TEXT NOT NULL,
-        symbol TEXT NOT NULL,
-        name TEXT,
-        asset_type TEXT NOT NULL DEFAULT '',
-        source TEXT NOT NULL DEFAULT '',
-        universe_type TEXT,
-        trade_date TEXT NOT NULL,
-        close REAL,
-        market_regime TEXT,
-        experiment_score INTEGER,
-        rule_score INTEGER,
-        model_probability REAL,
-        model_score INTEGER,
-        direction_probability REAL,
-        direction_score INTEGER,
-        hardness_probability REAL,
-        hardness_score INTEGER,
-        raw_hardness_probability REAL,
-        raw_hardness_score INTEGER,
-        raw_model_accept INTEGER NOT NULL DEFAULT 0,
-        discipline_model_accept INTEGER NOT NULL DEFAULT 0,
-        discipline_blocked INTEGER NOT NULL DEFAULT 0,
-        discipline_adjustment REAL,
-        feature_label TEXT,
-        rotation_label TEXT,
-        rotation_reason TEXT,
-        discipline_label TEXT,
-        discipline_reason TEXT,
-        crowding_label TEXT,
-        crowding_reason TEXT,
-        feature_snapshot_json TEXT,
-        artifact_json TEXT,
-        no_lookahead_note TEXT,
-        saved_from TEXT NOT NULL DEFAULT 'latest_prediction_pool',
-        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(experiment_key, symbol, asset_type, source, trade_date, saved_from)
-      );
-
-      INSERT INTO finance_experiment_prediction_snapshots_next (
-        id, experiment_key, symbol, name, asset_type, source, universe_type, trade_date, close,
-        market_regime, experiment_score, rule_score, model_probability, model_score,
-        direction_probability, direction_score, hardness_probability, hardness_score,
-        raw_hardness_probability, raw_hardness_score, raw_model_accept, discipline_model_accept,
-        discipline_blocked, discipline_adjustment,
-        feature_label, rotation_label, rotation_reason, discipline_label, discipline_reason,
-        crowding_label, crowding_reason, feature_snapshot_json, artifact_json, no_lookahead_note,
-        saved_from, created_at, updated_at
-      )
-      SELECT
-        id, experiment_key, symbol, name, COALESCE(asset_type, ''), COALESCE(source, ''), universe_type, trade_date, close,
-        market_regime, experiment_score, rule_score, model_probability, model_score,
-        direction_probability, direction_score, hardness_probability, hardness_score,
-        raw_hardness_probability, raw_hardness_score, COALESCE(raw_model_accept, 0), COALESCE(discipline_model_accept, 0),
-        COALESCE(discipline_blocked, 0), discipline_adjustment,
-        feature_label, rotation_label, rotation_reason, discipline_label, discipline_reason,
-        crowding_label, crowding_reason, feature_snapshot_json, artifact_json, no_lookahead_note,
-        COALESCE(NULLIF(saved_from, ''), 'latest_prediction_pool'), created_at, updated_at
-      FROM finance_experiment_prediction_snapshots;
-
-      DROP TABLE finance_experiment_prediction_snapshots;
-      ALTER TABLE finance_experiment_prediction_snapshots_next RENAME TO finance_experiment_prediction_snapshots;
-      COMMIT;
-    `);
-  } catch (error) {
-    await dbExec(db, 'ROLLBACK');
-    throw error;
-  } finally {
-    await dbExec(db, 'PRAGMA foreign_keys = ON');
-  }
-
-  await recreatePredictionSnapshotMigrationIndexes(db);
-  const foreignKeyIssues = await dbAll<any>(db, 'PRAGMA foreign_key_check');
-  if (foreignKeyIssues.length) {
-    throw new Error(`finance_experiment_prediction_snapshots 外键检查失败：${foreignKeyIssues.length} 条`);
   }
 }
 
@@ -3142,18 +2192,9 @@ export async function runMigrations(dbPath: string): Promise<void> {
     for (const migration of migrations) {
       const row = await dbGet(db, 'SELECT id FROM migrations WHERE id = ?', [migration.id]);
       if (row) {
-        console.log(`Migration ${migration.id} already executed, skipping`);
         continue;
       }
 
-      if (!shouldRunMigration(migration)) {
-        const scope = inferMigrationScope(migration);
-        console.log(`Migration ${migration.id} is ${scope}-only, skipped for ${APP_MIGRATION_SCOPE}`);
-        await dbRun(db, 'INSERT INTO migrations (id, name) VALUES (?, ?)', [migration.id, `[skipped:${APP_MIGRATION_SCOPE}] ${migration.name}`]);
-        continue;
-      }
-
-      console.log(`Executing migration: ${migration.name} (${migration.id})`);
       if (migration.run) {
         await migration.run(db);
       } else if (migration.sql) {
@@ -3161,7 +2202,6 @@ export async function runMigrations(dbPath: string): Promise<void> {
       }
 
       await dbRun(db, 'INSERT INTO migrations (id, name) VALUES (?, ?)', [migration.id, migration.name]);
-      console.log(`Migration ${migration.id} executed successfully`);
     }
   } finally {
     await dbClose(db);
