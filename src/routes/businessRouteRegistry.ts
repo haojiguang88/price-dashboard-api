@@ -8,6 +8,7 @@ import watchlistRoutes from "./watchlistRoutes";
 import eventRecordsRoutes from "./eventRecordsRoutes";
 import opinionRecordsRoutes from "./opinionRecordsRoutes";
 import missedProjectsRoutes from "./missedProjectsRoutes";
+import businessReviewsRoutes from "./businessReviewsRoutes";
 import tradeReviewsRoutes from "./tradeReviewsRoutes";
 import treeHangingCasesRoutes from "./treeHangingCasesRoutes";
 import marketReviewsRoutes from "./marketReviewsRoutes";
@@ -39,6 +40,7 @@ export const registerBusinessRoutes = (app: Express) => {
   app.use("/api", eventRecordsRoutes);
   app.use("/api", opinionRecordsRoutes);
   app.use("/api", missedProjectsRoutes);
+  app.use("/api", businessReviewsRoutes);
   app.use("/api", tradeReviewsRoutes);
   app.use("/api", treeHangingCasesRoutes);
   app.use("/api", marketReviewsRoutes);
