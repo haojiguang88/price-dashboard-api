@@ -20,6 +20,7 @@ import {
 } from "./workspaceTagService";
 import {
   deleteTaskCenterTask as deleteTaskCenterTaskBase,
+  getTaskCenterHealth as getTaskCenterHealthBase,
   getTaskCenterSnapshot as getTaskCenterSnapshotBase,
   getTaskCenterTask as getTaskCenterTaskBase,
   updateTaskCenterTask as updateTaskCenterTaskBase
@@ -61,6 +62,7 @@ export interface ScopedWorkspaceTagService {
 
 export interface ScopedWorkspaceTaskCenterService {
   getTaskCenterSnapshot(compactInput: unknown): Promise<any>;
+  getTaskCenterHealth(): Promise<any>;
   getTaskCenterTask(id: string): Promise<any>;
   updateTaskCenterTask(id: string, body: Record<string, any>): Promise<any>;
   deleteTaskCenterTask(id: string): Promise<any>;
@@ -95,6 +97,7 @@ export const businessWorkspaceCenterServices: ScopedWorkspaceCenterServices = {
   },
   taskCenter: {
     getTaskCenterSnapshot: (compactInput) => getTaskCenterSnapshotBase(CURRENT_WORKSPACE, compactInput),
+    getTaskCenterHealth: () => getTaskCenterHealthBase(CURRENT_WORKSPACE),
     getTaskCenterTask: (id) => getTaskCenterTaskBase(id, CURRENT_WORKSPACE),
     updateTaskCenterTask: (id, body) => updateTaskCenterTaskBase(id, withCurrentWorkspaceBody(body), CURRENT_WORKSPACE),
     deleteTaskCenterTask: (id) => deleteTaskCenterTaskBase(id, CURRENT_WORKSPACE)
