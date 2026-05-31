@@ -185,6 +185,98 @@ const serializePlan = (plan: any, kind: PlanKind) => {
   };
 };
 
+const buildPriceSeriesKey = (categoryName: unknown, objectName: unknown, variantName: unknown) => [
+  String(categoryName || '').trim(),
+  String(objectName || '').trim(),
+  String(variantName || '').trim()
+].join('|');
+
+const getLatestPriceMap = async (db: any) => {
+  const rows = await db.all(`
+    SELECT category, object_name, COALESCE(variant, '') AS variant_name, price, date, source, created_at, id
+    FROM price_records
+    WHERE price IS NOT NULL
+    ORDER BY date DESC, created_at DESC, id DESC
+  `);
+  const map = new Map<string, any>();
+
+  for (const row of rows) {
+    const key = buildPriceSeriesKey(row.category, row.object_name, row.variant_name);
+    if (!map.has(key)) {
+      map.set(key, {
+        price: roundNumber(Number(row.price)),
+        date: row.date,
+        source: row.source || '',
+        created_at: row.created_at,
+        id: row.id
+      });
+    }
+  }
+
+  return map;
+};
+
+const getBuyingPlanPriceAlerts = async (db: any) => {
+  const plans = await db.all(`
+    SELECT *
+    FROM buying_plans
+    WHERE status IN ('pending', 'in_progress')
+    ORDER BY updated_at DESC, id DESC
+  `);
+  const latestPriceMap = await getLatestPriceMap(db);
+
+  return plans
+    .map((plan: any) => {
+      const latestPrice = latestPriceMap.get(buildPriceSeriesKey(plan.category_name, plan.object_name, plan.variant_name));
+      if (!latestPrice || !Number.isFinite(latestPrice.price)) return null;
+
+      const batches = parseStoredBatches(plan)
+        .filter(batch => batch.status !== 'completed' && batch.remaining_quantity > 0);
+      const reachedBatches = batches.filter(batch => latestPrice.price <= batch.target_price);
+      if (reachedBatches.length === 0) return null;
+
+      const bestBatch = reachedBatches
+        .slice()
+        .sort((a, b) => (latestPrice.price - a.target_price) - (latestPrice.price - b.target_price))[0];
+      const targetPrice = bestBatch.target_price;
+      const gapAmount = roundNumber(latestPrice.price - targetPrice);
+      const gapPercent = targetPrice > 0 ? roundNumber((gapAmount / targetPrice) * 100) : 0;
+      const targetLabel = [
+        plan.category_name,
+        plan.object_name,
+        plan.variant_name || ''
+      ].filter(Boolean).join(' / ');
+
+      return {
+        id: String(plan.id),
+        plan_name: plan.plan_name,
+        category_name: plan.category_name,
+        object_name: plan.object_name,
+        variant_name: plan.variant_name || '',
+        target_label: targetLabel,
+        target_price: targetPrice,
+        current_price: latestPrice.price,
+        price_date: latestPrice.date,
+        price_source: latestPrice.source,
+        gap_amount: gapAmount,
+        gap_percent: gapPercent,
+        plan_quantity: roundNumber(bestBatch.plan_quantity),
+        remaining_quantity: roundNumber(bestBatch.remaining_quantity),
+        batch_id: bestBatch.id,
+        batch_count: batches.length,
+        status: plan.status,
+        note: plan.note || '',
+        updated_at: plan.updated_at
+      };
+    })
+    .filter((item: any) => Boolean(item))
+    .sort((a: any, b: any) => {
+      const percentDiff = a.gap_percent - b.gap_percent;
+      if (percentDiff !== 0) return percentDiff;
+      return new Date(b.price_date || b.updated_at).getTime() - new Date(a.price_date || a.updated_at).getTime();
+    });
+};
+
 const validateMasterData = async (db: any, categoryName: string, objectName: string, variantName?: string) => {
   const category = await db.get('SELECT * FROM categories WHERE name = ?', [categoryName]);
   if (!category) return '品类不存在';
@@ -562,6 +654,25 @@ router.get('/plans/stats', async (req, res) => {
   } catch (error) {
     console.error('Error getting plan stats:', error);
     res.status(500).json({ success: false, message: '获取计划统计数据失败' });
+  }
+});
+
+router.get('/plans/price-alerts', async (_req, res) => {
+  try {
+    const db = await getDb();
+    const items = await getBuyingPlanPriceAlerts(db);
+
+    res.json({
+      success: true,
+      data: {
+        items,
+        total: items.length,
+        generated_at: new Date().toISOString()
+      }
+    });
+  } catch (error) {
+    console.error('Error getting plan price alerts:', error);
+    res.status(500).json({ success: false, message: '获取计划价格到位提醒失败' });
   }
 });
 
