@@ -2081,6 +2081,65 @@ const migrations: Migration[] = [
         ]
       );
     }
+  },
+  {
+    id: '20260531_008_seed_longyinbi_price_task',
+    name: 'Seed Longyinbi price update task',
+    run: async (db: any) => {
+      if (!(await migrationTableExists(db, 'task_center_tasks'))) return;
+
+      await dbRun(
+        db,
+        `INSERT OR IGNORE INTO task_center_tasks
+           (task_key, name, domain, workspace, task_type, enabled, schedule_time, schedule_days, priority, config_json, last_status, last_message)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          'longyinbi_price_update',
+          '龙银币价格更新',
+          'price',
+          'business',
+          'longyinbi_price_update',
+          1,
+          '18:05',
+          'every_day',
+          33,
+          JSON.stringify({ price_offset: 100 }),
+          'pending',
+          '每天抓取爱藏 2025 龙银币裸币价，并按信泰评级参考价=裸币+100 写入商品价格工作台'
+        ]
+      );
+      await dbRun(
+        db,
+        `UPDATE task_center_tasks
+         SET name = ?,
+             task_type = ?,
+             domain = ?,
+             workspace = ?,
+             enabled = 1,
+             schedule_time = CASE WHEN schedule_time IS NULL OR schedule_time = '' THEN ? ELSE schedule_time END,
+             schedule_days = ?,
+             priority = ?,
+             config_json = CASE
+               WHEN config_json IS NULL OR config_json = '{}' OR config_json = '' THEN ?
+               ELSE config_json
+             END,
+             last_message = ?,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE task_key = ?`,
+        [
+          '龙银币价格更新',
+          'longyinbi_price_update',
+          'price',
+          'business',
+          '18:05',
+          'every_day',
+          33,
+          JSON.stringify({ price_offset: 100 }),
+          '每天抓取爱藏 2025 龙银币裸币价，并按信泰评级参考价=裸币+100 写入商品价格工作台',
+          'longyinbi_price_update'
+        ]
+      );
+    }
   }
 
 ];

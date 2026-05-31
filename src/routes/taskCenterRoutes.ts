@@ -1,7 +1,6 @@
 import express, { Request, Response as ExpressResponse } from 'express';
 import { execFile } from 'child_process';
 import path from 'path';
-import { promisify } from 'util';
 import getDb, { getDatabasePath } from '../config/database';
 import { inferTaskWorkspace, resolveDomainForWorkspace, type WorkspaceKey } from '../utils/workspace';
 import {
@@ -9,8 +8,6 @@ import {
   type ScopedWorkspaceTaskCenterService
 } from '../services/workspaceCenterScopedServices';
 import { getWorkspaceCenterStatusCode } from '../services/workspaceCenterErrors';
-
-const execFileAsync = promisify(execFile);
 
 type TaskRow = {
   id: number;
@@ -30,8 +27,7 @@ type TaskRow = {
 
 const lastScheduledRunByTaskWindow = new Map<string, string>();
 const DEFAULT_TASK_TIMEOUT_MS = 30 * 60 * 1000;
-const MODEL_TRAINING_ROOT = process.env.MODEL_TRAINING_ROOT || '/Volumes/7100/model-training';
-const DEFAULT_TASK_PYTHON = path.join(MODEL_TRAINING_ROOT, 'venv', 'bin', 'python');
+const DEFAULT_TASK_PYTHON = 'python3';
 const RUNTIME_TASK_WORKSPACE: WorkspaceKey = 'business';
 
 function getTaskDomain(task: Partial<TaskRow>) {
@@ -74,18 +70,6 @@ function getTaskExecutionTimeoutMs(config: any) {
   return Math.min(Math.max(Math.floor(raw), 60 * 1000), 6 * 60 * 60 * 1000);
 }
 
-function withTaskExecutionTimeout<T>(promise: Promise<T>, task: TaskRow, timeoutMs: number): Promise<T> {
-  let timeout: NodeJS.Timeout | undefined;
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    timeout = setTimeout(() => {
-      reject(new Error(`任务执行超过等待上限 ${formatDurationMs(timeoutMs)}，已由任务中心超时保护收口：${task.name || task.task_key}`));
-    }, timeoutMs);
-  });
-  return Promise.race([promise, timeoutPromise]).finally(() => {
-    if (timeout) clearTimeout(timeout);
-  });
-}
-
 function getDateKey(now = new Date()) {
   return now.toLocaleDateString('en-CA', { timeZone: 'Asia/Shanghai' });
 }
@@ -121,7 +105,7 @@ function getChinaDateParts(now = new Date()) {
 function isRunnableToday(scheduleDays: string, now = new Date()) {
   const day = getChinaDateParts(now).weekday;
   if (scheduleDays === 'every_day') return true;
-  if (scheduleDays === 'work_days' || scheduleDays === 'trade_days') return day >= 1 && day <= 5;
+  if (scheduleDays === 'work_days') return day >= 1 && day <= 5;
   return true;
 }
 
@@ -129,12 +113,21 @@ function getScheduleWindowKey(task: TaskRow, now = new Date()) {
   return `${inferTaskWorkspace(task)}|${getDateKey(now)}|${task.task_key}|${task.schedule_time}`;
 }
 
+function parseScheduleTime(scheduleTime: string) {
+  const match = /^(\d{2}):(\d{2})$/.exec(String(scheduleTime || '').trim());
+  if (!match) return null;
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+  if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return null;
+  return { hour, minute };
+}
+
 function getScheduleDueTime(task: TaskRow, now = new Date()) {
-  const [hour, minute] = task.schedule_time.split(':').map(Number);
-  if (!Number.isFinite(hour) || !Number.isFinite(minute)) return null;
+  const parsed = parseScheduleTime(task.schedule_time);
+  if (!parsed) return null;
   const { year, month, day } = getChinaDateParts(now);
   if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) return null;
-  return new Date(Date.UTC(year, month - 1, day, hour - 8, minute, 0, 0));
+  return new Date(Date.UTC(year, month - 1, day, parsed.hour - 8, parsed.minute, 0, 0));
 }
 
 function hasRunInScheduleWindow(task: TaskRow, now = new Date()) {
@@ -180,24 +173,25 @@ function formatChinaDateTime(value?: string | null) {
   });
 }
 
-async function expireSupersededScheduledRuns(db: any, taskKey: string, taskName: string, now = new Date()) {
-  const runtimeWorkspace = getRuntimeTaskWorkspaceScope();
+async function expireSupersededScheduledRuns(db: any, task: TaskRow, now = new Date()) {
+  const taskWorkspace = inferTaskWorkspace(task);
+  const taskTimeoutMs = getTaskExecutionTimeoutMs(parseConfig(task.config_json));
   const runningRows = await db.all(
     `SELECT id, started_at
      FROM task_center_runs
      WHERE task_key = ? AND status = 'running' AND workspace = ?
      ORDER BY datetime(REPLACE(started_at, 'T', ' ')) DESC, id DESC`,
-    [taskKey, runtimeWorkspace]
+    [task.task_key, taskWorkspace]
   );
   const staleRows = runningRows.filter((row: any) => {
     const startedMs = new Date(row.started_at).getTime();
-    return Number.isFinite(startedMs) && now.getTime() - startedMs > DEFAULT_TASK_TIMEOUT_MS;
+    return Number.isFinite(startedMs) && now.getTime() - startedMs > taskTimeoutMs;
   });
   if (staleRows.length === 0) return;
 
   const finishedAt = now.toISOString();
   for (const row of staleRows) {
-    const message = `${taskName}超过 ${formatDurationMs(DEFAULT_TASK_TIMEOUT_MS)} 仍未结束，自动标记为失败，避免定时器长期卡住。`;
+    const message = `${task.name || task.task_key}超过 ${formatDurationMs(taskTimeoutMs)} 仍未结束，自动标记为失败，避免定时器长期卡住。`;
     await db.run(
       `UPDATE task_center_runs
        SET status = 'error', message = ?, finished_at = ?
@@ -244,43 +238,146 @@ export async function cleanupOrphanedTaskRunsOnStartup() {
 }
 
 async function getScheduledTaskRunningReason(db: any, task: TaskRow, now = new Date()) {
-  await expireSupersededScheduledRuns(db, task.task_key, task.name || task.task_key, now);
-  const runtimeWorkspace = getRuntimeTaskWorkspaceScope();
+  await expireSupersededScheduledRuns(db, task, now);
+  const taskWorkspace = inferTaskWorkspace(task);
   const running = await db.get(
     `SELECT id, started_at
      FROM task_center_runs
      WHERE task_key = ? AND status = 'running' AND workspace = ?
      ORDER BY datetime(REPLACE(started_at, 'T', ' ')) DESC, id DESC
      LIMIT 1`,
-    [task.task_key, runtimeWorkspace]
+    [task.task_key, taskWorkspace]
   );
   if (!running) return null;
   return `${task.name || task.task_key}正在执行，本轮定时跳过，避免重复启动。开始时间：${formatChinaDateTime(running.started_at)}`;
 }
 
 function getTaskPython(config: any) {
-  return String(config.python || process.env.PYTHON_BIN || process.env.MODEL_TRAINING_PYTHON || DEFAULT_TASK_PYTHON);
+  return String(
+    config.python ||
+    process.env.TASK_CENTER_PYTHON ||
+    process.env.PYTHON_BIN ||
+    DEFAULT_TASK_PYTHON
+  );
 }
 
-async function runPythonJsonScript(config: any, scriptName: string, args: string[], fallbackMessage: string) {
-  const scriptPath = path.join(__dirname, '../../scripts/business', scriptName);
-  const { stdout, stderr } = await execFileAsync(getTaskPython(config), [scriptPath, ...args], {
-    cwd: path.join(__dirname, '../..'),
-    maxBuffer: 1024 * 1024 * 10,
-    env: process.env
+type ExecFileTaskError = Error & {
+  code?: string | number | null;
+  killed?: boolean;
+  signal?: NodeJS.Signals | null;
+  stderr?: string;
+  stdout?: string;
+  timedOut?: boolean;
+};
+
+type BusinessTaskRunResult = {
+  message: string;
+  data: any;
+  status?: 'success' | 'skipped';
+};
+
+function formatPythonTaskError(errorOutput: string, fallbackMessage: string, pythonBin: string) {
+  const missingModule = errorOutput.match(/ModuleNotFoundError:\s+No module named ['"]([^'"]+)['"]/);
+  if (missingModule?.[1]) {
+    return `任务中心 Python 依赖缺失：${missingModule[1]}。当前 Python：${pythonBin}。请先设置 TASK_CENTER_PYTHON 指向任务运行时 Python，并执行 npm run setup:business-tasks。`;
+  }
+  return errorOutput || fallbackMessage;
+}
+
+function runExecFileWithTimeout(command: string, args: string[], timeoutMs: number) {
+  return new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
+    let timedOut = false;
+    let timeout: NodeJS.Timeout | undefined;
+    let forceKillTimeout: NodeJS.Timeout | undefined;
+    const child = execFile(command, args, {
+      cwd: path.join(__dirname, '../..'),
+      maxBuffer: 1024 * 1024 * 10,
+      env: process.env
+    }, (error, stdout, stderr) => {
+      if (timeout) clearTimeout(timeout);
+      if (forceKillTimeout) clearTimeout(forceKillTimeout);
+
+      const stdoutText = String(stdout || '');
+      const stderrText = String(stderr || '');
+      if (error) {
+        const taskError = error as ExecFileTaskError;
+        taskError.stdout = stdoutText;
+        taskError.stderr = stderrText;
+        taskError.timedOut = timedOut;
+        reject(taskError);
+        return;
+      }
+      if (timedOut) {
+        const taskError = new Error('Task execution timed out') as ExecFileTaskError;
+        taskError.stdout = stdoutText;
+        taskError.stderr = stderrText;
+        taskError.timedOut = true;
+        reject(taskError);
+        return;
+      }
+
+      resolve({ stdout: stdoutText, stderr: stderrText });
+    });
+
+    timeout = setTimeout(() => {
+      timedOut = true;
+      child.kill('SIGTERM');
+      forceKillTimeout = setTimeout(() => {
+        child.kill('SIGKILL');
+      }, 5000);
+    }, timeoutMs);
   });
+}
+
+async function runPythonJsonScript(
+  config: any,
+  scriptName: string,
+  args: string[],
+  fallbackMessage: string,
+  timeoutMs: number,
+  taskName: string
+) {
+  const scriptPath = path.join(__dirname, '../../scripts/business', scriptName);
+  const pythonBin = getTaskPython(config);
+  let stdout = '';
+  let stderr = '';
+  try {
+    const result = await runExecFileWithTimeout(pythonBin, [scriptPath, ...args], timeoutMs);
+    stdout = result.stdout;
+    stderr = result.stderr;
+  } catch (error) {
+    const taskError = error as ExecFileTaskError;
+    const errorOutput = String(taskError.stderr || taskError.stdout || '').trim();
+    if (taskError.timedOut) {
+      throw new Error(`任务执行超过等待上限 ${formatDurationMs(timeoutMs)}，已终止 Python 进程：${taskName}`);
+    }
+    if (taskError.code === 'ENOENT') {
+      throw new Error(`任务中心找不到 Python 可执行文件：${pythonBin}。请安装 python3，或设置 TASK_CENTER_PYTHON 指向线上可用的 Python。`);
+    }
+    throw new Error(formatPythonTaskError(errorOutput || taskError.message || '', fallbackMessage, pythonBin));
+  }
   const lines = stdout.trim().split('\n').filter(Boolean);
-  const parsed = JSON.parse(lines[lines.length - 1] || '{}');
+  let parsed: any;
+  try {
+    parsed = JSON.parse(lines[lines.length - 1] || '{}');
+  } catch {
+    const errorOutput = String(stderr || stdout || '').trim();
+    throw new Error(`${fallbackMessage}：Python脚本未返回有效JSON${errorOutput ? `；输出：${errorOutput}` : ''}`);
+  }
   if (parsed.success === false) {
     throw new Error(parsed.message || stderr || fallbackMessage);
   }
   return parsed;
 }
 
-async function runCommodityMetalsPriceUpdate(config: any) {
+function getTaskCompletionStatus(data: any): 'success' | 'skipped' {
+  return data?.status === 'skipped' || data?.skipped === true ? 'skipped' : 'success';
+}
+
+async function runCommodityMetalsPriceUpdate(config: any, timeoutMs: number, taskName: string): Promise<BusinessTaskRunResult> {
   const args = [
     '--db',
-    String(config.db || getDatabasePath()),
+    getDatabasePath(),
     '--targets',
     Array.isArray(config.targets)
       ? config.targets.join(',')
@@ -288,7 +385,7 @@ async function runCommodityMetalsPriceUpdate(config: any) {
   ];
   if (config.dry_run) args.push('--dry-run');
 
-  const parsed = await runPythonJsonScript(config, 'guijinshu.py', args, '商品贵金属价格更新失败');
+  const parsed = await runPythonJsonScript(config, 'guijinshu.py', args, '商品贵金属价格更新失败', timeoutMs, taskName);
   const priceText = Array.isArray(parsed.records)
     ? parsed.records
       .map((record: any) => `${record.object} ${record.price}`)
@@ -296,92 +393,117 @@ async function runCommodityMetalsPriceUpdate(config: any) {
     : '';
   return {
     message: `${parsed.message || '商品贵金属价格更新完成'}${priceText ? `：${priceText}` : ''}`,
-    data: parsed
+    data: parsed,
+    status: getTaskCompletionStatus(parsed)
   };
 }
 
-async function runIphonePriceUpdate(config: any) {
+async function runIphonePriceUpdate(config: any, timeoutMs: number, taskName: string): Promise<BusinessTaskRunResult> {
   const args = [
     '--db',
-    String(config.db || getDatabasePath()),
+    getDatabasePath(),
     '--category',
     String(config.category || '苹果手机')
   ];
   if (config.dry_run) args.push('--dry-run');
 
-  const parsed = await runPythonJsonScript(config, 'iphone.py', args, '苹果手机价格更新失败');
+  const parsed = await runPythonJsonScript(config, 'iphone.py', args, '苹果手机价格更新失败', timeoutMs, taskName);
   return {
     message: parsed.message || '苹果手机价格更新完成',
-    data: parsed
+    data: parsed,
+    status: getTaskCompletionStatus(parsed)
   };
 }
 
-async function runVideoGameMachinePriceUpdate(config: any) {
+async function runVideoGameMachinePriceUpdate(config: any, timeoutMs: number, taskName: string): Promise<BusinessTaskRunResult> {
   const args = [
     '--db',
-    String(config.db || getDatabasePath()),
+    getDatabasePath(),
     '--category',
     String(config.category || '游戏机')
   ];
   if (config.dry_run) args.push('--dry-run');
 
-  const parsed = await runPythonJsonScript(config, 'video_game_machine.py', args, '游戏机价格更新失败');
+  const parsed = await runPythonJsonScript(config, 'video_game_machine.py', args, '游戏机价格更新失败', timeoutMs, taskName);
   const unmappedText = Array.isArray(parsed.unmapped_enabled_objects) && parsed.unmapped_enabled_objects.length > 0
     ? `；系统对象未映射 ${parsed.unmapped_enabled_objects.join('、')}`
     : '';
 
   return {
     message: `${parsed.message || '游戏机价格更新完成'}${unmappedText}`,
-    data: parsed
+    data: parsed,
+    status: getTaskCompletionStatus(parsed)
   };
 }
 
-async function runPopMartPriceUpdate(config: any) {
+async function runPopMartPriceUpdate(config: any, timeoutMs: number, taskName: string): Promise<BusinessTaskRunResult> {
   const args = [
     '--db',
-    String(config.db || getDatabasePath()),
+    getDatabasePath(),
     '--category',
     String(config.category || '泡泡玛特')
   ];
   if (config.dry_run) args.push('--dry-run');
 
-  const parsed = await runPythonJsonScript(config, 'ppmt.py', args, '泡泡玛特价格更新失败');
+  const parsed = await runPythonJsonScript(config, 'ppmt.py', args, '泡泡玛特价格更新失败', timeoutMs, taskName);
   const unmappedText = Array.isArray(parsed.unmapped_enabled_objects) && parsed.unmapped_enabled_objects.length > 0
     ? `；待确认映射 ${parsed.unmapped_enabled_objects.join('、')}`
     : '';
 
   return {
     message: `${parsed.message || '泡泡玛特价格更新完成'}${unmappedText}`,
-    data: parsed
+    data: parsed,
+    status: getTaskCompletionStatus(parsed)
   };
 }
 
-async function runBusinessTask(task: TaskRow, config: any) {
+async function runLongyinbiPriceUpdate(config: any, timeoutMs: number, taskName: string): Promise<BusinessTaskRunResult> {
+  const args = [
+    '--db',
+    getDatabasePath()
+  ];
+  if (config.replace_target) args.push('--replace-target');
+  if (config.dry_run) args.push('--dry-run');
+
+  const parsed = await runPythonJsonScript(config, 'longyinbi.py', args, '龙银币价格更新失败', timeoutMs, taskName);
+  return {
+    message: parsed.message || '龙银币价格更新完成',
+    data: parsed,
+    status: getTaskCompletionStatus(parsed)
+  };
+}
+
+async function runBusinessTask(task: TaskRow, config: any, timeoutMs: number): Promise<BusinessTaskRunResult> {
+  const taskName = task.name || task.task_key;
   if (task.task_type === 'commodity_metals_price_update' || task.task_key === 'commodity_metals_price_update') {
-    return runCommodityMetalsPriceUpdate(config);
+    return runCommodityMetalsPriceUpdate(config, timeoutMs, taskName);
   }
   if (task.task_type === 'iphone_price_update' || task.task_key === 'iphone_price_update') {
-    return runIphonePriceUpdate(config);
+    return runIphonePriceUpdate(config, timeoutMs, taskName);
   }
   if (task.task_type === 'video_game_machine_price_update' || task.task_key === 'video_game_machine_price_update') {
-    return runVideoGameMachinePriceUpdate(config);
+    return runVideoGameMachinePriceUpdate(config, timeoutMs, taskName);
   }
   if (task.task_type === 'popmart_price_update' || task.task_key === 'popmart_price_update') {
-    return runPopMartPriceUpdate(config);
+    return runPopMartPriceUpdate(config, timeoutMs, taskName);
+  }
+  if (task.task_type === 'longyinbi_price_update' || task.task_key === 'longyinbi_price_update') {
+    return runLongyinbiPriceUpdate(config, timeoutMs, taskName);
   }
   throw new Error(`生意任务执行器未接入：${task.task_key} / ${task.task_type}`);
 }
 
 async function executeTask(task: TaskRow, triggerType: 'manual' | 'schedule') {
   const db = await getDb();
-  await expireSupersededScheduledRuns(db, task.task_key, task.name || task.task_key);
+  const taskWorkspace = inferTaskWorkspace(task);
+  await expireSupersededScheduledRuns(db, task);
   const existingRunning = await db.get(
     `SELECT id, started_at
      FROM task_center_runs
-     WHERE task_key = ? AND status = 'running'
+     WHERE task_key = ? AND status = 'running' AND workspace = ?
      ORDER BY datetime(REPLACE(started_at, 'T', ' ')) DESC, id DESC
      LIMIT 1`,
-    [task.task_key]
+    [task.task_key, taskWorkspace]
   );
   if (existingRunning) {
     return {
@@ -397,7 +519,6 @@ async function executeTask(task: TaskRow, triggerType: 'manual' | 'schedule') {
 
   const startedAt = new Date().toISOString();
   const taskDomain = getTaskDomain(task);
-  const taskWorkspace = inferTaskWorkspace(task);
   const runResult = await db.run(
     `INSERT INTO task_center_runs (task_id, task_key, domain, workspace, trigger_type, status, started_at)
      VALUES (?, ?, ?, ?, ?, 'running', ?)`,
@@ -411,34 +532,33 @@ async function executeTask(task: TaskRow, triggerType: 'manual' | 'schedule') {
   try {
     const config = parseConfig(task.config_json);
     const taskTimeoutMs = getTaskExecutionTimeoutMs(config);
-    return await withTaskExecutionTimeout((async () => {
-      const update = await runBusinessTask(task, config);
-      const now = new Date().toISOString();
-      const finalRunUpdate = await db.run(
-        `UPDATE task_center_runs
-         SET status = 'success', message = ?, result_json = ?, finished_at = ?
-         WHERE id = ? AND status = 'running'`,
-        [update.message, JSON.stringify(update.data), now, runId]
-      );
-      if (Number(finalRunUpdate?.changes || 0) === 0) {
-        return {
-          success: false,
-          message: '任务已被超时保护或其他收口逻辑结束，后续迟到结果未覆盖任务状态。',
-          data: update.data,
-          run_id: runId
-        };
-      }
-      await db.run(
-        `UPDATE task_center_tasks
-         SET last_status = 'success', last_message = ?, last_run_at = ?, updated_at = ?
-         WHERE id = ?`,
-        [update.message, now, now, task.id]
-      );
-      if (triggerType === 'schedule') {
-        lastScheduledRunByTaskWindow.set(task.task_key, getScheduleWindowKey(task));
-      }
-      return { success: true, message: update.message, data: update.data };
-    })(), task, taskTimeoutMs);
+    const update = await runBusinessTask(task, config, taskTimeoutMs);
+    const finalStatus = update.status || 'success';
+    const now = new Date().toISOString();
+    const finalRunUpdate = await db.run(
+      `UPDATE task_center_runs
+       SET status = ?, message = ?, result_json = ?, finished_at = ?
+       WHERE id = ? AND status = 'running'`,
+      [finalStatus, update.message, JSON.stringify(update.data), now, runId]
+    );
+    if (Number(finalRunUpdate?.changes || 0) === 0) {
+      return {
+        success: false,
+        message: '任务已被超时保护或其他收口逻辑结束，后续迟到结果未覆盖任务状态。',
+        data: update.data,
+        run_id: runId
+      };
+    }
+    await db.run(
+      `UPDATE task_center_tasks
+       SET last_status = ?, last_message = ?, last_run_at = ?, updated_at = ?
+       WHERE id = ?`,
+      [finalStatus, update.message, now, now, task.id]
+    );
+    if (triggerType === 'schedule') {
+      lastScheduledRunByTaskWindow.set(task.task_key, getScheduleWindowKey(task));
+    }
+    return { success: true, message: update.message, data: update.data };
   } catch (error) {
     const message = (error as Error).message;
     const now = new Date().toISOString();
@@ -493,6 +613,15 @@ export const createTaskCenterRoutes = (
       res.json({ success: true, data });
     } catch (error) {
       res.status(500).json({ success: false, message: `获取任务中心失败: ${(error as Error).message}` });
+    }
+  });
+
+  router.get('/task-center/health', async (_req: Request, res: ExpressResponse) => {
+    try {
+      const data = await taskCenterService.getTaskCenterHealth();
+      res.json({ success: true, data });
+    } catch (error) {
+      res.status(500).json({ success: false, message: `获取任务健康失败: ${(error as Error).message}` });
     }
   });
 
