@@ -58,6 +58,7 @@ const recordFields = [
   'high_level_real_demand',
   'final_result',
   'future_action_rule',
+  'experience_tags',
   'summary',
   'lesson',
   'note'
@@ -80,6 +81,7 @@ const eventFields = [
   'sweep_strength',
   'trigger_event',
   'risk_signal',
+  'experience_tags',
   'source',
   'note'
 ];
@@ -112,6 +114,7 @@ const mapRecordPayload = (body: any) => [
   normalizeText(body.high_level_real_demand),
   normalizeText(body.final_result),
   normalizeText(body.future_action_rule),
+  normalizeText(body.experience_tags),
   normalizeText(body.summary),
   normalizeText(body.lesson),
   normalizeText(body.note)
@@ -134,6 +137,7 @@ const mapEventPayload = (cycleId: number, body: any) => [
   normalizeText(body.sweep_strength),
   normalizeText(body.trigger_event),
   normalizeText(body.risk_signal),
+  normalizeText(body.experience_tags),
   normalizeText(body.source),
   normalizeText(body.note)
 ];
@@ -141,7 +145,7 @@ const mapEventPayload = (cycleId: number, body: any) => [
 router.get('/speculation-cycles', async (req, res) => {
   try {
     const db = await getDb();
-    const { q, category_name, cycle_pattern, cycle_stage, future_action_rule } = req.query;
+    const { q, category_name, cycle_pattern, cycle_stage, future_action_rule, experience_tag } = req.query;
     const params: any[] = [];
     let where = 'WHERE 1=1';
 
@@ -149,10 +153,10 @@ router.get('/speculation-cycles', async (req, res) => {
       where += ` AND (
         r.category_name LIKE ? OR r.object_name LIKE ? OR r.variant_name LIKE ? OR
         r.cycle_pattern LIKE ? OR r.rise_nature LIKE ? OR r.main_participants LIKE ? OR
-        r.summary LIKE ? OR r.lesson LIKE ? OR r.note LIKE ?
+        r.experience_tags LIKE ? OR r.summary LIKE ? OR r.lesson LIKE ? OR r.note LIKE ?
       )`;
       const term = `%${q}%`;
-      params.push(term, term, term, term, term, term, term, term, term);
+      params.push(term, term, term, term, term, term, term, term, term, term);
     }
     if (category_name) {
       where += ' AND r.category_name = ?';
@@ -169,6 +173,10 @@ router.get('/speculation-cycles', async (req, res) => {
     if (future_action_rule) {
       where += ' AND r.future_action_rule = ?';
       params.push(future_action_rule);
+    }
+    if (experience_tag) {
+      where += ' AND r.experience_tags LIKE ?';
+      params.push(`%${experience_tag}%`);
     }
 
     const records = await db.all(`
