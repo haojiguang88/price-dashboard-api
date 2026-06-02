@@ -52,11 +52,18 @@ const serializeProfile = (row: any) => ({
   ...row,
   id: String(row.id),
   category_id: row.category_id ? String(row.category_id) : "",
+  object_name: row.object_name || "",
+  variant_name: row.variant_name || "",
   extra: parseExtraJson(row.extra_json)
 });
 
 const writeProfileAuditLog = async (db: any, action: string, profile: any) => {
   const now = new Date().toISOString();
+  const target = [
+    profile.category_name,
+    profile.object_name,
+    profile.variant_name
+  ].filter(Boolean).join(" / ");
   await db.run(
     `INSERT INTO audit_logs
       (id, timestamp, module, action, target, status, detail, entity_id, path, domain, workspace, created_at, updated_at)
@@ -66,7 +73,7 @@ const writeProfileAuditLog = async (db: any, action: string, profile: any) => {
       now,
       "品类画像",
       action,
-      profile.category_name,
+      target || profile.category_name,
       "success",
       profile.note || "",
       String(profile.id),
@@ -108,6 +115,11 @@ const buildPayload = async (db: any, body: Record<string, any>, existing?: any) 
   if (!categoryName) {
     throw new Error("品类名称不能为空");
   }
+  const objectName = normalizeText(body.object_name ?? existing?.object_name);
+  const variantName = normalizeText(body.variant_name ?? existing?.variant_name);
+  if (variantName && !objectName) {
+    throw new Error("填写变体时请先填写对象");
+  }
 
   const status = normalizeText(body.status ?? existing?.status ?? "active");
   if (!VALID_STATUSES.has(status)) {
@@ -117,21 +129,32 @@ const buildPayload = async (db: any, body: Record<string, any>, existing?: any) 
   const duplicate = categoryId
     ? await db.get(
       `SELECT id FROM category_profiles
-       WHERE COALESCE(is_deleted, 0) = 0 AND category_id = ? AND id != ?`,
-      [categoryId, existing?.id || 0]
+       WHERE COALESCE(is_deleted, 0) = 0
+         AND category_id = ?
+         AND COALESCE(object_name, '') = ?
+         AND COALESCE(variant_name, '') = ?
+         AND id != ?`,
+      [categoryId, objectName, variantName, existing?.id || 0]
     )
     : await db.get(
       `SELECT id FROM category_profiles
-       WHERE COALESCE(is_deleted, 0) = 0 AND category_id IS NULL AND category_name = ? AND id != ?`,
-      [categoryName, existing?.id || 0]
+       WHERE COALESCE(is_deleted, 0) = 0
+         AND category_id IS NULL
+         AND category_name = ?
+         AND COALESCE(object_name, '') = ?
+         AND COALESCE(variant_name, '') = ?
+         AND id != ?`,
+      [categoryName, objectName, variantName, existing?.id || 0]
     );
   if (duplicate) {
-    throw new Error("这个品类已经有画像，请直接编辑原画像");
+    throw new Error("这个画像范围已经存在，请直接编辑原画像");
   }
 
   const payload: Record<string, any> = {
     category_id: categoryId,
     category_name: categoryName,
+    object_name: objectName,
+    variant_name: variantName,
     status,
     extra_json: normalizeExtraJson(body.extra_json ?? existing?.extra_json),
     ...PROFILE_FIELDS.reduce<Record<string, string>>((acc, field) => {
@@ -154,13 +177,15 @@ router.get("/category-profiles", async (req, res) => {
     if (q) {
       where.push(`(
         cp.category_name LIKE ?
+        OR cp.object_name LIKE ?
+        OR cp.variant_name LIKE ?
         OR cp.business_style LIKE ?
         OR cp.operation_scene LIKE ?
         OR cp.risk_points LIKE ?
         OR cp.decision_notes LIKE ?
       )`);
       const likeValue = `%${q}%`;
-      params.push(likeValue, likeValue, likeValue, likeValue, likeValue);
+      params.push(likeValue, likeValue, likeValue, likeValue, likeValue, likeValue, likeValue);
     }
     if (status) {
       where.push("cp.status = ?");
@@ -209,13 +234,15 @@ router.post("/category-profiles", async (req, res) => {
     const now = new Date().toISOString();
     const result = await db.run(
       `INSERT INTO category_profiles
-        (category_id, category_name, business_style, operation_scene, supply_mode, sales_mode,
+        (category_id, category_name, object_name, variant_name, business_style, operation_scene, supply_mode, sales_mode,
          price_pattern, risk_points, operating_discipline, data_caliber, experience_notes,
          decision_notes, extra_json, status, note, is_deleted, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
       [
         payload.category_id,
         payload.category_name,
+        payload.object_name,
+        payload.variant_name,
         payload.business_style,
         payload.operation_scene,
         payload.supply_mode,
@@ -252,7 +279,7 @@ router.put("/category-profiles/:id", async (req, res) => {
     const now = new Date().toISOString();
     await db.run(
       `UPDATE category_profiles
-       SET category_id = ?, category_name = ?, business_style = ?, operation_scene = ?,
+       SET category_id = ?, category_name = ?, object_name = ?, variant_name = ?, business_style = ?, operation_scene = ?,
            supply_mode = ?, sales_mode = ?, price_pattern = ?, risk_points = ?,
            operating_discipline = ?, data_caliber = ?, experience_notes = ?, decision_notes = ?,
            extra_json = ?, status = ?, note = ?, updated_at = ?
@@ -260,6 +287,8 @@ router.put("/category-profiles/:id", async (req, res) => {
       [
         payload.category_id,
         payload.category_name,
+        payload.object_name,
+        payload.variant_name,
         payload.business_style,
         payload.operation_scene,
         payload.supply_mode,

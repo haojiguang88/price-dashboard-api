@@ -1,5 +1,10 @@
 import express from 'express';
 import getDb from '../config/database';
+import {
+  buildSilverAnchorItemValue,
+  getSilverAnchorEvidence,
+  usesSilverAnchorEvidence
+} from '../services/marketAnchorService';
 
 const router = express.Router();
 
@@ -26,6 +31,64 @@ const parseRecordExtra = (record: any) => {
   } catch {
     return { ...record, extra_result: null };
   }
+};
+
+const isPlainObject = (value: unknown): value is Record<string, unknown> => (
+  Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+);
+
+const attachSilverAnchorEvidence = async (
+  categoryName: string,
+  categoryRiskType: string,
+  extraResult: unknown,
+  items: any[]
+) => {
+  if (!usesSilverAnchorEvidence(categoryName, categoryRiskType)) {
+    return {
+      extraResult: isPlainObject(extraResult) ? extraResult : null,
+      items
+    };
+  }
+
+  const anchor = await getSilverAnchorEvidence({ refresh: 'stale' });
+  const nextExtraResult: Record<string, unknown> = isPlainObject(extraResult)
+    ? { ...extraResult }
+    : {};
+  const snapshot = isPlainObject(nextExtraResult.risk_evidence_snapshot)
+    ? { ...nextExtraResult.risk_evidence_snapshot }
+    : null;
+
+  if (snapshot) {
+    nextExtraResult.risk_evidence_snapshot = {
+      ...snapshot,
+      market_anchor: {
+        ...(isPlainObject(snapshot.market_anchor) ? snapshot.market_anchor : {}),
+        silver_anchor: anchor
+      }
+    };
+  }
+  nextExtraResult.market_anchor_snapshot = {
+    ...(isPlainObject(nextExtraResult.market_anchor_snapshot) ? nextExtraResult.market_anchor_snapshot : {}),
+    silver_anchor: anchor
+  };
+
+  const hasSilverAnchorItem = items.some(item => item?.item_key === 'silver_market_anchor');
+  return {
+    extraResult: nextExtraResult,
+    items: hasSilverAnchorItem
+      ? items
+      : [
+          ...items,
+          {
+            item_key: 'silver_market_anchor',
+            item_label: '银价锚背景',
+            group_name: '行情锚点',
+            item_value: buildSilverAnchorItemValue(anchor),
+            trigger_type: 'none',
+            trigger_reason: anchor.risk_reference_note || anchor.evidence_note
+          }
+        ]
+  };
 };
 
 // ========== 风控检查记录接口 ==========
@@ -149,8 +212,16 @@ router.post('/check-records/category-risk', async (req, res) => {
       }
     }
 
+    const augmented = await attachSilverAnchorEvidence(
+      normalizeText(category_name),
+      normalizeText(category_risk_type),
+      extra_result,
+      items
+    );
+    const recordItems = augmented.items;
+
     // 处理 extra_result_json
-    const extra_result_json = extra_result ? JSON.stringify(extra_result) : null;
+    const extra_result_json = augmented.extraResult ? JSON.stringify(augmented.extraResult) : null;
 
     // 事务处理
     await db.run('BEGIN TRANSACTION');
@@ -179,7 +250,7 @@ router.post('/check-records/category-risk', async (req, res) => {
     const recordId = recordResult.lastID;
 
     // 插入检查项
-    for (const item of items) {
+    for (const item of recordItems) {
       await db.run(`
         INSERT INTO risk_check_record_items (
           record_id, item_key, item_label, group_name, item_value,

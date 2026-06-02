@@ -374,6 +374,115 @@ function getTaskCompletionStatus(data: any): 'success' | 'skipped' {
   return data?.status === 'skipped' || data?.skipped === true ? 'skipped' : 'success';
 }
 
+function getLatestTaskRecordDate(data: any) {
+  const records = Array.isArray(data?.records) ? data.records : [];
+  const dates = records
+    .map((record: any) => String(record?.price_date || record?.date || '').slice(0, 10))
+    .filter((date: string) => /^\d{4}-\d{2}-\d{2}$/.test(date))
+    .sort();
+  return dates[dates.length - 1] || '';
+}
+
+function getBackupSourceReason(config: any, data: any) {
+  if (config.use_backup_source === false || config.backup_on_stale === false) return '';
+  const records = Array.isArray(data?.records) ? data.records : [];
+  if (records.length === 0 && config.backup_on_empty !== false) {
+    return '主源没有返回价格记录';
+  }
+
+  const latestDate = getLatestTaskRecordDate(data);
+  const todayKey = getDateKey();
+  if (latestDate && latestDate < todayKey) {
+    return `主源最新价格日期 ${latestDate} 落后于今天 ${todayKey}`;
+  }
+  return '';
+}
+
+function buildBackupArgs(config: any, category: string) {
+  const args = [
+    '--db',
+    getDatabasePath(),
+    '--category',
+    category
+  ];
+  if (config.dry_run) args.push('--dry-run');
+  return args;
+}
+
+async function runBackupPriceUpdate(
+  config: any,
+  category: string,
+  timeoutMs: number,
+  taskName: string
+) {
+  return runPythonJsonScript(
+    config,
+    'iphone_backup.py',
+    buildBackupArgs(config, category),
+    `${category}备用价格源更新失败`,
+    timeoutMs,
+    taskName
+  );
+}
+
+function buildTaskResult(
+  parsed: any,
+  fallbackMessage: string,
+  extraMessage = ''
+): BusinessTaskRunResult {
+  return {
+    message: `${parsed.message || fallbackMessage}${extraMessage}`,
+    data: parsed,
+    status: getTaskCompletionStatus(parsed)
+  };
+}
+
+function buildBackupSuccessResult(
+  primaryParsed: any | null,
+  backupParsed: any,
+  reason: string,
+  primaryMessage: string,
+  primaryErrorMessage?: string
+): BusinessTaskRunResult {
+  const backupStatus = getTaskCompletionStatus(backupParsed);
+  const primaryStatus = primaryParsed ? getTaskCompletionStatus(primaryParsed) : undefined;
+  const status = primaryStatus === 'success' ? 'success' : backupStatus;
+  const backupMessage = backupParsed.message || '备用源执行完成';
+  const message = primaryErrorMessage
+    ? `${primaryMessage}：主源失败：${primaryErrorMessage}；已启用备用源：${backupMessage}`
+    : `${primaryMessage}；${reason}，已尝试备用源：${backupMessage}`;
+
+  return {
+    message,
+    data: {
+      primary: primaryParsed,
+      primary_error: primaryErrorMessage || '',
+      backup: backupParsed,
+      backup_reason: reason,
+      backup_used: true
+    },
+    status
+  };
+}
+
+function buildPrimaryWithBackupFailureResult(
+  primaryParsed: any,
+  reason: string,
+  primaryMessage: string,
+  backupErrorMessage: string
+): BusinessTaskRunResult {
+  return {
+    message: `${primaryMessage}；${reason}，但备用源失败：${backupErrorMessage}`,
+    data: {
+      primary: primaryParsed,
+      backup_error: backupErrorMessage,
+      backup_reason: reason,
+      backup_used: false
+    },
+    status: getTaskCompletionStatus(primaryParsed)
+  };
+}
+
 async function runCommodityMetalsPriceUpdate(config: any, timeoutMs: number, taskName: string): Promise<BusinessTaskRunResult> {
   const args = [
     '--db',
@@ -391,8 +500,26 @@ async function runCommodityMetalsPriceUpdate(config: any, timeoutMs: number, tas
       .map((record: any) => `${record.object} ${record.price}`)
       .join('，')
     : '';
+  return buildTaskResult(parsed, '商品贵金属价格更新完成', priceText ? `：${priceText}` : '');
+}
+
+async function runPreciousMetalMarketUpdate(config: any, timeoutMs: number, taskName: string): Promise<BusinessTaskRunResult> {
+  const symbols = Array.isArray(config.symbols)
+    ? config.symbols.join(',')
+    : String(config.symbols || 'XAUUSD,SGE_AGTD');
+  const args = [
+    '--db',
+    getDatabasePath(),
+    '--mode',
+    'update',
+    '--symbols',
+    symbols
+  ];
+  if (config.dry_run) args.push('--dry-run');
+
+  const parsed = await runPythonJsonScript(config, 'precious_metal_market.py', args, '贵金属大盘行情更新失败', timeoutMs, taskName);
   return {
-    message: `${parsed.message || '商品贵金属价格更新完成'}${priceText ? `：${priceText}` : ''}`,
+    message: parsed.message || '贵金属大盘行情更新完成',
     data: parsed,
     status: getTaskCompletionStatus(parsed)
   };
@@ -407,12 +534,31 @@ async function runIphonePriceUpdate(config: any, timeoutMs: number, taskName: st
   ];
   if (config.dry_run) args.push('--dry-run');
 
-  const parsed = await runPythonJsonScript(config, 'iphone.py', args, '苹果手机价格更新失败', timeoutMs, taskName);
-  return {
-    message: parsed.message || '苹果手机价格更新完成',
-    data: parsed,
-    status: getTaskCompletionStatus(parsed)
-  };
+  let parsed: any;
+  try {
+    parsed = await runPythonJsonScript(config, 'iphone.py', args, '苹果手机价格更新失败', timeoutMs, taskName);
+  } catch (error) {
+    if (config.use_backup_source === false || config.backup_on_failure === false) throw error;
+    const backupParsed = await runBackupPriceUpdate(config, String(config.category || '苹果手机'), timeoutMs, taskName);
+    return buildBackupSuccessResult(null, backupParsed, '主源失败', '苹果手机价格更新', (error as Error).message);
+  }
+
+  const backupReason = getBackupSourceReason(config, parsed);
+  if (!backupReason) {
+    return buildTaskResult(parsed, '苹果手机价格更新完成');
+  }
+
+  try {
+    const backupParsed = await runBackupPriceUpdate(config, String(config.category || '苹果手机'), timeoutMs, taskName);
+    return buildBackupSuccessResult(parsed, backupParsed, backupReason, parsed.message || '苹果手机价格更新完成');
+  } catch (error) {
+    return buildPrimaryWithBackupFailureResult(
+      parsed,
+      backupReason,
+      parsed.message || '苹果手机价格更新完成',
+      (error as Error).message
+    );
+  }
 }
 
 async function runVideoGameMachinePriceUpdate(config: any, timeoutMs: number, taskName: string): Promise<BusinessTaskRunResult> {
@@ -424,16 +570,36 @@ async function runVideoGameMachinePriceUpdate(config: any, timeoutMs: number, ta
   ];
   if (config.dry_run) args.push('--dry-run');
 
-  const parsed = await runPythonJsonScript(config, 'video_game_machine.py', args, '游戏机价格更新失败', timeoutMs, taskName);
+  let parsed: any;
+  try {
+    parsed = await runPythonJsonScript(config, 'video_game_machine.py', args, '游戏机价格更新失败', timeoutMs, taskName);
+  } catch (error) {
+    if (config.use_backup_source === false || config.backup_on_failure === false) throw error;
+    const backupParsed = await runBackupPriceUpdate(config, String(config.category || '游戏机'), timeoutMs, taskName);
+    return buildBackupSuccessResult(null, backupParsed, '主源失败', '游戏机价格更新', (error as Error).message);
+  }
+
   const unmappedText = Array.isArray(parsed.unmapped_enabled_objects) && parsed.unmapped_enabled_objects.length > 0
     ? `；系统对象未映射 ${parsed.unmapped_enabled_objects.join('、')}`
     : '';
 
-  return {
-    message: `${parsed.message || '游戏机价格更新完成'}${unmappedText}`,
-    data: parsed,
-    status: getTaskCompletionStatus(parsed)
-  };
+  const primaryMessage = `${parsed.message || '游戏机价格更新完成'}${unmappedText}`;
+  const backupReason = getBackupSourceReason(config, parsed);
+  if (!backupReason) {
+    return buildTaskResult(parsed, '游戏机价格更新完成', unmappedText);
+  }
+
+  try {
+    const backupParsed = await runBackupPriceUpdate(config, String(config.category || '游戏机'), timeoutMs, taskName);
+    return buildBackupSuccessResult(parsed, backupParsed, backupReason, primaryMessage);
+  } catch (error) {
+    return buildPrimaryWithBackupFailureResult(
+      parsed,
+      backupReason,
+      primaryMessage,
+      (error as Error).message
+    );
+  }
 }
 
 async function runPopMartPriceUpdate(config: any, timeoutMs: number, taskName: string): Promise<BusinessTaskRunResult> {
@@ -477,6 +643,9 @@ async function runBusinessTask(task: TaskRow, config: any, timeoutMs: number): P
   const taskName = task.name || task.task_key;
   if (task.task_type === 'commodity_metals_price_update' || task.task_key === 'commodity_metals_price_update') {
     return runCommodityMetalsPriceUpdate(config, timeoutMs, taskName);
+  }
+  if (task.task_type === 'precious_metal_market_update' || task.task_key === 'precious_metal_market_update') {
+    return runPreciousMetalMarketUpdate(config, timeoutMs, taskName);
   }
   if (task.task_type === 'iphone_price_update' || task.task_key === 'iphone_price_update') {
     return runIphonePriceUpdate(config, timeoutMs, taskName);

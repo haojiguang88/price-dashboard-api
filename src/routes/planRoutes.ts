@@ -38,6 +38,12 @@ interface PlanBatch {
   note: string;
 }
 
+interface PlanExecutionEventInput {
+  reason_code?: string;
+  reason_text?: string;
+  note?: string;
+}
+
 const validStatuses = ['pending', 'in_progress', 'completed', 'cancelled'];
 
 const planConfigs: PlanConfig[] = [
@@ -161,6 +167,63 @@ const parseStoredBatches = (plan: any): PlanBatch[] => {
 
   const fallback = normalizeBatches([], plan?.target_price, plan?.plan_quantity, plan?.status);
   return fallback.batches;
+};
+
+const normalizeStatusEventInput = (value: unknown): string => String(value ?? '').trim();
+
+const getPlanExecutionEvents = async (db: any, kind: PlanKind, planId: string | number) => {
+  const rows = await db.all(
+    `SELECT id, plan_type, plan_id, status_from, status_to, reason_code, reason_text, note, created_at
+     FROM plan_execution_events
+     WHERE plan_type = ? AND plan_id = ?
+     ORDER BY created_at DESC, id DESC`,
+    [kind, planId]
+  );
+
+  return rows.map((row: any) => ({
+    id: String(row.id),
+    plan_type: row.plan_type,
+    plan_id: String(row.plan_id),
+    status_from: row.status_from || '',
+    status_to: row.status_to,
+    reason_code: row.reason_code || '',
+    reason_text: row.reason_text || '',
+    note: row.note || '',
+    created_at: row.created_at
+  }));
+};
+
+const insertPlanExecutionEvent = async (
+  db: any,
+  kind: PlanKind,
+  planId: string | number,
+  statusFrom: string,
+  statusTo: string,
+  input: PlanExecutionEventInput,
+  createdAt: string
+) => {
+  const reasonCode = normalizeStatusEventInput(input.reason_code);
+  const reasonText = normalizeStatusEventInput(input.reason_text);
+  const note = normalizeStatusEventInput(input.note);
+
+  const result = await db.run(
+    `INSERT INTO plan_execution_events
+       (plan_type, plan_id, status_from, status_to, reason_code, reason_text, note, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [kind, planId, statusFrom || '', statusTo, reasonCode, reasonText, note, createdAt]
+  );
+
+  return {
+    id: String(result.lastID),
+    plan_type: kind,
+    plan_id: String(planId),
+    status_from: statusFrom || '',
+    status_to: statusTo,
+    reason_code: reasonCode,
+    reason_text: reasonText,
+    note,
+    created_at: createdAt
+  };
 };
 
 const serializePlan = (plan: any, kind: PlanKind) => {
@@ -518,7 +581,13 @@ const registerPlanRoutes = (config: PlanConfig) => {
         return res.status(404).json({ success: false, message: `${config.label}不存在` });
       }
 
-      res.json({ success: true, data: serializePlan(plan, config.kind) });
+      res.json({
+        success: true,
+        data: {
+          ...serializePlan(plan, config.kind),
+          execution_events: await getPlanExecutionEvents(db, config.kind, id)
+        }
+      });
     } catch (error) {
       console.error(`Error fetching ${config.endpoint} details:`, error);
       res.status(500).json({ success: false, message: `获取${config.label}详情失败` });
@@ -529,7 +598,7 @@ const registerPlanRoutes = (config: PlanConfig) => {
     try {
       const db = await getDb();
       const { id } = req.params;
-      const { status } = req.body;
+      const { status, reason_code, reason_text, note } = req.body;
 
       if (!validStatuses.includes(status)) {
         return res.status(400).json({ success: false, message: '无效的状态值' });
@@ -540,6 +609,7 @@ const registerPlanRoutes = (config: PlanConfig) => {
         return res.status(404).json({ success: false, message: `${config.label}不存在` });
       }
 
+      const currentStatus = currentPlan.status || 'pending';
       const currentBatches = parseStoredBatches(currentPlan);
       const nextBatches = setBatchCompletionForStatus(currentBatches, status);
       const summary = summarizeBatches(nextBatches);
@@ -558,6 +628,16 @@ const registerPlanRoutes = (config: PlanConfig) => {
         ]
       );
 
+      const executionEvent = await insertPlanExecutionEvent(
+        db,
+        config.kind,
+        id,
+        currentStatus,
+        status,
+        { reason_code, reason_text, note },
+        updatedAt
+      );
+
       res.json({
         success: true,
         data: {
@@ -566,6 +646,7 @@ const registerPlanRoutes = (config: PlanConfig) => {
           completed_quantity: summary.completed_quantity,
           remaining_quantity: summary.remaining_quantity,
           progress_percent: summary.progress_percent,
+          execution_event: executionEvent,
           updated_at: updatedAt
         }
       });

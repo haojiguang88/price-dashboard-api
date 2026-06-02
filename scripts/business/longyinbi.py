@@ -23,6 +23,7 @@ DEFAULT_GOODS_ID = "7"
 DEFAULT_CAT_ID = "1369"
 DEFAULT_PRICE_OFFSET = 100
 DEFAULT_EXTERNAL_KEY = f"{DEFAULT_GOODS_ID}|{DEFAULT_CAT_ID}|2025龙银币裸币|信泰+100"
+MAX_PRICE_RECORD_NOTES = 5
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DB_PATH = os.environ.get(
     "BUSINESS_DB_PATH",
@@ -68,6 +69,46 @@ def to_float(value, fallback=0):
 def normalize_output_price(value):
     price = round(float(value), 2)
     return round(price) if price.is_integer() else price
+
+
+def build_price_offset_note(source_price, offset):
+    return f"裸币价 {normalize_output_price(source_price)}；信泰+{normalize_output_price(offset)}"
+
+
+def select_price_note_indexes(records, max_notes=MAX_PRICE_RECORD_NOTES):
+    if len(records) <= max_notes:
+        return set(range(len(records)))
+
+    ordered = sorted(
+        enumerate(records),
+        key=lambda item: (normalize_text(item[1].get("price_date")), item[0]),
+    )
+    selected = {
+        ordered[0][0],
+        ordered[-1][0],
+        max(ordered, key=lambda item: float(item[1]["price"]))[0],
+        min(ordered, key=lambda item: float(item[1]["price"]))[0],
+    }
+
+    biggest_move = None
+    for previous, current in zip(ordered, ordered[1:]):
+        previous_price = float(previous[1]["price"])
+        current_price = float(current[1]["price"])
+        if previous_price <= 0:
+            continue
+        move_score = abs(current_price - previous_price) / previous_price
+        if biggest_move is None or move_score > biggest_move[0]:
+            biggest_move = (move_score, current[0])
+    if biggest_move:
+        selected.add(biggest_move[1])
+
+    if len(selected) < max_notes:
+        slots = max_notes - len(selected)
+        for slot in range(1, slots + 1):
+            index = round((len(ordered) - 1) * slot / (slots + 1))
+            selected.add(ordered[index][0])
+
+    return set(sorted(selected)[:max_notes])
 
 
 def parse_external_key(external_key):
@@ -121,8 +162,15 @@ def apply_price_offset(records, target):
             "source_price": normalize_output_price(source_price),
             "price": adjusted_price,
             "source": target.get("source_name") or SOURCE_NAME,
-            "note": f"源头裸币价 {normalize_output_price(source_price)}；信泰评级参考价=裸币+{normalize_output_price(offset)}",
+            "note": "",
         })
+
+    note_indexes = select_price_note_indexes(adjusted_records)
+    for index in note_indexes:
+        adjusted_records[index]["note"] = build_price_offset_note(
+            adjusted_records[index]["source_price"],
+            offset,
+        )
     return adjusted_records
 
 

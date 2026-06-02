@@ -626,6 +626,168 @@ const buildPriceAnomalyWarnings = async (
   return warnings;
 };
 
+const averageNumber = (values: Array<number | null | undefined>) => {
+  const validValues = values.filter((value): value is number => Number.isFinite(Number(value)));
+  if (validValues.length === 0) return null;
+  return validValues.reduce((sum, value) => sum + value, 0) / validValues.length;
+};
+
+const ratio = (count: number, total: number) => (total > 0 ? count / total : 0);
+
+const buildPriceAnalysisAssistant = (seriesStats: SeriesStats[], jumps: JumpInsight[], latestDate: string) => {
+  const activeSeries = seriesStats.filter(item => item.days_since_latest <= 7);
+  const staleSeries = seriesStats.filter(item => item.days_since_latest >= 14);
+  const activeMovedSeries = activeSeries.filter(item => item.change_percent !== null);
+  const activeUp = activeMovedSeries.filter(item => Number(item.change_percent || 0) > 0);
+  const activeDown = activeMovedSeries.filter(item => Number(item.change_percent || 0) < 0);
+  const activeFlat = activeMovedSeries.filter(item => Number(item.change_percent || 0) === 0);
+  const activeAvgChange = averageNumber(activeMovedSeries.map(item => item.change_percent));
+  const activeRatio = ratio(activeSeries.length, seriesStats.length);
+  const upRatio = ratio(activeUp.length, activeMovedSeries.length);
+  const downRatio = ratio(activeDown.length, activeMovedSeries.length);
+  const staleRatio = ratio(staleSeries.length, seriesStats.length);
+  const strongJumpCount = jumps.filter(item => Math.abs(item.change_percent) >= 20 || Math.abs(item.change_amount) >= 1000).length;
+  const bigDrawdownCount = activeSeries.filter(item => item.drawdown_percent <= -30).length;
+  const recordLowCount = activeSeries.filter(item => item.historical_low_break_percent !== null).length;
+  const recordHighCount = activeSeries.filter(item => item.historical_high_break_percent !== null).length;
+
+  const tags: string[] = [];
+  if (activeRatio < 0.35) tags.push("行情更新偏少");
+  if (staleRatio >= 0.35) tags.push("多标的价格偏旧");
+  if (downRatio >= 0.45 && Number(activeAvgChange || 0) < -1) tags.push("近期偏弱");
+  if (upRatio >= 0.45 && Number(activeAvgChange || 0) > 1) tags.push("近期偏强");
+  if (upRatio >= 0.25 && downRatio >= 0.25) tags.push("品类分化");
+  if (strongJumpCount >= 5) tags.push("跳变较多");
+  if (bigDrawdownCount >= 5) tags.push("高位回撤较多");
+  if (recordLowCount > 0) tags.push("有标的破新低");
+  if (recordHighCount > 0) tags.push("有标的破新高");
+
+  let marketGate = "中性观察";
+  if (activeRatio < 0.25 || staleRatio >= 0.5) {
+    marketGate = "数据不新鲜，先补记录";
+  } else if (strongJumpCount >= 8 && upRatio >= 0.25 && downRatio >= 0.25) {
+    marketGate = "剧烈分化，先拆品类";
+  } else if (downRatio >= 0.5 && Number(activeAvgChange || 0) < -2) {
+    marketGate = "偏弱，优先看错杀和承接";
+  } else if (upRatio >= 0.5 && Number(activeAvgChange || 0) > 2) {
+    marketGate = "偏强，警惕追高";
+  } else if (upRatio >= 0.25 && downRatio >= 0.25) {
+    marketGate = "分化，按品类单独判断";
+  }
+
+  const evidence = [
+    `最新价格日期 ${latestDate || "--"}，活跃序列 ${activeSeries.length}/${seriesStats.length}`,
+    `近期上涨 ${activeUp.length}、下跌 ${activeDown.length}、持平 ${activeFlat.length}`,
+    activeAvgChange !== null ? `活跃序列平均最近变动 ${roundNumber(activeAvgChange)}%` : "",
+    staleSeries.length > 0 ? `超过 14 天未更新 ${staleSeries.length} 个序列` : "",
+    bigDrawdownCount > 0 ? `高位回撤超过 30% 的活跃序列 ${bigDrawdownCount} 个` : "",
+    strongJumpCount > 0 ? `明显跳变 ${strongJumpCount} 段，需要区分真实行情和数据错误` : ""
+  ].filter(Boolean);
+
+  const questions = [
+    activeRatio < 0.35 ? "先确认没更新的品类是确实没行情/还没录，还是任务或数据源断了。" : "",
+    downRatio >= 0.45 ? "下跌品类里哪些是错杀，哪些是真弱，要看承接和后续供给。" : "",
+    upRatio >= 0.45 ? "上涨品类里哪些是真买盘，哪些可能是拉高出货或短期炒作。" : "",
+    strongJumpCount > 0 ? "跳变大的记录先看数据质量，再看是否属于首发脉冲、补货砸盘或人为拉盘。" : "",
+    bigDrawdownCount > 0 ? "高位回撤的品种要分清回撤修复机会和趋势失效。" : ""
+  ].filter(Boolean);
+
+  const categoryNames = Array.from(new Set(seriesStats.map(item => item.category_name))).filter(Boolean);
+  const categoryAnalysis = categoryNames.map(category => {
+    const categorySeries = seriesStats.filter(item => item.category_name === category);
+    const active = categorySeries.filter(item => item.days_since_latest <= 7);
+    const stale = categorySeries.filter(item => item.days_since_latest >= 14);
+    const moved = active.filter(item => item.change_percent !== null);
+    const latestUp = moved.filter(item => Number(item.change_percent || 0) > 0);
+    const latestDown = moved.filter(item => Number(item.change_percent || 0) < 0);
+    const latestFlat = moved.filter(item => Number(item.change_percent || 0) === 0);
+    const periodUp = active.filter(item => Number(item.period_change_percent || 0) >= 10);
+    const periodDown = active.filter(item => Number(item.period_change_percent || 0) <= -10);
+    const drawdowns = active.filter(item => item.drawdown_percent <= -30);
+    const lows = active.filter(item => item.historical_low_break_percent !== null);
+    const highs = active.filter(item => item.historical_high_break_percent !== null);
+    const categoryJumps = jumps.filter(item => item.category_name === category && (Math.abs(item.change_percent) >= 20 || Math.abs(item.change_amount) >= 1000));
+    const avgLatestChange = averageNumber(moved.map(item => item.change_percent));
+    const categoryUpRatio = ratio(latestUp.length, moved.length);
+    const categoryDownRatio = ratio(latestDown.length, moved.length);
+    const styleTags: string[] = [];
+
+    if (ratio(stale.length, categorySeries.length) >= 0.4) styleTags.push("数据偏旧");
+    if (categoryUpRatio >= 0.5 && Number(avgLatestChange || 0) > 1) styleTags.push("近期走强");
+    if (categoryDownRatio >= 0.5 && Number(avgLatestChange || 0) < -1) styleTags.push("近期走弱");
+    if (categoryUpRatio >= 0.25 && categoryDownRatio >= 0.25) styleTags.push("内部明显分化");
+    if (periodUp.length > 0) styleTags.push("近30日有拉升");
+    if (periodDown.length > 0) styleTags.push("近30日有回落");
+    if (drawdowns.length > 0) styleTags.push("高位回撤");
+    if (categoryJumps.length > 0) styleTags.push("跳变/脉冲");
+    if (highs.length > 0) styleTags.push("有历史新高");
+    if (lows.length > 0) styleTags.push("有历史新低");
+
+    let environment = "中性观察";
+    if (ratio(stale.length, categorySeries.length) >= 0.5) {
+      environment = "数据偏旧";
+    } else if (categoryJumps.length >= 3) {
+      environment = "剧烈波动";
+    } else if (categoryDownRatio >= 0.5 && Number(avgLatestChange || 0) < -1) {
+      environment = "偏弱";
+    } else if (categoryUpRatio >= 0.5 && Number(avgLatestChange || 0) > 1) {
+      environment = "偏强";
+    } else if (categoryUpRatio >= 0.25 && categoryDownRatio >= 0.25) {
+      environment = "分化";
+    }
+
+    const riskPrompts = [
+      styleTags.includes("数据偏旧") ? "先确认价格没更新是市场无报价/还没录，还是任务/数据源问题。" : "",
+      styleTags.includes("跳变/脉冲") ? "跳变品种先排除录错，再判断是否首发脉冲、补货砸盘或资金炒作。" : "",
+      styleTags.includes("高位回撤") ? "高位回撤品种不要只看便宜，要看承接是否还在。" : "",
+      styleTags.includes("近期走强") ? "走强时避免追高，确认真实成交和可拿货数量。" : "",
+      styleTags.includes("近期走弱") ? "走弱时先区分错杀和趋势失效。" : ""
+    ].filter(Boolean);
+
+    const nextQuestions = [
+      "这个品类现在是快进快出、等抄底，还是只观察？",
+      category === "纪念币" ? "这次是新品首发，还是老品二次进场？银价和发行价锚有没有变化？" : "",
+      category === "纪念钞" ? "龙钞散张是否接近你认可的安全边际，币商成本线有没有新信息？" : "",
+      category === "泡泡玛特" ? "上涨/下跌来自补货、福袋砸盘、IP热度，还是弱市承接不足？" : "",
+      category === "贵金属" ? "当前是牛市、熊市、牛转熊，还是熊转牛？连续暴涨要不要先看出货风险？" : "",
+      riskPrompts.length > 0 ? "这些风险点里哪些已经有线下成交或档口反馈可以验证？" : ""
+    ].filter(Boolean);
+
+    return {
+      category,
+      environment,
+      style_tags: styleTags.length > 0 ? styleTags : ["样本平稳"],
+      series_count: categorySeries.length,
+      active_series_count: active.length,
+      stale_series_count: stale.length,
+      latest_up: latestUp.length,
+      latest_down: latestDown.length,
+      latest_flat: latestFlat.length,
+      avg_latest_change_percent: avgLatestChange === null ? null : roundNumber(avgLatestChange),
+      big_drawdown_count: drawdowns.length,
+      jump_count: categoryJumps.length,
+      evidence: [
+        `活跃 ${active.length}/${categorySeries.length} 个序列`,
+        `最近上涨 ${latestUp.length}、下跌 ${latestDown.length}、持平 ${latestFlat.length}`,
+        avgLatestChange !== null ? `平均最近变动 ${roundNumber(avgLatestChange)}%` : "",
+        drawdowns.length > 0 ? `高位回撤超过 30% 的序列 ${drawdowns.length} 个` : "",
+        categoryJumps.length > 0 ? `明显跳变 ${categoryJumps.length} 段` : ""
+      ].filter(Boolean),
+      risk_prompts: riskPrompts,
+      next_questions: nextQuestions
+    };
+  }).sort((a, b) => b.series_count - a.series_count);
+
+  return {
+    market_gate: marketGate,
+    latest_date: latestDate || null,
+    tags: tags.length > 0 ? tags : ["暂无明显偏向"],
+    evidence,
+    questions: questions.length > 0 ? questions : ["当前价格层面没有明显总闸信号，按品类画像和具体对象继续拆。"],
+    category_analysis: categoryAnalysis.slice(0, 8)
+  };
+};
+
 const buildPriceInsights = (records: PriceRecordRow[]) => {
   if (records.length === 0) {
     return {
@@ -649,7 +811,8 @@ const buildPriceInsights = (records: PriceRecordRow[]) => {
       record_lows: [],
       stale_targets: [],
       suspected_anomalies: [],
-      recent_dates: []
+      recent_dates: [],
+      analysis_assistant: buildPriceAnalysisAssistant([], [], "")
     };
   }
 
@@ -843,7 +1006,8 @@ const buildPriceInsights = (records: PriceRecordRow[]) => {
     recent_dates: [...dateCounts.entries()]
       .sort((a, b) => toDateValue(b[0]) - toDateValue(a[0]))
       .slice(0, 12)
-      .map(([date, count]) => ({ date, count }))
+      .map(([date, count]) => ({ date, count })),
+    analysis_assistant: buildPriceAnalysisAssistant(seriesStats, jumps, latestDate)
   };
 };
 

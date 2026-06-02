@@ -47,9 +47,11 @@ const initDatabase = async (db: Database) => {
 	  await db.exec("CREATE TABLE IF NOT EXISTS categories (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)");
   await db.exec("CREATE TABLE IF NOT EXISTS objects (id INTEGER PRIMARY KEY AUTOINCREMENT, category_id INTEGER NOT NULL, name TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE CASCADE, UNIQUE(category_id, name))");
   await db.exec("CREATE TABLE IF NOT EXISTS variants (id INTEGER PRIMARY KEY AUTOINCREMENT, object_id INTEGER NOT NULL, name TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (object_id) REFERENCES objects(id) ON DELETE CASCADE, UNIQUE(object_id, name))");
-  await db.exec("CREATE TABLE IF NOT EXISTS category_profiles (id INTEGER PRIMARY KEY AUTOINCREMENT, category_id INTEGER, category_name TEXT NOT NULL, business_style TEXT, operation_scene TEXT, supply_mode TEXT, sales_mode TEXT, price_pattern TEXT, risk_points TEXT, operating_discipline TEXT, data_caliber TEXT, experience_notes TEXT, decision_notes TEXT, extra_json TEXT DEFAULT '{}', status TEXT NOT NULL DEFAULT 'active', note TEXT, is_deleted INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE SET NULL)");
+  await db.exec("CREATE TABLE IF NOT EXISTS category_profiles (id INTEGER PRIMARY KEY AUTOINCREMENT, category_id INTEGER, category_name TEXT NOT NULL, object_name TEXT, variant_name TEXT, business_style TEXT, operation_scene TEXT, supply_mode TEXT, sales_mode TEXT, price_pattern TEXT, risk_points TEXT, operating_discipline TEXT, data_caliber TEXT, experience_notes TEXT, decision_notes TEXT, extra_json TEXT DEFAULT '{}', status TEXT NOT NULL DEFAULT 'active', note TEXT, is_deleted INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE SET NULL)");
+  await db.exec("CREATE TABLE IF NOT EXISTS lucky_number_records (id INTEGER PRIMARY KEY AUTOINCREMENT, product_name TEXT NOT NULL, number_code TEXT NOT NULL, year TEXT NOT NULL DEFAULT '2025年', raw_type TEXT NOT NULL DEFAULT '', source_raw TEXT, note TEXT, is_deleted INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)");
   await db.exec("CREATE TABLE IF NOT EXISTS buying_plans (id INTEGER PRIMARY KEY AUTOINCREMENT, plan_name TEXT NOT NULL, category_name TEXT NOT NULL, object_name TEXT NOT NULL, variant_name TEXT, target_price REAL NOT NULL, plan_quantity INTEGER NOT NULL, total_amount REAL NOT NULL, note TEXT, track TEXT, type TEXT DEFAULT 'manual', market_type_preset TEXT DEFAULT 'standard', status TEXT NOT NULL DEFAULT 'pending', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)");
   await db.exec("CREATE TABLE IF NOT EXISTS selling_plans (id INTEGER PRIMARY KEY AUTOINCREMENT, plan_name TEXT NOT NULL, category_name TEXT NOT NULL, object_name TEXT NOT NULL, variant_name TEXT, target_price REAL NOT NULL, plan_quantity INTEGER NOT NULL, total_amount REAL NOT NULL, note TEXT, track TEXT, type TEXT DEFAULT 'manual', market_type_preset TEXT DEFAULT 'standard', status TEXT NOT NULL DEFAULT 'pending', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)");
+  await db.exec("CREATE TABLE IF NOT EXISTS plan_execution_events (id INTEGER PRIMARY KEY AUTOINCREMENT, plan_type TEXT NOT NULL, plan_id INTEGER NOT NULL, status_from TEXT, status_to TEXT NOT NULL, reason_code TEXT, reason_text TEXT, note TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)");
   await ensureColumn("categories", "is_archived", "INTEGER NOT NULL DEFAULT 0");
   await ensureColumn("categories", "archived_at", "TEXT");
   await ensureColumn("objects", "is_archived", "INTEGER NOT NULL DEFAULT 0");
@@ -57,6 +59,8 @@ const initDatabase = async (db: Database) => {
   await ensureColumn("variants", "is_archived", "INTEGER NOT NULL DEFAULT 0");
   await ensureColumn("variants", "archived_at", "TEXT");
   await ensureColumn("variants", "note", "TEXT");
+  await ensureColumn("category_profiles", "object_name", "TEXT");
+  await ensureColumn("category_profiles", "variant_name", "TEXT");
   await ensureColumn("buying_plans", "batches", "TEXT");
   await ensureColumn("selling_plans", "batches", "TEXT");
   await ensureColumn("buying_plans", "annual_plan_item_id", "INTEGER");
@@ -65,8 +69,13 @@ const initDatabase = async (db: Database) => {
   await db.exec("CREATE INDEX IF NOT EXISTS idx_objects_archive ON objects(is_archived, category_id, name)");
   await db.exec("CREATE INDEX IF NOT EXISTS idx_variants_archive ON variants(is_archived, object_id, name)");
 	  await db.exec("CREATE INDEX IF NOT EXISTS idx_category_profiles_category ON category_profiles(category_id, category_name, status, is_deleted)");
+	  await db.exec("CREATE INDEX IF NOT EXISTS idx_category_profiles_object ON category_profiles(category_name, object_name, variant_name, status, is_deleted)");
+	  await db.exec("CREATE INDEX IF NOT EXISTS idx_lucky_number_records_lookup ON lucky_number_records(product_name, year, is_deleted, number_code)");
+	  await db.exec("CREATE INDEX IF NOT EXISTS idx_lucky_number_records_updated ON lucky_number_records(is_deleted, updated_at DESC, id DESC)");
+	  await db.exec("CREATE UNIQUE INDEX IF NOT EXISTS ux_lucky_number_records_active ON lucky_number_records(product_name, number_code, year, raw_type) WHERE is_deleted = 0");
 	  await db.exec("CREATE INDEX IF NOT EXISTS idx_buying_plans_annual_plan_item ON buying_plans(annual_plan_item_id)");
 	  await db.exec("CREATE INDEX IF NOT EXISTS idx_selling_plans_annual_plan_item ON selling_plans(annual_plan_item_id)");
+	  await db.exec("CREATE INDEX IF NOT EXISTS idx_plan_execution_events_plan ON plan_execution_events(plan_type, plan_id, created_at DESC, id DESC)");
 	  await db.exec("CREATE INDEX IF NOT EXISTS idx_price_records_series_date ON price_records(category, object_name, variant, date, id)");
 	  await db.exec("CREATE INDEX IF NOT EXISTS idx_price_quality_alert_reviews_status ON price_quality_alert_reviews(status, updated_at DESC)");
 
@@ -121,6 +130,10 @@ const initDatabase = async (db: Database) => {
   await db.exec("CREATE INDEX IF NOT EXISTS idx_speculation_cycle_records_pattern ON speculation_cycle_records(cycle_pattern, cycle_stage, category_name)");
   await db.exec("CREATE INDEX IF NOT EXISTS idx_speculation_cycle_events_cycle_time ON speculation_cycle_events(cycle_id, record_time)");
   }
+
+  await db.exec("CREATE TABLE IF NOT EXISTS market_anchor_daily_prices (id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT NOT NULL, name TEXT NOT NULL, market TEXT, asset_type TEXT NOT NULL DEFAULT 'precious_metal_anchor', trade_date TEXT NOT NULL, open REAL, high REAL, low REAL, close REAL, volume REAL, amount REAL, source TEXT NOT NULL, source_label TEXT, raw_json TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(symbol, trade_date, source))");
+  await db.exec("CREATE INDEX IF NOT EXISTS idx_market_anchor_daily_symbol_date ON market_anchor_daily_prices(symbol, source, trade_date DESC)");
+  await db.exec("CREATE INDEX IF NOT EXISTS idx_market_anchor_daily_asset_date ON market_anchor_daily_prices(asset_type, trade_date DESC)");
 
   await db.exec("CREATE TABLE IF NOT EXISTS analysis_annotations (id INTEGER PRIMARY KEY AUTOINCREMENT, module TEXT NOT NULL, entity_type TEXT NOT NULL, entity_key TEXT NOT NULL, annotation_key TEXT NOT NULL, annotation_value TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(module, entity_type, entity_key, annotation_key))");
   await db.exec("CREATE INDEX IF NOT EXISTS idx_analysis_annotations_scope ON analysis_annotations(module, entity_type, annotation_key)");

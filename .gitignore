@@ -1,5 +1,8 @@
 node_modules
 dist
+.venv
+.playwright-cli
+deploy_artifacts
 .env
 .env.local
 .env.development
@@ -20,4 +23,5 @@ data/*.sqlite3
 data/*.db-journal
 data/*.db-wal
 data/*.db-shm
+data/backups
 *.log

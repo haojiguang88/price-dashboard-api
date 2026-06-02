@@ -204,9 +204,13 @@ const summarizeTaskRunPayload = (payload: any) => {
   const mappingGapCount = countArray(payload?.unmapped_enabled_objects)
     + countArray(payload?.missing_source_objects)
     + countArray(payload?.skipped_symbols);
+  const sourceErrorCount = countArray(payload?.source_errors)
+    + countArray(payload?.failed_symbols);
 
-  let dataStatus: "updated" | "no_change" | "no_source_data" | "mapping_gap" | "unknown" = "unknown";
-  if (inserted + updated > 0) {
+  let dataStatus: "updated" | "no_change" | "no_source_data" | "mapping_gap" | "source_error" | "unknown" = "unknown";
+  if (sourceErrorCount > 0) {
+    dataStatus = "source_error";
+  } else if (inserted + updated > 0) {
     dataStatus = "updated";
   } else if (mappingGapCount > 0) {
     dataStatus = "mapping_gap";
@@ -224,6 +228,7 @@ const summarizeTaskRunPayload = (payload: any) => {
     matched_count: matchedCount,
     filtered_count: filteredCount,
     mapping_gap_count: mappingGapCount,
+    source_error_count: sourceErrorCount,
     data_status: dataStatus
   };
 };
@@ -257,6 +262,9 @@ const getHealthStatus = (task: any, latestRun: any, lastSuccessRun: any, now = n
   }
 
   const payloadSummary = summarizeTaskRunPayload(parseJson(latestRun.result_json));
+  if (payloadSummary.data_status === "source_error") {
+    return { status: "source_error", severity: "warning", reason: latestRun.message || "任务成功，但存在来源异常" };
+  }
   if (payloadSummary.data_status === "mapping_gap") {
     return { status: "mapping_gap", severity: "warning", reason: "任务成功，但存在映射缺口或来源缺失" };
   }

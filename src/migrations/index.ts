@@ -1425,6 +1425,8 @@ const migrations: Migration[] = [
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           category_id INTEGER,
           category_name TEXT NOT NULL,
+          object_name TEXT,
+          variant_name TEXT,
           business_style TEXT,
           operation_scene TEXT,
           supply_mode TEXT,
@@ -1446,6 +1448,9 @@ const migrations: Migration[] = [
 
         CREATE INDEX IF NOT EXISTS idx_category_profiles_category
           ON category_profiles(category_id, category_name, status, is_deleted);
+
+        CREATE INDEX IF NOT EXISTS idx_category_profiles_object
+          ON category_profiles(category_name, object_name, variant_name, status, is_deleted);
       `);
     }
   },
@@ -2140,6 +2145,778 @@ const migrations: Migration[] = [
         ]
       );
     }
+  },
+  {
+    id: '20260531_009_refresh_longchao_profile_historical_validation',
+    name: 'Refresh Longchao profile historical validation',
+    run: async (db: any) => {
+      if (!(await migrationTableExists(db, 'category_profiles'))) return;
+      if (!(await migrationTableExists(db, 'price_records'))) return;
+
+      const profile = await dbGet<any>(
+        db,
+        `SELECT id, extra_json
+         FROM category_profiles
+         WHERE category_name = ?
+           AND COALESCE(is_deleted, 0) = 0
+         ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END, id
+         LIMIT 1`,
+        ['纪念钞']
+      );
+      if (!profile) return;
+
+      const rows = await dbAll<any>(
+        db,
+        `SELECT
+           pr.variant,
+           COUNT(*) AS record_count,
+           MIN(pr.date) AS first_date,
+           MAX(pr.date) AS latest_date,
+           MIN(pr.price) AS min_price,
+           MAX(pr.price) AS max_price,
+           ROUND(AVG(pr.price), 2) AS avg_price,
+           (SELECT x.price
+            FROM price_records x
+            WHERE x.category = '纪念钞'
+              AND x.object_name = '龙钞'
+              AND x.variant = pr.variant
+            ORDER BY x.date ASC, x.id ASC
+            LIMIT 1) AS first_price,
+           (SELECT x.price
+            FROM price_records x
+            WHERE x.category = '纪念钞'
+              AND x.object_name = '龙钞'
+              AND x.variant = pr.variant
+            ORDER BY x.date DESC, x.id DESC
+            LIMIT 1) AS latest_price,
+           (SELECT x.date
+            FROM price_records x
+            WHERE x.category = '纪念钞'
+              AND x.object_name = '龙钞'
+              AND x.variant = pr.variant
+            ORDER BY x.price DESC, x.date ASC, x.id ASC
+            LIMIT 1) AS high_date,
+           (SELECT x.date
+            FROM price_records x
+            WHERE x.category = '纪念钞'
+              AND x.object_name = '龙钞'
+              AND x.variant = pr.variant
+            ORDER BY x.price ASC, x.date ASC, x.id ASC
+            LIMIT 1) AS low_date
+         FROM price_records pr
+         WHERE pr.category = '纪念钞'
+           AND pr.object_name = '龙钞'
+           AND pr.variant IN ('散张', '标10带4', '标10不带4')
+         GROUP BY pr.variant
+         ORDER BY CASE pr.variant
+           WHEN '散张' THEN 0
+           WHEN '标10带4' THEN 1
+           WHEN '标10不带4' THEN 2
+           ELSE 3
+         END`
+      );
+      if (rows.length === 0) return;
+
+      const toNumber = (value: unknown) => Number(value) || 0;
+      const formatPrice = (value: unknown) => {
+        const number = toNumber(value);
+        return Number.isInteger(number) ? String(number) : number.toFixed(2);
+      };
+      const drawdownPercent = (row: any) => {
+        const maxPrice = toNumber(row.max_price);
+        const latestPrice = toNumber(row.latest_price);
+        if (!maxPrice) return 0;
+        return Math.round(((maxPrice - latestPrice) / maxPrice) * 1000) / 10;
+      };
+      const gainPercent = (row: any) => {
+        const firstPrice = toNumber(row.first_price);
+        const maxPrice = toNumber(row.max_price);
+        if (!firstPrice) return 0;
+        return Math.round(((maxPrice - firstPrice) / firstPrice) * 1000) / 10;
+      };
+
+      const totalRecords = rows.reduce((sum: number, row: any) => sum + toNumber(row.record_count), 0);
+      const dates = rows.flatMap((row: any) => [row.first_date, row.latest_date]).filter(Boolean).sort();
+      const main = rows.find((row: any) => row.variant === '散张') || rows[0];
+      const standardWith4 = rows.find((row: any) => row.variant === '标10带4');
+      const standardNo4 = rows.find((row: any) => row.variant === '标10不带4');
+      const standardSupports = [standardWith4, standardNo4]
+        .filter(Boolean)
+        .map((row: any) => `${row.variant} 从高点 ${row.high_date} 的 ${formatPrice(row.max_price)} 回到 ${row.latest_date} 的 ${formatPrice(row.latest_price)}，回撤约 ${drawdownPercent(row)}%，说明标10更多用于辅助观察溢价和方向，不适合当主战场。`);
+
+      let extra: Record<string, any> = {};
+      try {
+        extra = JSON.parse(profile.extra_json || '{}') || {};
+      } catch {
+        extra = {};
+      }
+
+      extra.historical_validation = {
+        confidence: toNumber(main.record_count) >= 200 ? 'high' : 'medium',
+        confidence_label: toNumber(main.record_count) >= 200 ? '高' : '中',
+        coverage: {
+          record_count: totalRecords,
+          date_range: dates.length ? `${dates[0]} 至 ${dates[dates.length - 1]}` : undefined,
+          main_sources: ['爱藏龙钞'],
+          variants: rows.map((row: any) => ({
+            name: row.variant,
+            record_count: toNumber(row.record_count),
+            date_range: `${row.first_date} 至 ${row.latest_date}`,
+            first_price: toNumber(row.first_price),
+            high_price: toNumber(row.max_price),
+            high_date: row.high_date,
+            low_price: toNumber(row.min_price),
+            low_date: row.low_date,
+            latest_price: toNumber(row.latest_price),
+            drawdown_from_high_percent: drawdownPercent(row),
+            high_gain_from_first_percent: gainPercent(row)
+          }))
+        },
+        summary: `本地价格已经能支持龙钞画像的核心判断：散张从 ${main.first_date} 的 ${formatPrice(main.first_price)} 拉到 ${main.high_date} 的 ${formatPrice(main.max_price)}，再回到 ${main.latest_date} 的 ${formatPrice(main.latest_price)}，高点回撤约 ${drawdownPercent(main)}%。它有题材弹性，也会在弱市里长时间阴跌；实战主看散张，标10只做辅助，高溢价靓号不纳入执行。`,
+        supports: [
+          `散张共有 ${main.record_count} 条记录，覆盖 ${main.first_date} 至 ${main.latest_date}，数据密度足够做画像反证。`,
+          `散张从 ${formatPrice(main.first_price)} 到高点 ${formatPrice(main.max_price)} 的涨幅约 ${gainPercent(main)}%，支持“龙头、有题材、有弹性”的判断。`,
+          `散张最新 ${formatPrice(main.latest_price)} 较高点回撤约 ${drawdownPercent(main)}%，支持“弱市/其它赛道暴雷下会一路阴跌，不能急着重仓”的纪律。`,
+          ...standardSupports
+        ],
+        experience_only: [
+          '币商持仓成本、专业人士信号、主播观点、歇夏、真实消耗仍主要来自用户经验/观点记录；价格数据只能验证走势和弹性，不能直接证明承接。',
+          '高溢价整刀靓号/魅力刀波动极端，用户已明确不做，不能拿来推导散张建仓纪律。'
+        ],
+        data_quality: [
+          '散张记录最完整，应作为实战主线；标10带4/标10不带4记录从 2024-08 开始，点位少于散张，只能辅助观察方向和溢价收缩。',
+          '纪念钞价格是参考成交价，非股票式收盘价；同一日可能存在不同成交区间，执行前仍需人工确认真实盘口。'
+        ],
+        action_bias: {
+          primary_variant: '散张',
+          auxiliary_variants: ['标10带4', '标10不带4'],
+          excluded_variants: ['整刀靓号', '魅力刀', '其它高溢价靓号'],
+          default_decision: '底仓/观察，只有价格继续压出安全边际或专业信号确认后才考虑分批建仓'
+        },
+        last_analyzed_at: '2026-05-31'
+      };
+
+      await dbRun(
+        db,
+        `UPDATE category_profiles
+         SET extra_json = ?,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`,
+        [JSON.stringify(extra), profile.id]
+      );
+    }
+  },
+  {
+    id: '20260531_010_create_product_archives',
+    name: 'Create product archives',
+    run: async (db: any) => {
+      await dbExec(db, `
+        CREATE TABLE IF NOT EXISTS product_archives (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          category_id INTEGER NOT NULL,
+          category_name TEXT NOT NULL,
+          object_id INTEGER NOT NULL,
+          object_name TEXT NOT NULL,
+          variant_id INTEGER,
+          variant_name TEXT DEFAULT '',
+          archive_name TEXT NOT NULL,
+          position_level TEXT NOT NULL DEFAULT 'watch',
+          one_sentence_judgment TEXT NOT NULL,
+          raw_description TEXT,
+          issue_info TEXT,
+          theme_design TEXT,
+          trading_process TEXT,
+          risk_basis TEXT,
+          experience_note TEXT,
+          pending_questions TEXT,
+          confidence TEXT NOT NULL DEFAULT 'unknown',
+          status TEXT NOT NULL DEFAULT 'draft',
+          note TEXT,
+          is_deleted INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE RESTRICT,
+          FOREIGN KEY (object_id) REFERENCES objects(id) ON DELETE RESTRICT,
+          FOREIGN KEY (variant_id) REFERENCES variants(id) ON DELETE SET NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS product_archive_stages (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          archive_id INTEGER NOT NULL,
+          stage_name TEXT NOT NULL,
+          time_text TEXT,
+          stage_type TEXT,
+          price_start REAL,
+          price_high REAL,
+          price_low REAL,
+          price_end REAL,
+          stage_summary TEXT NOT NULL,
+          action_rule TEXT,
+          evidence_note TEXT,
+          confidence TEXT NOT NULL DEFAULT 'rough',
+          sort_order INTEGER NOT NULL DEFAULT 0,
+          note TEXT,
+          is_deleted INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (archive_id) REFERENCES product_archives(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_product_archives_master
+          ON product_archives(category_id, object_id, variant_id, status, is_deleted);
+
+        CREATE INDEX IF NOT EXISTS idx_product_archives_position
+          ON product_archives(position_level, status, updated_at DESC);
+
+        CREATE INDEX IF NOT EXISTS idx_product_archive_stages_archive
+          ON product_archive_stages(archive_id, is_deleted, sort_order, id);
+      `);
+    }
+  },
+  {
+    id: '20260531_011_seed_initial_product_archive_drafts',
+    name: 'Seed initial product archive drafts',
+    run: async (db: any) => {
+      if (!(await migrationTableExists(db, 'product_archives'))) return;
+      if (!(await migrationTableExists(db, 'product_archive_stages'))) return;
+
+      const findTarget = async (categoryName: string, objectName: string, variantName: string) => {
+        const category = await dbGet<any>(
+          db,
+          "SELECT id, name FROM categories WHERE name = ? AND COALESCE(is_archived, 0) = 0",
+          [categoryName]
+        );
+        const object = category
+          ? await dbGet<any>(
+            db,
+            "SELECT id, name FROM objects WHERE category_id = ? AND name = ? AND COALESCE(is_archived, 0) = 0",
+            [category.id, objectName]
+          )
+          : null;
+        const variant = object && variantName
+          ? await dbGet<any>(
+            db,
+            "SELECT id, name FROM variants WHERE object_id = ? AND name = ? AND COALESCE(is_archived, 0) = 0",
+            [object.id, variantName]
+          )
+          : null;
+        if (!category || !object || (variantName && !variant)) return null;
+        return { category, object, variant };
+      };
+
+      const seedArchive = async (input: {
+        categoryName: string;
+        objectName: string;
+        variantName: string;
+        positionLevel: string;
+        judgment: string;
+        rawDescription: string;
+        issueInfo: string;
+        themeDesign: string;
+        tradingProcess: string;
+        riskBasis: string;
+        experienceNote: string;
+        pendingQuestions: string;
+        stage?: {
+          name: string;
+          time: string;
+          type: string;
+          summary: string;
+          actionRule: string;
+          evidenceNote: string;
+        };
+      }) => {
+        const target = await findTarget(input.categoryName, input.objectName, input.variantName);
+        if (!target) return;
+        const existing = await dbGet<any>(
+          db,
+          `SELECT id FROM product_archives
+           WHERE category_id = ?
+             AND object_id = ?
+             AND COALESCE(variant_id, 0) = COALESCE(?, 0)
+             AND COALESCE(is_deleted, 0) = 0`,
+          [target.category.id, target.object.id, target.variant?.id || null]
+        );
+        if (existing) return;
+        const now = new Date().toISOString();
+        const result = await new Promise<any>((resolve, reject) => {
+          db.run(
+            `INSERT INTO product_archives
+              (category_id, category_name, object_id, object_name, variant_id, variant_name,
+               archive_name, position_level, one_sentence_judgment, raw_description,
+               issue_info, theme_design, trading_process, risk_basis, experience_note,
+               pending_questions, confidence, status, note, is_deleted, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'rough', 'draft', ?, 0, ?, ?)`,
+            [
+              target.category.id,
+              target.category.name,
+              target.object.id,
+              target.object.name,
+              target.variant?.id || null,
+              target.variant?.name || '',
+              [target.category.name, target.object.name, target.variant?.name].filter(Boolean).join(' / '),
+              input.positionLevel,
+              input.judgment,
+              input.rawDescription,
+              input.issueInfo,
+              input.themeDesign,
+              input.tradingProcess,
+              input.riskBasis,
+              input.experienceNote,
+              input.pendingQuestions,
+              '系统根据已有价格、原始价格、复盘和规则经验预生成草稿，后续需要用户补真实承接、发行量和模糊阶段细节。',
+              now,
+              now
+            ],
+            function (this: any, error: any) {
+              if (error) reject(error);
+              else resolve(this);
+            }
+          );
+        });
+        if (input.stage && result?.lastID) {
+          await dbRun(
+            db,
+            `INSERT INTO product_archive_stages
+              (archive_id, stage_name, time_text, stage_type, stage_summary, action_rule,
+               evidence_note, confidence, sort_order, note, is_deleted, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, 'rough', 1, '', 0, ?, ?)`,
+            [
+              result.lastID,
+              input.stage.name,
+              input.stage.time,
+              input.stage.type,
+              input.stage.summary,
+              input.stage.actionRule,
+              input.stage.evidenceNote,
+              now,
+              now
+            ]
+          );
+        }
+      };
+
+      await seedArchive({
+        categoryName: '纪念币',
+        objectName: '龙银币',
+        variantName: '2025年信泰评级',
+        positionLevel: 'main',
+        judgment: '2025 龙银币以信泰评级为实战口径，裸币源头价加 100 作为参考，后续重点看银价、题材、评级溢价和回落承接。',
+        rawDescription: '系统已有龙银币价格更新任务，源头为 2025 龙银币裸币，入库按信泰评级参考价=裸币+100。用户强调裸币有品相风险，实战不买裸币。',
+        issueInfo: '发行价、发行总数、首发数量仍需用户补充；现有系统主要已有价格记录和信泰+100口径。',
+        themeDesign: '龙题材，属于纪念币后续主力观察方向之一；具体设计、评级溢价和市场认可度还需用户补充。',
+        tradingProcess: '已接入历史价格；用户提到发行后快速上行、回落、后续又可能受银价/题材/评级驱动。',
+        riskBasis: '风险核心是裸币品相、银价下行、评级溢价收缩、高位追涨和承接不稳定。',
+        experienceNote: '先用信泰评级口径，不把裸币价直接当可执行买入价。',
+        pendingQuestions: '补发行总数、首发数量、首发热度、真实承接、关键阶段和币商成本线。',
+        stage: {
+          name: '首发后热度与回落再观察',
+          time: '2025年发行后至当前',
+          type: '首发脉冲 / 回落承接 / 银价驱动',
+          summary: '用户指出这类品种可能先火热、再砸下去、后续又起来；龙银币裸币是典型，需要阶段化记录，不能把热度当静态属性。',
+          actionRule: '不追高，优先等回落承接和银价环境确认；信泰评级口径按裸币+100参考。',
+          evidenceNote: '来源：用户口述、龙银币价格记录、longyinbi.py 信泰+100 入库口径。'
+        }
+      });
+
+      await seedArchive({
+        categoryName: '纪念钞',
+        objectName: '龙钞',
+        variantName: '散张',
+        positionLevel: 'watch',
+        judgment: '龙钞只看标品，实战主看散张，标10辅助，高溢价靓号不做；当前以底仓和观察为主。',
+        rawDescription: '龙钞是纪念钞核心标的，用户认为有龙头、题材、颜值、承接和真实消耗，但当前下跌受大环境和其它赛道暴雷影响。',
+        issueInfo: '生肖纪念钞面值 20；其它原始价/市场口径以价格记录为主。',
+        themeDesign: '龙题材，生肖纪念钞，文化共识和情绪溢价强。',
+        tradingProcess: '历史价格显示散张从 33 拉到 102，再回到 52 附近；有弹性，也会在弱市中长时间阴跌。',
+        riskBasis: '不要用整刀靓号/魅力刀推导散张纪律；执行前仍需确认真实成交和承接。',
+        experienceNote: '底仓/观察，只有价格继续压出安全边际或专业信号确认后才考虑分批建仓。',
+        pendingQuestions: '补币商成本线、专业人士信号、歇夏验证和真实消耗证据。',
+        stage: {
+          name: '强弹性后的弱市回落',
+          time: '2024-2026',
+          type: '常规趋势 / 弱市阴跌',
+          summary: '散张历史价格支持“有题材弹性，但弱市可长期阴跌”的判断。',
+          actionRule: '散张主看，标10辅助，靓号不做；只做分批建仓候选。',
+          evidenceNote: '来源：龙钞散张、标10带4、标10不带4价格记录和画像历史价格验证摘要。'
+        }
+      });
+
+      await seedArchive({
+        categoryName: '纪念币',
+        objectName: '工商卡',
+        variantName: '2025年',
+        positionLevel: 'watch',
+        judgment: '2025 工商卡属于多因素叠加黑马案例，适合沉淀为 A 仓博黑马参考，不应机械套用为常态。',
+        rawDescription: '系统已有 2025 工商龙复盘和原始价格历史；用户提到 530 成本后到 1800+ 卖出，是多因素叠加。',
+        issueInfo: '现有原始价格历史记录 530、730、1071 等多个锚点，发行价/二次发售口径不唯一。',
+        themeDesign: '卡类龙币，设计和同赛道重估对行情有影响。',
+        tradingProcess: '曾出现高收益阶段，但后续也有纪律问题和回吐风险。',
+        riskBasis: '规则经验指出发行价过高会削弱黑马潜力，同赛道后发定价会反向重估旧品。',
+        experienceNote: '可作为黑马案例，不直接当常态；重点复盘触发条件、仓位和退出纪律。',
+        pendingQuestions: '补当时真实首发数量、热度、成交体感、为什么能走出主升浪。',
+        stage: {
+          name: '多因素叠加黑马',
+          time: '2025年银价起飞阶段',
+          type: '资金炒作 / 银价驱动 / 题材扩散',
+          summary: '低成本、题材、银价和市场情绪共同推动，后续需要拆成可复用和不可复制两部分。',
+          actionRule: '只作为 A 仓博黑马研究样本，不作为重仓模板。',
+          evidenceNote: '来源：2025工商龙复盘、原始价格历史、同赛道参考价重估规则。'
+        }
+      });
+
+      await seedArchive({
+        categoryName: '纪念币',
+        objectName: '马年银币',
+        variantName: '150g大黑马',
+        positionLevel: 'watch',
+        judgment: '150g 马年纪念币是高规格稀缺品错过样本：期货阶段真实收货/成交从 4200-4300 快速走到 6000+，后续爱藏实际成交到 12000，适合训练 A 仓黑马识别。',
+        rawDescription: '这是 2026 丙午马年 150g 圆形银币/150g大黑马。用户确认开盘 4200-4300 是群里真实收货价和成交价，首发四五天左右仍处期货阶段；当时用户刚玩纪念币，不懂这个品类，精力在其它方向，6000+ 时觉得像忽悠接盘而没买。后续爱藏平台实际成交到 12000，用户帮别人卖过一枚现货 10000。',
+        issueInfo: '原始价格历史记录官方价 3985、8000枚；错过复盘里记录发行价 3855。两种口径都保留：官方/发行锚点约 3855-3985，市场开盘 4200-4300。具体日期记不清，按首发后四五天、第二次发行等模糊阶段记录。',
+        themeDesign: '马年生肖题材，150g 大规格，设计漂亮；兼具收藏、礼品和真实消耗需求。',
+        tradingProcess: '低开后快速起飞：首发后四五天仍是期货，4200-4300 成交/收货；6000+ 时用户未敢接；后续上到 10000-12000。第二次发行时曾从 10000 出头回踩到 8000+，回踩不深，之后又拉升；当前弱市回落。',
+        riskBasis: '高价稀缺品不能只因目标价夸张就判定为吹票。需要同时看发行量、设计题材、真实成交、收货价、平台成交、群内/一尘成交、直播间销售、收藏/礼品消耗和资金炒作。类似品更适合先进 A 仓候选，拆分证据后再决定是否参与。',
+        experienceNote: '这条是“不会看稀缺性 + 害怕高位接盘 + 精力不在主线”的错过案例。关键不是追高，而是把听起来像吹牛的目标价拆成事实证据：真实收货、成交平台、承接来源、阶段位置、是否有二次发行回踩。',
+        pendingQuestions: '后续可补：更精确的期货起飞日期、6000+ 时主要报价平台截图/群价、第二次发行时间、当前回落后的成交区间。',
+        stage: {
+          name: '期货低开后的主升浪错过',
+          time: '首发后四五天至第二次发行后（具体日期模糊）',
+          type: '期货首发脉冲 / 资金炒作 / 真实需求消耗 / 二次发行回踩',
+          summary: '首发期货阶段四五天内仍在 4200-4300 真实成交/收货，6000+ 时用户因刚入门纪念币且担心接盘放弃。后续爱藏实际成交到 12000，用户帮别人卖过 10000；第二次发行出现 10000+ 到 8000+ 的浅回踩后继续拉升，说明真实承接和资金炒作同时存在。',
+          actionRule: '未来遇到大规格、低发行量、设计好、真实收货持续上移的新品，不直接因目标价夸张否定；至少进入 A 仓候选，拆分真实成交、承接渠道、二次发行风险和回踩深度。',
+          evidenceNote: '来源：用户确认的150g马年纪念币错过经历、错过复盘、商品原始价格历史；公开发行信息仅作为规格/发行量锚点。'
+        }
+      });
+    }
+  },
+  {
+    id: '20260601_001_create_plan_execution_events',
+    name: 'Create plan execution events',
+    run: async (db: any) => {
+      await dbExec(db, `
+        CREATE TABLE IF NOT EXISTS plan_execution_events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          plan_type TEXT NOT NULL,
+          plan_id INTEGER NOT NULL,
+          status_from TEXT,
+          status_to TEXT NOT NULL,
+          reason_code TEXT,
+          reason_text TEXT,
+          note TEXT,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_plan_execution_events_plan
+          ON plan_execution_events(plan_type, plan_id, created_at DESC, id DESC);
+      `);
+    }
+  },
+  {
+    id: '20260601_002_create_lucky_number_records',
+    name: 'Create lucky number records',
+    run: async (db: any) => {
+      await dbExec(db, `
+        CREATE TABLE IF NOT EXISTS lucky_number_records (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          product_name TEXT NOT NULL,
+          number_code TEXT NOT NULL,
+          year TEXT NOT NULL DEFAULT '2025年',
+          raw_type TEXT NOT NULL DEFAULT '',
+          source_raw TEXT,
+          note TEXT,
+          is_deleted INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_lucky_number_records_lookup
+          ON lucky_number_records(product_name, year, is_deleted, number_code);
+
+        CREATE INDEX IF NOT EXISTS idx_lucky_number_records_updated
+          ON lucky_number_records(is_deleted, updated_at DESC, id DESC);
+
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_lucky_number_records_active
+          ON lucky_number_records(product_name, number_code, year, raw_type)
+          WHERE is_deleted = 0;
+      `);
+    }
+  },
+  {
+    id: '20260601_003_normalize_longchao_standard_10_references',
+    name: 'Normalize Longchao standard 10 references',
+    run: async (db: any) => {
+      const updateVariantName = async (tableName: string, columnName = 'variant_name') => {
+        if (!(await migrationTableExists(db, tableName))) return;
+        await dbRun(
+          db,
+          `UPDATE ${quoteMigrationIdentifier(tableName)}
+           SET ${quoteMigrationIdentifier(columnName)} = '标10不带4',
+               updated_at = CURRENT_TIMESTAMP
+           WHERE category_name = '纪念钞'
+             AND object_name = '龙钞'
+             AND ${quoteMigrationIdentifier(columnName)} = '标十无4'`
+        );
+        await dbRun(
+          db,
+          `UPDATE ${quoteMigrationIdentifier(tableName)}
+           SET ${quoteMigrationIdentifier(columnName)} = '标10带4',
+               updated_at = CURRENT_TIMESTAMP
+           WHERE category_name = '纪念钞'
+             AND object_name = '龙钞'
+             AND ${quoteMigrationIdentifier(columnName)} = '标十'`
+        );
+      };
+
+      if (await migrationTableExists(db, 'price_records')) {
+        await dbRun(
+          db,
+          `UPDATE price_records
+           SET variant = '标10不带4',
+               updated_at = CURRENT_TIMESTAMP
+           WHERE category = '纪念钞'
+             AND object_name = '龙钞'
+             AND variant = '标十无4'`
+        );
+        await dbRun(
+          db,
+          `UPDATE price_records
+           SET variant = '标10带4',
+               updated_at = CURRENT_TIMESTAMP
+           WHERE category = '纪念钞'
+             AND object_name = '龙钞'
+             AND variant = '标十'`
+        );
+      }
+
+      await updateVariantName('buying_plans');
+      await updateVariantName('selling_plans');
+      await updateVariantName('positions');
+      await updateVariantName('ended_positions');
+      await updateVariantName('sell_records');
+      await updateVariantName('risk_check_records');
+      await updateVariantName('risk_reviews');
+      await updateVariantName('speculation_cycle_records');
+      await updateVariantName('product_archives');
+      await updateVariantName('original_price_records');
+      await updateVariantName('source_mappings');
+
+      if (await migrationTableExists(db, 'follows')) {
+        const category = await dbGet<any>(
+          db,
+          "SELECT id FROM categories WHERE name = ? AND COALESCE(is_archived, 0) = 0",
+          ['纪念钞']
+        );
+        const object = category
+          ? await dbGet<any>(
+            db,
+            "SELECT id FROM objects WHERE category_id = ? AND name = ? AND COALESCE(is_archived, 0) = 0",
+            [category.id, '龙钞']
+          )
+          : null;
+        const standardWith4 = object
+          ? await dbGet<any>(
+            db,
+            "SELECT id, name FROM variants WHERE object_id = ? AND name = ? AND COALESCE(is_archived, 0) = 0",
+            [object.id, '标10带4']
+          )
+          : null;
+        const standardNo4 = object
+          ? await dbGet<any>(
+            db,
+            "SELECT id, name FROM variants WHERE object_id = ? AND name = ? AND COALESCE(is_archived, 0) = 0",
+            [object.id, '标10不带4']
+          )
+          : null;
+
+        if (category && object && standardNo4) {
+          await dbRun(
+            db,
+            `DELETE FROM follows
+             WHERE category_id = ?
+               AND object_id = ?
+               AND variant_name = '标十无4'
+               AND EXISTS (
+                 SELECT 1
+                 FROM follows newer
+                 WHERE newer.category_id = follows.category_id
+                   AND newer.object_id = follows.object_id
+                   AND newer.variant_id = ?
+                   AND newer.id <> follows.id
+               )`,
+            [category.id, object.id, standardNo4.id]
+          );
+          await dbRun(
+            db,
+            `UPDATE follows
+             SET variant_id = ?,
+                 variant_name = ?
+             WHERE category_id = ?
+               AND object_id = ?
+               AND variant_name = '标十无4'`,
+            [standardNo4.id, standardNo4.name, category.id, object.id]
+          );
+        }
+
+        if (category && object && standardWith4) {
+          await dbRun(
+            db,
+            `DELETE FROM follows
+             WHERE category_id = ?
+               AND object_id = ?
+               AND variant_name = '标十'
+               AND EXISTS (
+                 SELECT 1
+                 FROM follows newer
+                 WHERE newer.category_id = follows.category_id
+                   AND newer.object_id = follows.object_id
+                   AND newer.variant_id = ?
+                   AND newer.id <> follows.id
+               )`,
+            [category.id, object.id, standardWith4.id]
+          );
+          await dbRun(
+            db,
+            `UPDATE follows
+             SET variant_id = ?,
+                 variant_name = ?
+             WHERE category_id = ?
+               AND object_id = ?
+               AND variant_name = '标十'`,
+            [standardWith4.id, standardWith4.name, category.id, object.id]
+          );
+        }
+      }
+
+      if (await migrationTableExists(db, 'abnormal_monitor_reads')) {
+        await dbRun(
+          db,
+          `DELETE FROM abnormal_monitor_reads
+           WHERE category_name = '纪念钞'
+             AND object_name = '龙钞'
+             AND variant_name = '标十无4'
+             AND EXISTS (
+               SELECT 1
+               FROM abnormal_monitor_reads newer
+               WHERE newer.read_key = REPLACE(abnormal_monitor_reads.read_key, '|标十无4|', '|标10不带4|')
+             )`
+        );
+        await dbRun(
+          db,
+          `UPDATE abnormal_monitor_reads
+           SET variant_name = '标10不带4',
+               read_key = REPLACE(read_key, '|标十无4|', '|标10不带4|')
+           WHERE category_name = '纪念钞'
+             AND object_name = '龙钞'
+             AND variant_name = '标十无4'`
+        );
+        await dbRun(
+          db,
+          `DELETE FROM abnormal_monitor_reads
+           WHERE category_name = '纪念钞'
+             AND object_name = '龙钞'
+             AND variant_name = '标十'
+             AND EXISTS (
+               SELECT 1
+               FROM abnormal_monitor_reads newer
+               WHERE newer.read_key = REPLACE(abnormal_monitor_reads.read_key, '|标十|', '|标10带4|')
+             )`
+        );
+        await dbRun(
+          db,
+          `UPDATE abnormal_monitor_reads
+           SET variant_name = '标10带4',
+               read_key = REPLACE(read_key, '|标十|', '|标10带4|')
+           WHERE category_name = '纪念钞'
+             AND object_name = '龙钞'
+             AND variant_name = '标十'`
+        );
+      }
+    }
+  },
+  {
+    id: '20260602_001_add_category_profile_object_scope',
+    name: 'Add object and variant scope to category profiles',
+    run: async (db: any) => {
+      await ensureMigrationColumn(db, 'category_profiles', 'object_name', 'TEXT');
+      await ensureMigrationColumn(db, 'category_profiles', 'variant_name', 'TEXT');
+      await dbExec(
+        db,
+        `CREATE INDEX IF NOT EXISTS idx_category_profiles_object
+         ON category_profiles(category_name, object_name, variant_name, status, is_deleted)`
+      );
+    }
+  },
+  {
+    id: '20260602_002_create_market_anchor_daily_prices',
+    name: 'Create business market anchor daily prices',
+    sql: `
+      CREATE TABLE IF NOT EXISTS market_anchor_daily_prices (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        symbol TEXT NOT NULL,
+        name TEXT NOT NULL,
+        market TEXT,
+        asset_type TEXT NOT NULL DEFAULT 'precious_metal_anchor',
+        trade_date TEXT NOT NULL,
+        open REAL,
+        high REAL,
+        low REAL,
+        close REAL,
+        volume REAL,
+        amount REAL,
+        source TEXT NOT NULL,
+        source_label TEXT,
+        raw_json TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(symbol, trade_date, source)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_market_anchor_daily_symbol_date
+        ON market_anchor_daily_prices(symbol, source, trade_date DESC);
+
+      CREATE INDEX IF NOT EXISTS idx_market_anchor_daily_asset_date
+        ON market_anchor_daily_prices(asset_type, trade_date DESC);
+    `
+  },
+  {
+    id: '20260602_003_add_precious_metal_market_task',
+    name: 'Add business precious metal market update task',
+    sql: `
+      INSERT OR IGNORE INTO task_center_tasks
+        (task_key, name, domain, workspace, task_type, enabled, schedule_time, schedule_days, priority, config_json, last_status, last_message)
+      VALUES
+        (
+          'precious_metal_market_update',
+          '贵金属大盘行情更新',
+          'market',
+          'business',
+          'precious_metal_market_update',
+          1,
+          '18:20',
+          'every_day',
+          34,
+          '{"symbols":["XAUUSD","SGE_AGTD"],"task_timeout_minutes":30}',
+          'pending',
+          '每天拉取黄金现货和白银延期大盘价，写入生意侧行情锚点，不混入商品档口价格'
+        );
+
+      UPDATE task_center_tasks
+      SET name = '贵金属大盘行情更新',
+          domain = 'market',
+          workspace = 'business',
+          task_type = 'precious_metal_market_update',
+          enabled = 1,
+          schedule_time = CASE WHEN schedule_time IS NULL OR schedule_time = '' THEN '18:20' ELSE schedule_time END,
+          schedule_days = 'every_day',
+          priority = 34,
+          config_json = CASE
+            WHEN config_json IS NULL OR config_json = '{}' OR config_json = '' THEN '{"symbols":["XAUUSD","SGE_AGTD"],"task_timeout_minutes":30}'
+            ELSE config_json
+          END,
+          last_message = '每天拉取黄金现货和白银延期大盘价，写入生意侧行情锚点，不混入商品档口价格',
+          updated_at = CURRENT_TIMESTAMP
+      WHERE task_key = 'precious_metal_market_update';
+    `
   }
 
 ];

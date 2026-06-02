@@ -29,6 +29,9 @@ import speculationCycleRoutes from "./speculationCycleRoutes";
 import productSupplyEventsRoutes from "./productSupplyEventsRoutes";
 import sourceMappingsRoutes from "./sourceMappingsRoutes";
 import categoryProfilesRoutes from "./categoryProfilesRoutes";
+import productArchivesRoutes from "./productArchivesRoutes";
+import luckyNumberRecordsRoutes from "./luckyNumberRecordsRoutes";
+import preciousMetalMarketRoutes from "./preciousMetalMarketRoutes";
 
 export const registerBusinessRoutes = (app: Express) => {
   app.use("/api", priceRoutes);
@@ -61,4 +64,7 @@ export const registerBusinessRoutes = (app: Express) => {
   app.use("/api", productSupplyEventsRoutes);
   app.use("/api", sourceMappingsRoutes);
   app.use("/api", categoryProfilesRoutes);
+  app.use("/api", productArchivesRoutes);
+  app.use("/api", luckyNumberRecordsRoutes);
+  app.use("/api", preciousMetalMarketRoutes);
 };
