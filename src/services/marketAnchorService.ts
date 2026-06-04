@@ -34,6 +34,28 @@ type RefreshResult = {
   data?: unknown;
 };
 
+export type SilverTrendSuggestion = {
+  trend_phase: "牛市" | "熊市" | "牛转熊" | "熊转牛" | "不确定";
+  recent_move: "连续暴涨" | "温和上涨" | "横盘" | "连续阴跌" | "不确定";
+  action_bias: "偏建仓" | "偏持有" | "偏减仓/出货" | "只观察" | "不确定";
+  data_freshness: "新鲜" | "偏旧" | "缺失" | "不确定";
+  confidence: "高" | "中" | "低";
+  basis: string[];
+  metrics: {
+    day_change_percent: number | null;
+    change_3d_percent: number | null;
+    change_5d_percent: number | null;
+    change_10d_percent: number | null;
+    change_20d_percent: number | null;
+    change_60d_percent: number | null;
+    change_120d_percent: number | null;
+    ma_20: number | null;
+    ma_60: number | null;
+    drawdown_60d_percent: number | null;
+  };
+  note: string;
+};
+
 export type SilverAnchorEvidence = {
   symbol: string;
   label: string;
@@ -58,6 +80,7 @@ export type SilverAnchorEvidence = {
   refresh_message: string;
   evidence_note: string;
   risk_reference_note: string;
+  trend_suggestion: SilverTrendSuggestion;
 };
 
 const percentChange = (current: unknown, previous: unknown) => {
@@ -74,6 +97,205 @@ const toTime = (value?: string | null) => {
   const normalized = value.includes("T") ? value : value.replace(" ", "T");
   const time = new Date(normalized).getTime();
   return Number.isFinite(time) ? time : 0;
+};
+
+const averageClose = (rows: AnchorRow[], count: number) => {
+  const closes = rows
+    .slice(0, count)
+    .map(row => Number(row.close))
+    .filter(value => Number.isFinite(value));
+  if (closes.length < Math.min(count, 5)) return null;
+  return closes.reduce((sum, value) => sum + value, 0) / closes.length;
+};
+
+const formatSignedPercent = (value?: number | null) => {
+  if (value === null || value === undefined || !Number.isFinite(Number(value))) return "--";
+  const numberValue = Number(value);
+  return `${numberValue >= 0 ? "+" : ""}${numberValue.toFixed(2)}%`;
+};
+
+const getDateFreshness = (latestDate?: string | null): SilverTrendSuggestion["data_freshness"] => {
+  if (!latestDate) return "缺失";
+  const latestTime = toTime(`${latestDate}T00:00:00`);
+  if (!latestTime) return "不确定";
+  const diffDays = Math.floor((Date.now() - latestTime) / (24 * 60 * 60 * 1000));
+  if (diffDays <= 5) return "新鲜";
+  if (diffDays <= 15) return "偏旧";
+  return "缺失";
+};
+
+const buildSilverTrendSuggestion = (rows: AnchorRow[]): SilverTrendSuggestion => {
+  const latest = rows[0];
+  const latestClose = Number(latest?.close);
+  const dayChange = percentChange(latestClose, rows[1]?.close);
+  const change3 = percentChange(latestClose, rows[3]?.close);
+  const change5 = percentChange(latestClose, rows[5]?.close);
+  const change10 = percentChange(latestClose, rows[10]?.close);
+  const change20 = percentChange(latestClose, rows[20]?.close);
+  const change60 = percentChange(latestClose, rows[60]?.close);
+  const change120 = percentChange(latestClose, rows[120]?.close);
+  const ma20 = averageClose(rows, 20);
+  const ma60 = averageClose(rows, 60);
+  const last60Closes = rows
+    .slice(0, 61)
+    .map(row => Number(row.close))
+    .filter(value => Number.isFinite(value));
+  const high60 = last60Closes.length > 0 ? Math.max(...last60Closes) : null;
+  const drawdown60 = high60 && Number.isFinite(latestClose) ? percentChange(latestClose, high60) : null;
+  const dataFreshness = getDateFreshness(latest?.trade_date);
+  const basis: string[] = [];
+
+  if (!latest?.trade_date || !Number.isFinite(latestClose)) {
+    return {
+      trend_phase: "不确定",
+      recent_move: "不确定",
+      action_bias: "只观察",
+      data_freshness: dataFreshness,
+      confidence: "低",
+      basis: ["缺少白银延期最新价格，不能自动判读趋势阶段。"],
+      metrics: {
+        day_change_percent: dayChange,
+        change_3d_percent: change3,
+        change_5d_percent: change5,
+        change_10d_percent: change10,
+        change_20d_percent: change20,
+        change_60d_percent: change60,
+        change_120d_percent: change120,
+        ma_20: ma20,
+        ma_60: ma60,
+        drawdown_60d_percent: drawdown60
+      },
+      note: "缺少行情锚，贵金属风控只能人工判断。"
+    };
+  }
+
+  const aboveMa20 = ma20 !== null && latestClose >= ma20 * 0.99;
+  const aboveMa60 = ma60 !== null && latestClose >= ma60 * 0.99;
+  const belowMa20 = ma20 !== null && latestClose <= ma20 * 0.99;
+  const belowMa60 = ma60 !== null && latestClose <= ma60 * 0.99;
+  const hasLongSample = rows.length >= 121 && change120 !== null;
+  const hasMediumSample = rows.length >= 61 && change60 !== null;
+
+  let trendPhase: SilverTrendSuggestion["trend_phase"] = "不确定";
+  if (
+    hasLongSample &&
+    change120 !== null &&
+    change120 >= 12 &&
+    change60 !== null &&
+    change60 <= -8 &&
+    (belowMa20 || belowMa60 || (drawdown60 !== null && drawdown60 <= -12))
+  ) {
+    trendPhase = "牛转熊";
+  } else if (
+    hasMediumSample &&
+    change60 !== null &&
+    change60 >= 8 &&
+    (change120 === null || change120 <= 12) &&
+    aboveMa20 &&
+    aboveMa60
+  ) {
+    trendPhase = "熊转牛";
+  } else if (
+    hasMediumSample &&
+    change60 !== null &&
+    change60 >= 8 &&
+    (change120 === null || change120 >= 8) &&
+    aboveMa20 &&
+    aboveMa60 &&
+    (drawdown60 === null || drawdown60 > -12)
+  ) {
+    trendPhase = "牛市";
+  } else if (
+    hasMediumSample &&
+    change60 !== null &&
+    change60 <= -10 &&
+    (change120 === null || change120 <= 0) &&
+    belowMa20 &&
+    belowMa60
+  ) {
+    trendPhase = "熊市";
+  }
+
+  let recentMove: SilverTrendSuggestion["recent_move"] = "不确定";
+  if (
+    (dayChange !== null && dayChange >= 6) ||
+    (change3 !== null && change3 >= 10) ||
+    (change5 !== null && change5 >= 12)
+  ) {
+    recentMove = "连续暴涨";
+  } else if (
+    (change10 !== null && change10 <= -5) ||
+    (change20 !== null && change20 <= -4 && change60 !== null && change60 < 0 && belowMa20)
+  ) {
+    recentMove = "连续阴跌";
+  } else if (
+    (change10 !== null && change10 >= 2 && change10 <= 8) ||
+    (change20 !== null && change20 >= 3 && change20 <= 12)
+  ) {
+    recentMove = "温和上涨";
+  } else if (
+    change10 !== null &&
+    change20 !== null &&
+    Math.abs(change10) < 3 &&
+    Math.abs(change20) < 3
+  ) {
+    recentMove = "横盘";
+  }
+
+  let actionBias: SilverTrendSuggestion["action_bias"] = "只观察";
+  if (dataFreshness === "缺失") {
+    actionBias = "只观察";
+  } else if (recentMove === "连续暴涨") {
+    actionBias = "偏减仓/出货";
+  } else if (trendPhase === "牛市" && (recentMove === "温和上涨" || recentMove === "横盘")) {
+    actionBias = "偏持有";
+  } else if (trendPhase === "熊转牛") {
+    actionBias = "只观察";
+  } else if (trendPhase === "熊市" || recentMove === "连续阴跌" || trendPhase === "牛转熊") {
+    actionBias = "只观察";
+  }
+
+  basis.push(
+    `${latest.trade_date} 白银延期收盘 ${latestClose.toLocaleString("zh-CN", { maximumFractionDigits: 3 })}`
+  );
+  basis.push(`5日 ${formatSignedPercent(change5)}，20日 ${formatSignedPercent(change20)}，60日 ${formatSignedPercent(change60)}`);
+  if (change120 !== null) {
+    basis.push(`120日 ${formatSignedPercent(change120)}，用于区分大周期仍强还是阶段转弱`);
+  }
+  if (ma20 !== null && ma60 !== null) {
+    basis.push(`当前价${aboveMa20 ? "高于/接近" : "低于"}20日均线，${aboveMa60 ? "高于/接近" : "低于"}60日均线`);
+  }
+  if (drawdown60 !== null) {
+    basis.push(`相对60日高点回撤 ${formatSignedPercent(drawdown60)}`);
+  }
+
+  const confidence: SilverTrendSuggestion["confidence"] = hasLongSample
+    ? "高"
+    : hasMediumSample
+      ? "中"
+      : "低";
+
+  return {
+    trend_phase: trendPhase,
+    recent_move: recentMove,
+    action_bias: actionBias,
+    data_freshness: dataFreshness,
+    confidence,
+    basis,
+    metrics: {
+      day_change_percent: dayChange,
+      change_3d_percent: change3,
+      change_5d_percent: change5,
+      change_10d_percent: change10,
+      change_20d_percent: change20,
+      change_60d_percent: change60,
+      change_120d_percent: change120,
+      ma_20: ma20,
+      ma_60: ma60,
+      drawdown_60d_percent: drawdown60
+    },
+    note: "走势阶段由最近 20/60/120 个交易日和均线位置辅助判读，只用于品类风控预填和复核，不直接给买卖结论。"
+  };
 };
 
 const getTaskPython = () => (
@@ -203,7 +425,7 @@ const loadSilverAnchorEvidence = async (refreshResult?: RefreshResult): Promise<
      FROM market_anchor_daily_prices
      WHERE symbol = ? AND source = ?
      ORDER BY trade_date DESC, id DESC
-     LIMIT 61`,
+     LIMIT 121`,
     [SILVER_ANCHOR.symbol, SILVER_ANCHOR.source]
   ) as AnchorRow[];
   const taskStatus = await db.get(
@@ -221,7 +443,8 @@ const loadSilverAnchorEvidence = async (refreshResult?: RefreshResult): Promise<
   const lastCheckedMs = toTime(lastCheckedAt);
   const isFresh = lastCheckedMs > 0 && now.getTime() - lastCheckedMs <= STALE_CHECK_MS;
   const freshnessStatus = !latest.trade_date ? "missing" : isFresh ? "fresh" : "stale";
-  const closes = rows
+  const last60Rows = rows.slice(0, 61);
+  const closes = last60Rows
     .map(row => Number(row.close))
     .filter(value => Number.isFinite(value));
   const high60 = closes.length > 0 ? Math.max(...closes) : null;
@@ -231,6 +454,7 @@ const loadSilverAnchorEvidence = async (refreshResult?: RefreshResult): Promise<
   const change5dPercent = percentChange(latestClose, rows[5]?.close);
   const change20dPercent = percentChange(latestClose, rows[20]?.close);
   const change60dPercent = percentChange(latestClose, rows[60]?.close);
+  const trendSuggestion = buildSilverTrendSuggestion(rows);
 
   return {
     symbol: SILVER_ANCHOR.symbol,
@@ -265,7 +489,8 @@ const loadSilverAnchorEvidence = async (refreshResult?: RefreshResult): Promise<
       dayChangePercent,
       change20dPercent,
       change60dPercent
-    })
+    }),
+    trend_suggestion: trendSuggestion
   };
 };
 
