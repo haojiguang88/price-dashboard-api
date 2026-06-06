@@ -21,6 +21,8 @@ interface EvidenceQuery {
 const defaultMetalTerms = ["白银", "银价", "贵金属", "黄金"];
 const sellPlanTerms = ["暴涨", "暴跌", "出货", "卖", "减仓", "止盈", "底仓", "波段", "错过", "飞刀", "利润"];
 const metalDomainTerms = ["白银", "银价", "贵金属", "黄金", "金银", "实物银"];
+const silverStrictTerms = ["白银", "银价", "实物银", "银条", "银块", "银价锚"];
+const goldStrictTerms = ["黄金", "金价", "现货金", "黄金现货", "金价锚", "XAUUSD", "XAU/USD"];
 const unrelatedBusinessTerms = ["泡泡玛特", "MOKOKO", "LABUBU", "labubu", "游戏机", "苹果", "茅台", "宝可梦", "大疆", "PS5"];
 const genericSellDisciplineTerms = [
   "暴涨必须出货",
@@ -98,7 +100,7 @@ const evidenceQueries: EvidenceQuery[] = [
     columns: ["title", "track", "project_name", "market_type_preset", "market_type_custom", "summary_conclusion", "short_lesson", "background", "market_start", "market_evolution", "key_turning_points", "later_outcome", "exposed_problem", "extracted_lesson", "note"],
     summaryColumns: ["summary_conclusion", "short_lesson", "extracted_lesson", "market_evolution"],
     orderBy: "review_date DESC, updated_at DESC, id DESC",
-    pathPrefix: "/cognition"
+    pathPrefix: "/review/market"
   },
   {
     table: "tree_hanging_cases",
@@ -108,7 +110,7 @@ const evidenceQueries: EvidenceQuery[] = [
     columns: ["title", "track", "project_name", "tree_type", "summary_conclusion", "background", "judgment_at_that_time", "action_at_that_time", "later_outcome", "exposed_problem", "extracted_lesson", "short_lesson", "note"],
     summaryColumns: ["summary_conclusion", "extracted_lesson", "short_lesson", "later_outcome"],
     orderBy: "review_date DESC, updated_at DESC, id DESC",
-    pathPrefix: "/cognition"
+    pathPrefix: "/review/case"
   }
 ];
 
@@ -130,12 +132,60 @@ const unique = (items: string[]): string[] => {
   return result;
 };
 
-const buildTerms = (keyword: string, scene: string, track = ""): string[] => {
+const isStrictMode = (value: unknown): boolean => {
+  const text = normalizeQueryText(value).toLowerCase();
+  return ["1", "true", "yes", "strict"].includes(text);
+};
+
+const isSilverKeyword = (keyword: string, objectName = ""): boolean => (
+  `${keyword} ${objectName}`.includes("白银")
+  || `${keyword} ${objectName}`.includes("银价")
+  || `${keyword} ${objectName}`.includes("实物银")
+);
+
+const isGoldKeyword = (keyword: string, objectName = ""): boolean => (
+  `${keyword} ${objectName}`.includes("黄金")
+  || `${keyword} ${objectName}`.includes("金价")
+  || `${keyword} ${objectName}`.includes("现货金")
+  || `${keyword} ${objectName}`.includes("XAU")
+);
+
+const getStrictAssetKind = (keyword: string, objectName = "", variantName = ""): "silver" | "gold" | "" => {
+  const text = `${keyword} ${objectName} ${variantName}`;
+  if (isSilverKeyword(text)) return "silver";
+  if (isGoldKeyword(text)) return "gold";
+  return "";
+};
+
+const buildStrictTargetTerms = (keyword: string, objectName = "", variantName = ""): string[] => {
+  const rawTerms = [keyword, objectName, variantName]
+    .join(" ")
+    .split(/[,\s，、/]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  const terms = rawTerms.filter((term) => !["贵金属", "金银"].includes(term));
+  if (isSilverKeyword(keyword, objectName)) {
+    terms.push(...silverStrictTerms);
+  }
+  if (isGoldKeyword(keyword, objectName)) {
+    terms.push(...goldStrictTerms);
+  }
+  return unique(terms);
+};
+
+const buildTerms = (keyword: string, scene: string, track = "", strict = false, objectName = "", variantName = ""): string[] => {
   const rawTerms = keyword
     .split(/[,\s，、/]+/)
     .map((item) => item.trim())
     .filter(Boolean);
   const terms = rawTerms.length > 0 ? rawTerms : defaultMetalTerms;
+  if (strict) {
+    const strictTerms = buildStrictTargetTerms(keyword, objectName, variantName);
+    if (scene === "sell_plan" && strictTerms.length > 0) {
+      strictTerms.push(...sellPlanTerms);
+    }
+    return unique(strictTerms.length > 0 ? strictTerms : terms);
+  }
   if (track) {
     terms.push(track);
   }
@@ -206,9 +256,51 @@ const scoreRow = (row: Record<string, unknown>, query: EvidenceQuery, terms: str
 
 const includesAny = (text: string, terms: string[]): boolean => terms.some((term) => text.includes(term));
 
-const isRelevantForKeyword = (row: Record<string, unknown>, query: EvidenceQuery, keyword: string, scene: string): boolean => {
-  if (!keyword.includes("白银") && !keyword.includes("银价")) return true;
+const hasStrictAssetConflict = (text: string, assetKind: "silver" | "gold" | ""): boolean => {
+  if (assetKind === "silver") {
+    return includesAny(text, goldStrictTerms) && !includesAny(text, silverStrictTerms);
+  }
+  if (assetKind === "gold") {
+    return includesAny(text, silverStrictTerms) && !includesAny(text, goldStrictTerms);
+  }
+  return false;
+};
+
+const isRelevantForKeyword = (
+  row: Record<string, unknown>,
+  query: EvidenceQuery,
+  keyword: string,
+  scene: string,
+  options: {
+    strict: boolean;
+    track: string;
+    objectName: string;
+    variantName: string;
+    targetTerms: string[];
+    targetAssetKind: "silver" | "gold" | "";
+  }
+): boolean => {
+  const { strict, track, objectName, targetTerms, targetAssetKind } = options;
   const text = query.columns.map((column) => String(row[column] || "")).join(" ");
+  const rowTrack = String(row.track || "");
+  const hasStrictTarget = includesAny(text, targetTerms);
+  if (strict) {
+    const hasTrackMatch = !track || !rowTrack || rowTrack.includes(track);
+    const hasAssetConflict = hasStrictAssetConflict(text, targetAssetKind);
+    const hasGenericSellDiscipline = query.group === "discipline"
+      && scene === "sell_plan"
+      && includesAny(text, genericSellDisciplineTerms)
+      && !includesAny(text, unrelatedBusinessTerms)
+      && !hasAssetConflict;
+
+    if (query.group === "discipline") {
+      return (hasStrictTarget || hasGenericSellDiscipline) && hasTrackMatch;
+    }
+    if (!hasTrackMatch) return false;
+    if (hasAssetConflict) return false;
+    return hasStrictTarget || (objectName ? text.includes(objectName) : false);
+  }
+  if (!keyword.includes("白银") && !keyword.includes("银价")) return true;
   const hasMetalDomain = includesAny(text, metalDomainTerms);
   if (hasMetalDomain) return true;
   if (query.group === "discipline" && scene === "sell_plan") {
@@ -223,8 +315,13 @@ router.get("/cognition/evidence", async (req, res) => {
     const track = normalizeQueryText(req.query.track);
     const keyword = normalizeQueryText(req.query.keyword || "白银");
     const scene = normalizeQueryText(req.query.scene || "general");
+    const objectName = normalizeQueryText(req.query.object_name || req.query.objectName);
+    const variantName = normalizeQueryText(req.query.variant_name || req.query.variantName);
+    const strict = isStrictMode(req.query.strict);
     const limit = Math.min(Math.max(Number(req.query.limit) || 6, 1), 12);
-    const terms = buildTerms(keyword, scene, track);
+    const targetTerms = buildStrictTargetTerms(keyword, objectName, variantName);
+    const targetAssetKind = getStrictAssetKind(keyword, objectName, variantName);
+    const terms = buildTerms(keyword, scene, track, strict, objectName, variantName);
 
     const grouped: Record<EvidenceGroupKey, any[]> = {
       discipline: [],
@@ -255,7 +352,14 @@ router.get("/cognition/evidence", async (req, res) => {
       );
 
       grouped[query.group].push(...rows
-        .filter((row: Record<string, unknown>) => isRelevantForKeyword(row, query, keyword, scene))
+        .filter((row: Record<string, unknown>) => isRelevantForKeyword(row, query, keyword, scene, {
+          strict,
+          track,
+          objectName,
+          variantName,
+          targetTerms,
+          targetAssetKind
+        }))
         .map((row: Record<string, unknown>) => ({
           id: row.id,
           module: query.module,
@@ -265,7 +369,11 @@ router.get("/cognition/evidence", async (req, res) => {
           source: row.evidence_source,
           summary: pickSummary(row, query.summaryColumns),
           score: scoreRow(row, query, terms, scene, track),
-          match_reason: scene === "sell_plan" ? "按白银卖出计划场景自动匹配" : "按关键词自动匹配",
+          match_reason: strict
+            ? "按目标对象和严格关键词自动匹配"
+            : scene === "sell_plan"
+              ? "按白银卖出计划场景自动匹配"
+              : "按关键词自动匹配",
           path: `${query.pathPrefix}?focusId=${row.id}`
         })));
     }
@@ -286,9 +394,14 @@ router.get("/cognition/evidence", async (req, res) => {
         scene,
         track,
         keyword,
+        strict,
         terms,
+        target_terms: targetTerms,
+        target_asset_kind: targetAssetKind,
         match_mode: "rule_based_auto_recall",
-        match_note: "系统按赛道、关键词和场景纪律自动召回；结果只作为认知依据，不直接给买卖许可。",
+        match_note: strict
+          ? "系统按目标对象、严格关键词和必要的通用卖出纪律召回；结果只作为认知依据，不直接给买卖许可。"
+          : "系统按赛道、关键词和场景纪律自动召回；结果只作为认知依据，不直接给买卖许可。",
         groups: grouped,
         total
       }

@@ -2,6 +2,70 @@ import getDb from "../config/database";
 import { buildWorkspaceFilter, normalizeWorkspace } from "../utils/workspace";
 import { WorkspaceCenterError } from "./workspaceCenterErrors";
 
+const COMPACT_RESULT_ARRAY_PREVIEW_LIMIT = 5;
+const COMPACT_RESULT_ARRAY_KEYS = new Set([
+  "records",
+  "raw_records",
+  "source_records",
+  "price_records",
+  "matched_records",
+  "created_records",
+  "updated_records",
+  "skipped_records",
+  "items"
+]);
+
+const shouldCompactResultArray = (key: string, value: unknown[]) => (
+  COMPACT_RESULT_ARRAY_KEYS.has(key) || value.length > 50
+);
+
+const compactRunResultValue = (value: unknown): unknown => {
+  if (Array.isArray(value)) {
+    return value.map((item) => compactRunResultValue(item));
+  }
+  if (value && typeof value === "object") {
+    const compacted: Record<string, unknown> = {};
+    Object.entries(value as Record<string, unknown>).forEach(([key, item]) => {
+      if (Array.isArray(item) && shouldCompactResultArray(key, item)) {
+        compacted[key] = item
+          .slice(0, COMPACT_RESULT_ARRAY_PREVIEW_LIMIT)
+          .map((entry) => compactRunResultValue(entry));
+        compacted[`${key}_total_count`] = item.length;
+        compacted[`${key}_truncated`] = item.length > COMPACT_RESULT_ARRAY_PREVIEW_LIMIT;
+        return;
+      }
+      compacted[key] = compactRunResultValue(item);
+    });
+    return compacted;
+  }
+  return value;
+};
+
+const compactTaskRunResultJson = (resultJson?: string | null) => {
+  if (!resultJson) return resultJson;
+  try {
+    const parsed = JSON.parse(resultJson);
+    return JSON.stringify(compactRunResultValue(parsed));
+  } catch {
+    return resultJson.length > 1200
+      ? JSON.stringify({
+        raw_result_preview: resultJson.slice(0, 1200),
+        raw_result_total_length: resultJson.length,
+        raw_result_truncated: true
+      })
+      : resultJson;
+  }
+};
+
+const compactTaskRunRows = (runs: any[]) => runs.map((run) => {
+  const originalResultJson = typeof run.result_json === "string" ? run.result_json : null;
+  return {
+    ...run,
+    result_json: compactTaskRunResultJson(originalResultJson),
+    result_json_size: originalResultJson?.length || 0
+  };
+});
+
 export const getScopedTaskFilter = (id: string, workspaceInput: unknown) => {
   const workspace = normalizeWorkspace(workspaceInput);
   if (!workspace) throw new WorkspaceCenterError(400, "缺少有效工作区");
@@ -58,7 +122,7 @@ export const getTaskCenterSnapshot = async (workspaceInput: unknown, compactInpu
          LIMIT 30`,
     runFilter.params
   );
-  return { tasks, runs };
+  return { tasks, runs: compactRuns ? compactTaskRunRows(runs) : runs };
 };
 
 const parseJson = (value?: string | null) => {

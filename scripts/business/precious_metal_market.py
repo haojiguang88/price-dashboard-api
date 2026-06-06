@@ -10,7 +10,6 @@ from pathlib import Path
 import requests
 
 
-DEFAULT_TRADING_DB = "/Volumes/7100/price-dashboard-data/db/price_dashboard_trading_dev.db"
 DEFAULT_SYMBOLS = ["XAUUSD", "SGE_AGTD"]
 
 SYMBOL_CONFIGS = {
@@ -87,6 +86,13 @@ def parse_symbols(value):
         if symbol and symbol in SYMBOL_CONFIGS and symbol not in symbols:
             symbols.append(symbol)
     return symbols or DEFAULT_SYMBOLS
+
+
+def resolve_trading_db_path(value):
+    path = str(value or "").strip() or os.getenv("TRADING_DB_PATH", "").strip() or os.getenv("PRICE_DASHBOARD_TRADING_DB_PATH", "").strip()
+    if not path:
+        raise RuntimeError("import-history 需要显式提供 --trading-db，或配置 TRADING_DB_PATH / PRICE_DASHBOARD_TRADING_DB_PATH")
+    return path
 
 
 def ensure_schema(conn):
@@ -351,10 +357,11 @@ def fetch_updates(symbols):
 
 
 def main():
+    load_local_env()
     parser = argparse.ArgumentParser(description="Business precious metal market anchors")
     parser.add_argument("--db", required=True, help="Business database path")
     parser.add_argument("--mode", choices=["import-history", "update"], default="update")
-    parser.add_argument("--trading-db", default=DEFAULT_TRADING_DB)
+    parser.add_argument("--trading-db", help="Trading database path for import-history mode")
     parser.add_argument("--symbols", default=",".join(DEFAULT_SYMBOLS))
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
@@ -363,7 +370,7 @@ def main():
     conn = connect(args.db)
     try:
         if args.mode == "import-history":
-            items = import_history_from_trading(args.trading_db, symbols)
+            items = import_history_from_trading(resolve_trading_db_path(args.trading_db), symbols)
             source_errors = []
             failed_symbols = []
         else:

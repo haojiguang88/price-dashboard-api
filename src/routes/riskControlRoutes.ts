@@ -302,7 +302,20 @@ router.post('/check-records/category-risk', async (req, res) => {
 router.get('/check-records', async (req, res) => {
   try {
     const db = await getDb();
-    const { review_type, category_name, category_risk_type, system_result, date_from, date_to } = req.query;
+    const {
+      review_type,
+      category_name,
+      object_name,
+      variant_name,
+      category_risk_type,
+      system_result,
+      date_from,
+      date_to
+    } = req.query;
+    const rawLimit = Number(req.query.limit);
+    const limit = Number.isFinite(rawLimit) && rawLimit > 0
+      ? Math.min(Math.floor(rawLimit), 100)
+      : null;
 
     let query = `
       SELECT r.id, r.review_type, r.category_name, r.object_name, r.variant_name,
@@ -331,6 +344,14 @@ router.get('/check-records', async (req, res) => {
       query += ' AND r.category_name = ?';
       params.push(category_name);
     }
+    if (object_name) {
+      query += " AND (r.object_name = ? OR r.object_name IS NULL OR r.object_name = '')";
+      params.push(object_name);
+    }
+    if (variant_name) {
+      query += " AND (r.variant_name = ? OR r.variant_name IS NULL OR r.variant_name = '')";
+      params.push(variant_name);
+    }
     if (category_risk_type) {
       query += ' AND r.category_risk_type = ?';
       params.push(category_risk_type);
@@ -349,6 +370,10 @@ router.get('/check-records', async (req, res) => {
     }
 
     query += ' ORDER BY r.created_at DESC';
+    if (limit) {
+      query += ' LIMIT ?';
+      params.push(limit);
+    }
 
     const records = await db.all(query, params);
 
