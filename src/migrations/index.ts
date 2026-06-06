@@ -2917,6 +2917,553 @@ const migrations: Migration[] = [
           updated_at = CURRENT_TIMESTAMP
       WHERE task_key = 'precious_metal_market_update';
     `
+  },
+  {
+    id: '20260606_001_seed_business_boundary_cases',
+    name: 'Seed business boundary case evidence',
+    run: async (db: any) => {
+      const now = new Date().toISOString();
+
+      const upsertTreeCase = async (input: {
+        title: string;
+        track: string;
+        projectName: string;
+        reviewDate: string;
+        treeType: string;
+        summaryConclusion: string;
+        background: string;
+        judgmentAtThatTime: string;
+        actionAtThatTime: string;
+        laterOutcome: string;
+        rootCauseType: string;
+        exposedProblem: string;
+        extractedLesson: string;
+        shortLesson: string;
+        note: string;
+      }) => {
+        if (!(await migrationTableExists(db, 'tree_hanging_cases'))) return;
+        const existing = await dbGet<any>(
+          db,
+          'SELECT id FROM tree_hanging_cases WHERE title = ? AND COALESCE(is_deleted, 0) = 0',
+          [input.title]
+        );
+        const params = [
+          input.title,
+          input.track,
+          input.projectName,
+          input.reviewDate,
+          input.treeType,
+          input.summaryConclusion,
+          input.background,
+          input.judgmentAtThatTime,
+          input.actionAtThatTime,
+          input.laterOutcome,
+          input.rootCauseType,
+          input.exposedProblem,
+          input.extractedLesson,
+          input.shortLesson,
+          input.note,
+          now
+        ];
+        if (existing) {
+          await dbRun(
+            db,
+            `UPDATE tree_hanging_cases
+             SET title = ?, track = ?, project_name = ?, review_date = ?, tree_type = ?,
+                 summary_conclusion = ?, background = ?, judgment_at_that_time = ?,
+                 action_at_that_time = ?, later_outcome = ?, root_cause_type = ?,
+                 exposed_problem = ?, extracted_lesson = ?, short_lesson = ?, note = ?,
+                 updated_at = ?
+             WHERE id = ?`,
+            [...params, existing.id]
+          );
+          return;
+        }
+        await dbRun(
+          db,
+          `INSERT INTO tree_hanging_cases
+            (title, track, project_name, review_date, tree_type, summary_conclusion,
+             background, judgment_at_that_time, action_at_that_time, later_outcome,
+             root_cause_type, exposed_problem, extracted_lesson, short_lesson, note,
+             is_deleted, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+          [...params.slice(0, -1), now, now]
+        );
+      };
+
+      const upsertCycleRecord = async (input: {
+        categoryName: string;
+        objectName: string;
+        variantName: string;
+        launchDate: string | null;
+        officialPrice: number | null;
+        openPrice: number | null;
+        highPrice: number | null;
+        lowPrice: number | null;
+        currentPrice: number | null;
+        openLevel: string;
+        releaseQuantity: string;
+        totalQuantity: string;
+        firstReleaseQuantity: string;
+        firstReleaseStatus: string;
+        officialFirstRelease: string;
+        marketBackground: string;
+        cycleStage: string;
+        cyclePattern: string;
+        riseNature: string;
+        mainParticipants: string;
+        arrivalScale: string;
+        supplyReleaseType: string;
+        highLevelRealDemand: string;
+        finalResult: string;
+        futureActionRule: string;
+        experienceTags: string;
+        summary: string;
+        lesson: string;
+        note: string;
+      }) => {
+        if (!(await migrationTableExists(db, 'speculation_cycle_records'))) return;
+        const existing = await dbGet<any>(
+          db,
+          `SELECT id FROM speculation_cycle_records
+           WHERE category_name = ?
+             AND object_name = ?
+             AND COALESCE(variant_name, '') = ?
+           LIMIT 1`,
+          [input.categoryName, input.objectName, input.variantName]
+        );
+        const values = [
+          input.categoryName,
+          input.objectName,
+          input.variantName,
+          input.launchDate,
+          input.officialPrice,
+          input.openPrice,
+          input.highPrice,
+          input.lowPrice,
+          input.currentPrice,
+          input.openLevel,
+          input.releaseQuantity,
+          input.totalQuantity,
+          input.firstReleaseQuantity,
+          input.firstReleaseStatus,
+          input.officialFirstRelease,
+          input.marketBackground,
+          input.cycleStage,
+          input.cyclePattern,
+          input.riseNature,
+          input.mainParticipants,
+          input.arrivalScale,
+          input.supplyReleaseType,
+          input.highLevelRealDemand,
+          input.finalResult,
+          input.futureActionRule,
+          input.experienceTags,
+          input.summary,
+          input.lesson,
+          input.note,
+          now
+        ];
+        if (existing) {
+          await dbRun(
+            db,
+            `UPDATE speculation_cycle_records
+             SET category_name = ?, object_name = ?, variant_name = ?, launch_date = ?,
+                 official_price = ?, open_price = ?, high_price = ?, low_price = ?,
+                 current_price = ?, open_level = ?, release_quantity = ?,
+                 total_quantity = ?, first_release_quantity = ?, first_release_status = ?,
+                 official_first_release = ?, market_background = ?, cycle_stage = ?,
+                 cycle_pattern = ?, rise_nature = ?, main_participants = ?,
+                 arrival_scale = ?, supply_release_type = ?, high_level_real_demand = ?,
+                 final_result = ?, future_action_rule = ?, experience_tags = ?,
+                 summary = ?, lesson = ?, note = ?, updated_at = ?
+             WHERE id = ?`,
+            [...values, existing.id]
+          );
+          return;
+        }
+        await dbRun(
+          db,
+          `INSERT INTO speculation_cycle_records
+            (category_name, object_name, variant_name, launch_date, official_price,
+             open_price, high_price, low_price, current_price, open_level,
+             release_quantity, total_quantity, first_release_quantity,
+             first_release_status, official_first_release, market_background,
+             cycle_stage, cycle_pattern, rise_nature, main_participants,
+             arrival_scale, supply_release_type, high_level_real_demand,
+             final_result, future_action_rule, experience_tags, summary, lesson,
+             note, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [...values.slice(0, -1), now, now]
+        );
+      };
+
+      const findTarget = async (categoryName: string, objectName: string, variantName: string) => {
+        const category = await dbGet<any>(
+          db,
+          "SELECT id, name FROM categories WHERE name = ? AND COALESCE(is_archived, 0) = 0",
+          [categoryName]
+        );
+        if (!category) return null;
+        const object = await dbGet<any>(
+          db,
+          "SELECT id, name FROM objects WHERE category_id = ? AND name = ? AND COALESCE(is_archived, 0) = 0",
+          [category.id, objectName]
+        );
+        if (!object) return null;
+        const variant = variantName
+          ? await dbGet<any>(
+            db,
+            "SELECT id, name FROM variants WHERE object_id = ? AND name = ? AND COALESCE(is_archived, 0) = 0",
+            [object.id, variantName]
+          )
+          : null;
+        if (variantName && !variant) return null;
+        return { category, object, variant };
+      };
+
+      const upsertArchive = async (input: {
+        categoryName: string;
+        objectName: string;
+        variantName: string;
+        archiveName: string;
+        positionLevel: string;
+        judgment: string;
+        rawDescription: string;
+        issueInfo: string;
+        themeDesign: string;
+        tradingProcess: string;
+        riskBasis: string;
+        experienceNote: string;
+        pendingQuestions: string;
+        confidence: string;
+        status: string;
+        note: string;
+      }) => {
+        if (!(await migrationTableExists(db, 'product_archives'))) return null;
+        const target = await findTarget(input.categoryName, input.objectName, input.variantName);
+        const existing = await dbGet<any>(
+          db,
+          'SELECT id FROM product_archives WHERE archive_name = ? AND COALESCE(is_deleted, 0) = 0',
+          [input.archiveName]
+        );
+        if (existing) {
+          await dbRun(
+            db,
+            `UPDATE product_archives
+             SET archive_name = ?, position_level = ?, one_sentence_judgment = ?,
+                 raw_description = ?, issue_info = ?, theme_design = ?,
+                 trading_process = ?, risk_basis = ?, experience_note = ?,
+                 pending_questions = ?, confidence = ?, status = ?, note = ?,
+                 updated_at = ?
+             WHERE id = ?`,
+            [
+              input.archiveName,
+              input.positionLevel,
+              input.judgment,
+              input.rawDescription,
+              input.issueInfo,
+              input.themeDesign,
+              input.tradingProcess,
+              input.riskBasis,
+              input.experienceNote,
+              input.pendingQuestions,
+              input.confidence,
+              input.status,
+              input.note,
+              now,
+              existing.id
+            ]
+          );
+          return existing.id;
+        }
+        if (!target) return null;
+        await dbRun(
+          db,
+          `INSERT INTO product_archives
+            (category_id, category_name, object_id, object_name, variant_id, variant_name,
+             archive_name, position_level, one_sentence_judgment, raw_description,
+             issue_info, theme_design, trading_process, risk_basis, experience_note,
+             pending_questions, confidence, status, note, is_deleted, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+          [
+            target.category.id,
+            target.category.name,
+            target.object.id,
+            target.object.name,
+            target.variant?.id || null,
+            target.variant?.name || '',
+            input.archiveName,
+            input.positionLevel,
+            input.judgment,
+            input.rawDescription,
+            input.issueInfo,
+            input.themeDesign,
+            input.tradingProcess,
+            input.riskBasis,
+            input.experienceNote,
+            input.pendingQuestions,
+            input.confidence,
+            input.status,
+            input.note,
+            now,
+            now
+          ]
+        );
+        const created = await dbGet<any>(
+          db,
+          'SELECT id FROM product_archives WHERE archive_name = ? AND COALESCE(is_deleted, 0) = 0',
+          [input.archiveName]
+        );
+        return created?.id || null;
+      };
+
+      const upsertStage = async (archiveId: number | null, input: {
+        stageName: string;
+        timeText: string;
+        stageType: string;
+        priceStart: number | null;
+        priceHigh: number | null;
+        priceLow: number | null;
+        priceEnd: number | null;
+        summary: string;
+        actionRule: string;
+        evidenceNote: string;
+        confidence: string;
+        sortOrder: number;
+        note: string;
+      }) => {
+        if (!archiveId || !(await migrationTableExists(db, 'product_archive_stages'))) return;
+        const existing = await dbGet<any>(
+          db,
+          `SELECT id FROM product_archive_stages
+           WHERE archive_id = ? AND stage_name = ? AND COALESCE(is_deleted, 0) = 0`,
+          [archiveId, input.stageName]
+        );
+        const values = [
+          archiveId,
+          input.stageName,
+          input.timeText,
+          input.stageType,
+          input.priceStart,
+          input.priceHigh,
+          input.priceLow,
+          input.priceEnd,
+          input.summary,
+          input.actionRule,
+          input.evidenceNote,
+          input.confidence,
+          input.sortOrder,
+          input.note,
+          now
+        ];
+        if (existing) {
+          await dbRun(
+            db,
+            `UPDATE product_archive_stages
+             SET archive_id = ?, stage_name = ?, time_text = ?, stage_type = ?,
+                 price_start = ?, price_high = ?, price_low = ?, price_end = ?,
+                 stage_summary = ?, action_rule = ?, evidence_note = ?,
+                 confidence = ?, sort_order = ?, note = ?, updated_at = ?
+             WHERE id = ?`,
+            [...values, existing.id]
+          );
+          return;
+        }
+        await dbRun(
+          db,
+          `INSERT INTO product_archive_stages
+            (archive_id, stage_name, time_text, stage_type, price_start, price_high,
+             price_low, price_end, stage_summary, action_rule, evidence_note,
+             confidence, sort_order, note, is_deleted, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+          [...values.slice(0, -1), now, now]
+        );
+      };
+
+      await upsertCycleRecord({
+        categoryName: '泡泡玛特',
+        objectName: '联名中娃',
+        variantName: '三丽鸥/世界杯联名款',
+        launchDate: '2026-03',
+        officialPrice: 599,
+        openPrice: 610,
+        highPrice: 620,
+        lowPrice: 540,
+        currentPrice: 540,
+        openLevel: '低开/微溢价',
+        releaseQuantity: '未知',
+        totalQuantity: '未知',
+        firstReleaseQuantity: '未知',
+        firstReleaseStatus: '已发售',
+        officialFirstRelease: '未知',
+        marketBackground: '泡泡玛特二级市场弱市，官方持续放货，真实消耗不足。',
+        cycleStage: '破发钝化',
+        cyclePattern: '低开失败 + 联名溢价失效 + 官方持续放货',
+        riseNature: '联名轻微溢价，不是资金拉盘。',
+        mainParticipants: '真实消费者、少量二级市场参与者',
+        arrivalScale: '持续放货',
+        supplyReleaseType: '官方一直放货，真实需求随时能买。',
+        highLevelRealDemand: '中娃消耗弱于小娃和吊卡，体积大，不能挂包，真实需求不足。',
+        finalResult: '开盘只加十几块，很快破发，后续约540附近。没有暴涨过也很难暴跌，因为没人高位囤货、没人集中砸盘，真正有需求的人随时可以买。',
+        futureActionRule: '弱市普通/联名中娃低开不代表机会。没有真实热度、官方持续放货、形态消耗弱时，轻微溢价也不碰；这种品更可能是钝化阴跌，不是瀑布暴跌。',
+        experienceTags: '低开失败,弱市低承接,联名溢价失效,官方持续放货,形态消耗弱,钝化阴跌,非暴涨品不瀑布',
+        summary: '三丽鸥中娃和 Labubu 世界杯联名款是低开失败样本：原价599，比普通中娃贵100，开盘只加十几块，二级市场弱、官方持续放货、中娃消耗弱，最终破发到约540。',
+        lesson: '低开不是机会本身。弱市里如果没有真实热度和承接，官方又持续放货，设计/联名只能轻微加分，不能支撑二级溢价。',
+        note: '用户口述模糊案例；日期、精确价格和具体款式可后续补。'
+      });
+
+      await upsertCycleRecord({
+        categoryName: '泡泡玛特',
+        objectName: 'LABUBU系列',
+        variantName: '3.0',
+        launchDate: '2025-05',
+        officialPrice: 596,
+        openPrice: null,
+        highPrice: 5000,
+        lowPrice: null,
+        currentPrice: null,
+        openLevel: '轻微溢价后',
+        releaseQuantity: '先控货，后多轮预售/铺货',
+        totalQuantity: '未知',
+        firstReleaseQuantity: '未知',
+        firstReleaseStatus: '首发后爆火',
+        officialFirstRelease: '未知',
+        marketBackground: '国外明星带火、官方控货、千岛拉盘、全品类情绪共振。',
+        cycleStage: '官方天量铺货后二级市场熊市',
+        cyclePattern: '现象级强市拉盘 + 有限补货可消化 + 系列级无限放货反杀',
+        riseNature: '明星带火/控货错配/千岛资金拉盘/真实粉丝承接共振',
+        mainParticipants: '国外明星、线下玩家、千岛资金、粉丝、囤货者、二级市场参与者',
+        arrivalScale: '线上线下长期随便买',
+        supplyReleaseType: '前期有限补货可消化，后期 Labubu 三兄弟及其它娃进入官方无限制放货，线上线下长期随便买',
+        highLevelRealDemand: '前期不只是千岛承接，也有粉丝真实购买、市场囤货和二级真实承接；后期无限制放货后溢价被供给打穿，但 Labubu 本体需求很硬，破发后仍有人原价购买。',
+        finalResult: '高溢价分水岭出现在炒作后：整端从3000+补货一次砸到约2200，2200维持不到1天后继续陆续下跌；官方后续补预售仍有少量溢价。真正转折点不是只有3.0，而是 Labubu 三兄弟和其它相关娃都进入官方无限制放货，线上线下随便买且长期天天卖，随后又打击抖音非授权直播间，3.0、Labubu 三兄弟和整个泡泡玛特二级市场都被重创。',
+        futureActionRule: '强市里有限补货不等于摁死，只要真实承接、粉丝购买、市场囤货和跑货速度还在，可以快进快出；但一旦出现系列级别官方无限制放货、线上线下随便买、连续天天卖，或非授权直播间被打击，就不是普通补货，而是供给结构和二级渠道同时反转，必须大幅降级、停止囤货、优先出货。若本体需求很硬，破发后仍可能有人原价买，但这只能说明真实消耗存在，不能说明二级溢价安全。',
+        experienceTags: '现象级爆火,强市补货可消化,真实承接,粉丝真买,市场囤货,高溢价分水岭,补货砸盘,系列级无限制放货,Labubu三兄弟,线上线下随便买,非授权直播间打击,二级渠道失效,供给结构反转,真实消耗硬,原价需求仍在',
+        summary: 'LABUBU 3.0 是“强市补货能消化，但系列级无限制放货会反杀”的核心样本。前期高热度、高溢价和真实承接让补货没有立刻打死行情，3000+补货砸到2200后仍能维持短暂溢价；但后期官方为了赚钱持续无限制放货，覆盖 Labubu 三兄弟和其它相关娃，线上线下长期随便买，再叠加打击抖音非授权直播间，二级市场的承接和渠道一起失效。这个品本体确实硬，破发后仍有人原价买，但二级炒作溢价已经不是同一套逻辑。',
+        lesson: '判断补货不能只看“有没有补”，要看补货是否有限、是否连续、是否从单品变成系列级无限放货、是否线上线下长期随便买、是否还存在真实承接和二级渠道。强市有限补货可消化；系列级无限制放货 + 非授权直播渠道被打击，是泡泡玛特二级市场的摁死信号。真实消耗很硬只能保护原价附近需求，不能保护高溢价。',
+        note: '用户口述模糊案例；关键价格锚：整端3000+后补货砸到约2200，2200维持不足1天后继续下跌；具体日期待补。'
+      });
+
+      await upsertTreeCase({
+        title: '泡泡玛特便利店吊卡挂树案例',
+        track: '泡泡玛特',
+        projectName: '泡泡玛特便利店吊卡',
+        reviewDate: '2025-08-01',
+        treeType: '无限放货/慢跌未跑',
+        summaryConclusion: '便利店吊卡是高开继续飞但最终挂树的极端强市样本：强市、量少和资金炒作可以把高开继续推高，但后续大规模无限制放货会让供给结构反转，二级价格快速坍塌；赚到必须按计划出，慢跌更要出。',
+        background: '泡泡玛特最火阶段推出便利店吊卡，原价约99/199（待确认），首发就是高开，开盘1700+；后续因为量少、资金炒作和强市情绪，一路拉到5000左右，把空军拉爆。国内关店前一天仍在拉升，千岛999卖不动因为有人卡了几百单；国外开售后大规模无限制放货，供给结构反转，价格一路下跌。',
+        judgmentAtThatTime: '当时容易把强市、量少和资金拉盘理解成还能继续飞，觉得按当时900左右的行情跑还有得赚，对后续大规模无限制放货的杀伤力判断不够。',
+        actionAtThatTime: '慢跌没有及时大比例出货，后面从便利店开始被泡泡玛特背刺。',
+        laterOutcome: '大规模无限制放货后，价格一路下跌，最终跌到约100/最低补货价附近，只能在很低的位置处理。',
+        rootCauseType: '供给结构误判/执行问题',
+        exposedProblem: '没有把“大规模无限制放货”当成根本逻辑变化，也没有把慢跌当成风险释放过程，错把还能赚钱当成继续等待的理由。',
+        extractedLesson: '高开继续飞只可能是极端强市例外，不能作为常规追高依据；凡是非理性暴涨的品种，唯一正确动作是按计划出货；如果出现大规模无限制放货，供给结构已经变了，慢跌时即使不全出也要出大部分。',
+        shortLesson: '高开飞得越狠，放货后跌得越狠；慢跌更要跑。',
+        note: '用于“高开但继续飞”边界案例；不是普通追高许可，而是极端强市反面教材。'
+      });
+
+      const earthArchiveId = await upsertArchive({
+        categoryName: '纪念币',
+        objectName: '地球币',
+        variantName: '500g',
+        archiveName: '地球币500g弱市高金额低开未破发案例',
+        positionLevel: 'do_not',
+        judgment: '弱市里大克重高金额品天然降级，后续2.4-2.6万有承接也不改变当时风控摁死的合理性。',
+        rawDescription: '用户口述新鲜案例：地球币，银币，2026年5月左右发生。500g地球币，面值150元，发行价20000（包含金币5000）。当时贵金属黄金白银处于弱市，总数2000，首发800。刚开始发售时有人溢价几百兜底，后来行情不好，兜底费降到约200。开盘从21000砸到20500闷包，属于低开；砸了几个小时后慢慢拉升到22000左右，后续涨到2.4-2.6万并且24000左右确实能卖出去。用户判断数量少，可能存在资金控盘或集中收货因素，但没有直接证据。',
+        issueInfo: '发行价20000包含金币5000；面值150；总数2000、首发800；具体发行日、金币/银币组合口径和当前成交样本待补。',
+        themeDesign: '题材还行，设计一般。大克重高金额品更依赖强市、资金承接和题材强度，不能按小规格低开黑马逻辑处理。',
+        tradingProcess: '发售初期有几百元溢价兜底，弱市下兜底费降到约200；开盘从21000砸到20500闷包，低开后几个小时逐步拉升到22000附近，后续2.4-2.6万有成交承接。',
+        riskBasis: '弱市 + 500g大克重 + 20000级别高金额 + 设计一般，是天然降级组合。即使首发800、总量2000、没有破发，后续甚至有人收、价格涨到约2.6万，也只能说明后面可能有资金或承接进来，不代表当时具备适合介入的风险收益比。数量少可能存在资金控盘或集中收货，但目前没有直接证据，不能把“可能控盘”写成确定判断。即使现在24000左右确实能卖出去，也只能说明当前有成交承接，不代表当时20000级别大金额投入的风险收益比合格。',
+        experienceNote: '这条是风控摁死但后续市场走强的反事后诸葛亮案例。风控不是判断后面一定不会涨，而是判断这笔钱是否值得冒这个风险。如果重来一次，在当时弱市、大克重、高金额、设计一般、收益弹性不确定的条件下，仍然选择不碰。',
+        pendingQuestions: '待补：准确发行日期、开盘成交截图、20500闷包成交依据、22000/24000/26000成交证据、是否有评级/首评因素、金币5000口径是否独立计算。',
+        confidence: 'rough',
+        status: 'active',
+        note: '用户未参与，风控摁死。核心口径：结果涨了不等于当时应该做，有机会不等于值得做；当前24000可卖、疑似有资金控盘但无证据。'
+      });
+      await upsertStage(earthArchiveId, {
+        stageName: '后续2.4-2.6万有承接但不推翻风控',
+        timeText: '2026年6月初，后续行情更新',
+        stageType: '反事后诸葛亮 / 大金额承接',
+        priceStart: 22000,
+        priceHigh: 26000,
+        priceLow: 24000,
+        priceEnd: 24000,
+        summary: '后续地球币涨到约2.4-2.6万，并且24000左右确实能卖出去。用户判断数量少，可能存在资金控盘或集中收货因素，但没有直接证据。这个结果说明市场后续有承接，不代表当时风控摁死是错的。',
+        actionRule: '风控看的是当时可见条件和风险收益比，不用后续涨跌倒推对错。同样场景再来一次，即使知道后续能卖到24000-26000，仍然不碰，因为单价太高、资金占用大、风险与收益不成正比。',
+        evidenceNote: '用户口述更新：当前约2.4-2.6万，24000左右能卖；疑似后续资金控盘/集中收货，但无证据。用户明确表示同样场景仍选择风控。',
+        confidence: 'rough',
+        sortOrder: 50,
+        note: '重要样本：结果赚钱不等于决策正确；可能控盘只能记为待证据判断，不能当放行依据。'
+      });
+
+      const gongshangArchiveId = await upsertArchive({
+        categoryName: '纪念币',
+        objectName: '工商卡',
+        variantName: '2026年',
+        archiveName: '2026工商卡低开首评闷包A仓案例',
+        positionLevel: 'main',
+        judgment: '弱市低开但具备首评窗口、题材颜值和闷包赌号预期，适合A仓参与；窗口结束和放货后溢价会自然回落。',
+        rawDescription: '用户口述实战案例：2026工商纪念币，约2026年3月。背景是白银暴跌，其它纪念币也从高位跌下来，市场情绪恐慌。这个品是首发，总数约5万，首发应该约9000，可以做首评，颜值题材都不错，属于龙银币体系，设计也还行。用户喊人抽签，群里有人中签后轻微溢价收了3个闷包，成本约1050；开出一个金马卖了2200，另外两个普通号。',
+        issueInfo: '总量约5万，首发约9000，具体发行日和首发数量待确认；价格记录已有2026-03-26至2026-04-17闷包走势。',
+        themeDesign: '龙银币/工商卡，题材颜值不错，设计还行；首发可评级、首评窗口和靓号预期是核心加分。',
+        tradingProcess: '低开后闷包价格一路上涨，基本一天涨100左右，从950附近涨到1550-1600附近后涨不动。闷包和裸币价差大，核心原因是闷包赌号和首评预期。连续几天上涨后，再收已来不及首评，窗口结束后价格自然回落；后续量大、其它银行发行、智能卡多银行渠道同时放货，也包含26工商龙后期放货，最终干破发。',
+        riskBasis: '这条不是无脑黑马，而是窗口型机会：弱市低开提供安全垫，首评/闷包/靓号提供弹性。但总量5万、后续多银行渠道放货、首评窗口过期后，闷包溢价会坍塌。风控应允许A仓、小仓、原价抽签或轻微溢价，不允许后排追高。闷包赔率不能只看“有没有可能开靓号”，要看闷包和裸币价差、首评窗口、炒作阶段和普通品自身溢价。靓号要卖出很高价格，通常需要叠加首评、炒作、强市、热度、普通品本身有溢价、设计颜值在线等条件；如果只是普通/破发阶段，普通靓号溢价会明显收缩。极稀缺号码属于例外，如通天8、通天6，不管行情和品种都值钱，但概率极低，不能作为拆闷包的常规收益模型。2026年这次多银行几乎同时放货也是慢跌挂树样本：弱市里短短几天十几万枚货进入市场，期货早期轻微溢价不能代表实物到货后的真实承接；题材好、设计好也无法对抗集中供给。',
+        experienceNote: '关键经验：有首评窗口的低开闷包可以A仓试错，但必须抢早期窗口；当价格连续涨几天、到1550-1600涨不动、再收来不及首评时，就不能继续追。拆闷包的第一原则是先看普通号兜底和价差。闷包与裸币差价小时，普通号亏损有限，可以用A仓赌首评/靓号弹性；闷包与裸币差价过大、首评窗口接近结束、炒作情绪透支时，就算有机会开出金马，也不划算。金马卖2200是窗口期个例，不能外推成稳定玩法。如果一个品遇到弱市、多银行/多渠道集中放货、短期供应量巨大，到货后价格一路阴跌，就不能用“颜值题材不错”安慰自己。',
+        pendingQuestions: '待补：准确发行日期、首发数量是否9000、普通号后续处理价格、金马卖出平台/成交日期、其它银行放货具体日期。',
+        confidence: 'rough',
+        status: 'active',
+        note: '用户真实参与案例。用于校准纪念币新品风控：弱市不等于全摁死，低开+首评+闷包弹性可A仓，但窗口结束必须退出。靓号高价需要多条件共振；极稀缺号独立于行情，但概率低到不能当模型。'
+      });
+      await upsertStage(gongshangArchiveId, {
+        stageName: '轻微溢价收3个闷包',
+        timeText: '低开后早期窗口',
+        stageType: 'A仓实操 / 闷包赌号',
+        priceStart: 1050,
+        priceHigh: 2200,
+        priceLow: null,
+        priceEnd: null,
+        summary: '用户喊人抽签，群里有人中签后轻微溢价收了3个闷包，成本约1050。开出一个金马，卖了2200；另外两个是普通号。这个金马只能当个例，它反映的是炒作/首评窗口里靓号溢价被放大的状态，不代表所有闷包平均收益。靓号高价需要首评、炒作、强市、热度、普通品有溢价和靓号属性叠加。',
+        actionRule: '这种机会只适合A仓和小数量试错；开出靓号要果断兑现，不能把偶发好号当成常态收益，也不能用金马高价去倒推闷包平均胜率。拆包纪律：低价闷包、普通号下行有限时才适合拆；闷包价格高、和裸币差距大时不适合拆。除通天6/8等极稀缺号外，不能因为存在靓号概率就高价拆包。',
+        evidenceNote: '用户真实交易口述；金马卖出价2200，成本约1050。普通/破发阶段若闷包约800、裸币约750，金马大概约1100；通天8、通天6等极稀缺号码不看行情也值钱，但概率极低，不进入常规赔率。',
+        confidence: 'rough',
+        sortOrder: 20,
+        note: '靓号赔率只服务A仓纪律，不作为稳定收益模型。'
+      });
+      await upsertStage(gongshangArchiveId, {
+        stageName: '多银行集中放货慢跌挂树',
+        timeText: '2026年3月下旬至今，几家银行几乎同时发售后',
+        stageType: '弱市集中放货 / 慢跌挂树',
+        priceStart: 1600,
+        priceHigh: 1600,
+        priceLow: 950,
+        priceEnd: 950,
+        summary: '这次不是单个工商卡的问题，而是几家银行几乎同时放货，短短几天十几万枚货进入市场。期货一开始还有轻微溢价，但到货后一路阴跌到现在。弱市本身承接差，叠加集中放货后，设计好看、题材好也没用。',
+        actionRule: '弱市中遇到多银行/多渠道集中放货，不能只看颜值题材和期货轻微溢价；到货前后应优先减仓或不追。慢跌不是还能等等，而是承接持续被供给消耗。',
+        evidenceNote: '用户口述补充；本地价格记录可见2026工商卡闷包1600后逐步跌回950，智能卡/农行卡等也有零散价格记录。具体十几万枚总量和各银行放货节奏待补。',
+        confidence: 'rough',
+        sortOrder: 60,
+        note: '用于“慢跌挂树”边界：弱市集中放货比单品题材更重要。'
+      });
+
+      await upsertTreeCase({
+        title: '2026多银行纪念币集中放货慢跌挂树案例',
+        track: '纪念币',
+        projectName: '工商卡/智能卡/农行卡等多银行龙银币',
+        reviewDate: '2026-06-06',
+        treeType: '弱市集中放货/慢跌挂树',
+        summaryConclusion: '弱市里几家银行几乎同时发售，短短几天十几万枚货砸进市场，期货一开始还有轻微溢价，但到货后一路阴跌到现在。设计好看、题材好也扛不住弱市和集中供给。',
+        background: '当时整体就是弱市，几家银行又几乎同时放货，市场承接本来就弱，短时间十几万枚供应集中释放。期货早期仍有轻微溢价，容易让人误以为还有承接，但这只是到货前的短期价格。',
+        judgmentAtThatTime: '如果只看题材、颜值或期货轻微溢价，容易低估“弱市 + 多渠道集中放货”的杀伤力。真正要看的不是单品好不好，而是市场能不能消化短期供给。',
+        actionAtThatTime: '这种结构下不能因为设计好看、题材不错或期货有轻微溢价就追；如果已经参与，到货前后要优先跑，不能等阴跌慢慢确认。',
+        laterOutcome: '等实物到货后，价格一路阴跌到现在。弱市承接被几家银行集中放货打穿，设计和题材都失效。',
+        rootCauseType: '供给集中/弱市承接不足',
+        exposedProblem: '没有把短时间十几万枚集中放货当成核心风险，也容易把期货轻微溢价误判成真实承接。慢跌不是安全，而是承接持续变弱。',
+        extractedLesson: '弱市里多渠道集中放货是慢跌挂树信号。题材好、设计好只能加分，不能对抗供给集中和承接不足；期货轻微溢价不等于到货后还能卖。遇到这种结构，宁可少赚，也不能恋战。',
+        shortLesson: '弱市集中放货，题材再好也要跑。',
+        note: '用户口述案例；具体涉及银行、总发行量、各渠道放货日期和当前价格可后续补证。'
+      });
+    }
   }
 
 ];
