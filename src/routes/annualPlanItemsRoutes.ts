@@ -333,6 +333,126 @@ const loadMarketAnchorSeries = async (db: any, item: any) => {
   return { anchor, rows };
 };
 
+const loadMarketAnchorSnapshot = async (db: any, item: any) => {
+  const anchor = inferAnchorSymbol(item);
+  if (!anchor) {
+    return { anchor: null, stats: null };
+  }
+
+  const stats = await db.get(
+    `SELECT COUNT(*) AS record_count,
+            MIN(trade_date) AS first_date,
+            MAX(trade_date) AS latest_date,
+            (SELECT close FROM market_anchor_daily_prices p2
+             WHERE p2.symbol = ?
+             ORDER BY p2.trade_date DESC, p2.id DESC
+             LIMIT 1) AS latest_price
+     FROM market_anchor_daily_prices
+     WHERE symbol = ?`,
+    [anchor.symbol, anchor.symbol]
+  );
+
+  return { anchor, stats };
+};
+
+const getCountLevel = (count: number) => {
+  if (count >= 1000) return { level: '高', score: 45 };
+  if (count >= 200) return { level: '高', score: 38 };
+  if (count >= 50) return { level: '中', score: 28 };
+  if (count >= 10) return { level: '中', score: 18 };
+  if (count > 0) return { level: '低', score: 10 };
+  return { level: '低', score: 0 };
+};
+
+const buildAssistanceConfidence = (
+  item: any,
+  profiles: any[],
+  archives: any[],
+  cycles: any[],
+  priceSnapshot: any,
+  anchorSnapshot: any
+) => {
+  const text = [item.category, item.object_name, item.thesis, item.current_reason, item.note]
+    .filter(Boolean)
+    .join(' ');
+  const commodityRecordCount = Number(priceSnapshot?.stats?.record_count || 0);
+  const anchorRecordCount = Number(anchorSnapshot?.stats?.record_count || 0);
+  const effectiveRecordCount = /贵金属|白银|黄金/.test(text)
+    ? Math.max(commodityRecordCount, anchorRecordCount)
+    : commodityRecordCount;
+  const countLevel = getCountLevel(effectiveRecordCount);
+  const evidenceScore = Math.min(
+    25,
+    (profiles.length > 0 ? 8 : 0)
+    + (archives.length > 0 ? 8 : 0)
+    + (cycles.length > 0 ? 9 : 0)
+  );
+
+  let scenarioStability = '中';
+  let scenarioScore = 18;
+  let systemWeight = '半辅助';
+  let manualFocus = ['真实可成交价格', '出货通道', '库存和现金流压力'];
+  let scenarioReason = '这个方向既看价格，也看现实成交、供货和承接，系统只能做半辅助。';
+
+  if (/贵金属|白银|黄金/.test(text)) {
+    scenarioStability = '高';
+    scenarioScore = 30;
+    systemWeight = '强辅助';
+    manualFocus = ['实物回收价/卖价是否跟大盘同步', '暴涨/阴跌/回踩不破', '趋势仓和波段仓拆清楚'];
+    scenarioReason = '贵金属大盘锚点连续，价格变化能被长期历史验证，适合系统强辅助。';
+  } else if (/纪念币|纪念钞|龙银|龙钞|银币|闷包/.test(text)) {
+    scenarioStability = '中';
+    scenarioScore = 18;
+    systemWeight = '半辅助';
+    manualFocus = ['白银大盘锚是否支持', '发行量/首发/评级窗口', '真实成交/承接/闷包赔率'];
+    scenarioReason = '纪念币/钞有价格和案例证据，但发行、评级、资金炒作和承接会改变结论。';
+  } else if (/泡泡|MOKOKO|LABUBU|福袋|千岛/.test(text)) {
+    scenarioStability = '低';
+    scenarioScore = 8;
+    systemWeight = '只记录';
+    manualFocus = ['补货/预售是否变化', '税务/平台规则是否冲击玩法', '福袋承接/车主是否还在', '二级跑货速度'];
+    scenarioReason = '泡泡玛特受补货、平台规则、福袋玩法和二级情绪影响很大，数据容易被场景改写。';
+  } else if (/苹果|游戏机|手机|Switch|PS5|固态|电子/.test(text)) {
+    scenarioStability = '低';
+    scenarioScore = 10;
+    systemWeight = '只记录';
+    manualFocus = ['平台活动真实可买量', '档口回收价是否锁定', '能否当天出货'];
+    scenarioReason = '撸货类核心是能不能真实拿货和快速出货，价格历史只能做背景记录。';
+  }
+
+  let score = Math.min(100, countLevel.score + evidenceScore + scenarioScore);
+  if (scenarioStability === '低') {
+    score = Math.min(score, 49);
+  }
+  if (systemWeight === '强辅助' && countLevel.score < 28) {
+    systemWeight = '半辅助';
+  }
+
+  const label = score >= 70 && systemWeight === '强辅助'
+    ? '高'
+    : score >= 45 && systemWeight !== '只记录'
+      ? '中'
+      : '低';
+  const level = label === '高' ? 'high' : label === '中' ? 'medium' : 'low';
+  const dataCompleteness = countLevel.level;
+  const dataReason = effectiveRecordCount > 0
+    ? `可用价格/锚点样本${effectiveRecordCount}条${anchorSnapshot?.anchor ? `，含${anchorSnapshot.anchor.label}` : ''}`
+    : '缺少可用价格样本';
+  const evidenceReason = `画像${profiles.length}条、档案${archives.length}条、周期案例${cycles.length}条`;
+
+  return {
+    level,
+    label,
+    score,
+    system_weight: systemWeight,
+    data_completeness: dataCompleteness,
+    scenario_stability: scenarioStability,
+    summary: `${label}可信度，${systemWeight}。${dataReason}；${evidenceReason}。${scenarioReason}`,
+    reasons: [dataReason, evidenceReason, scenarioReason],
+    manual_focus: manualFocus
+  };
+};
+
 const buildAnnualEntityConditions = (
   item: any,
   objectTerms: string[],
@@ -654,7 +774,8 @@ const summarizeAnnualPlanAssist = (
   profiles: any[],
   archives: any[],
   cycles: any[],
-  priceSnapshot: any
+  priceSnapshot: any,
+  anchorSnapshot: any
 ) => {
   const activeMainlines = planItems.filter((planItem) => (
     planItem.current_status === '生效中'
@@ -665,6 +786,7 @@ const summarizeAnnualPlanAssist = (
   const riskPoints: string[] = [];
   const switchSignals: string[] = [];
   const evidenceCards: Array<{ title: string; value: string; detail: string; tone: string }> = [];
+  const assistanceConfidence = buildAssistanceConfidence(item, profiles, archives, cycles, priceSnapshot, anchorSnapshot);
 
   if (item.current_status === '生效中' && ['主线', '次主线'].includes(item.current_role)) {
     supportPoints.push(`年度计划当前把它列为${item.current_role}，动作是${item.current_action}。`);
@@ -708,6 +830,20 @@ const summarizeAnnualPlanAssist = (
   const currentMainlineLabels = activeMainlines
     .map((planItem) => [planItem.category, planItem.object_name].filter(Boolean).join(' / '))
     .slice(0, 4);
+  evidenceCards.push({
+    title: '辅助可信度',
+    value: `${assistanceConfidence.label} · ${assistanceConfidence.system_weight}`,
+    detail: assistanceConfidence.summary,
+    tone: assistanceConfidence.level === 'high' ? 'green' : assistanceConfidence.level === 'medium' ? 'blue' : 'yellow'
+  });
+  if (assistanceConfidence.level === 'high') {
+    supportPoints.push(`辅助可信度高：${assistanceConfidence.summary}`);
+  } else if (assistanceConfidence.level === 'low') {
+    riskPoints.push(`辅助可信度低：${assistanceConfidence.summary}`);
+  } else {
+    switchSignals.push(`辅助可信度中等：${assistanceConfidence.manual_focus.join('、')}确认后再升级动作。`);
+  }
+
   evidenceCards.push({
     title: '年度计划内位置',
     value: `${item.current_role} / ${item.current_action} / ${item.current_status}`,
@@ -762,6 +898,7 @@ const summarizeAnnualPlanAssist = (
     level,
     title,
     summary,
+    assistance_confidence: assistanceConfidence,
     support_points: supportPoints.slice(0, 5),
     risk_points: riskPoints.slice(0, 5),
     switch_signals: switchSignals.slice(0, 5),
@@ -900,7 +1037,7 @@ router.get('/annual-plan-items/:id/mainline-assist', async (req, res) => {
     }
 
     const objectTerms = splitSearchTerms(item.object_name);
-    const [planItems, profiles, archives, cycles, priceSnapshot] = await Promise.all([
+    const [planItems, profiles, archives, cycles, priceSnapshot, anchorSnapshot] = await Promise.all([
       db.all(
         `SELECT *
          FROM annual_plan_items
@@ -985,10 +1122,11 @@ router.get('/annual-plan-items/:id/mainline-assist', async (req, res) => {
         if (objectTerms.length > 0) return scopedCycles;
         return loadCycles(false);
       })(),
-      loadPriceSnapshot(db, item, objectTerms)
+      loadPriceSnapshot(db, item, objectTerms),
+      loadMarketAnchorSnapshot(db, item)
     ]);
 
-    const assist = summarizeAnnualPlanAssist(item, planItems, profiles, archives, cycles, priceSnapshot);
+    const assist = summarizeAnnualPlanAssist(item, planItems, profiles, archives, cycles, priceSnapshot, anchorSnapshot);
 
     res.json({
       success: true,
@@ -1010,6 +1148,7 @@ router.get('/annual-plan-items/:id/mainline-assist', async (req, res) => {
           title: assist.title,
           summary: assist.summary
         },
+        assistance_confidence: assist.assistance_confidence,
         support_points: assist.support_points,
         risk_points: assist.risk_points,
         switch_signals: assist.switch_signals,

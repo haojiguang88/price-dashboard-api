@@ -34,11 +34,104 @@ const archiveActiveAnnualPlansForYear = async (db: any, year: number, now: strin
   await db.run(query, params);
 };
 
+const findCarryOverSourcePlan = async (db: any, year: number) => {
+  return db.get(
+    `SELECT *
+     FROM annual_plans
+     WHERE is_deleted = 0
+       AND year < ?
+     ORDER BY year DESC,
+              CASE WHEN status = '生效中' THEN 0 ELSE 1 END,
+              created_at DESC
+     LIMIT 1`,
+    [year]
+  );
+};
+
+const carryOverAnnualPlanItems = async (db: any, sourcePlanId: number | string, targetPlanId: number | string, now: string) => {
+  const sourceItems = await db.all(
+    `SELECT scope_type,
+            category,
+            object_name,
+            current_role,
+            current_action,
+            current_status,
+            thesis,
+            current_reason,
+            position_rule,
+            exit_rule,
+            downgrade_reason,
+            resume_condition,
+            priority_order,
+            note
+     FROM annual_plan_items
+     WHERE plan_id = ?
+       AND is_deleted = 0
+     ORDER BY COALESCE(priority_order, 999999), id`,
+    [sourcePlanId]
+  );
+
+  for (const item of sourceItems) {
+    await db.run(
+      `INSERT INTO annual_plan_items (
+        plan_id,
+        scope_type,
+        category,
+        object_name,
+        current_role,
+        current_action,
+        current_status,
+        thesis,
+        current_reason,
+        position_rule,
+        exit_rule,
+        downgrade_reason,
+        resume_condition,
+        priority_order,
+        note,
+        is_deleted,
+        created_at,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+      [
+        targetPlanId,
+        item.scope_type,
+        item.category,
+        item.object_name,
+        item.current_role,
+        item.current_action,
+        item.current_status,
+        item.thesis,
+        item.current_reason,
+        item.position_rule,
+        item.exit_rule,
+        item.downgrade_reason,
+        item.resume_condition,
+        item.priority_order,
+        item.note,
+        now,
+        now
+      ]
+    );
+  }
+
+  return sourceItems.length;
+};
+
 // 新增年度计划
 router.post('/annual-plans', async (req, res) => {
   try {
     const db = await getDb();
-    const { core_goal, overall_strategy, capital_principle, execution_principle, market_background, risk_note, note } = req.body;
+    const {
+      core_goal,
+      overall_strategy,
+      capital_principle,
+      execution_principle,
+      market_background,
+      risk_note,
+      note,
+      carry_over_previous_items
+    } = req.body;
     const normalized = normalizeAnnualPlanOverview(req.body);
     
     if ('error' in normalized) {
@@ -49,6 +142,11 @@ router.post('/annual-plans', async (req, res) => {
     await db.run('BEGIN TRANSACTION');
     let result: any;
     let createdRecord: any;
+    let carryOverResult = {
+      copied_items_count: 0,
+      source_plan_id: null as number | string | null,
+      source_year: null as number | null
+    };
 
     try {
       if (normalized.value.status === '生效中') {
@@ -58,6 +156,17 @@ router.post('/annual-plans', async (req, res) => {
         'INSERT INTO annual_plans (year, title, core_goal, overall_strategy, capital_principle, execution_principle, market_background, risk_note, status, note, is_deleted, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
         [normalized.value.year, normalized.value.title, core_goal, overall_strategy, capital_principle, execution_principle, market_background, risk_note, normalized.value.status, note, 0, now, now]
       );
+      if (carry_over_previous_items) {
+        const sourcePlan = await findCarryOverSourcePlan(db, normalized.value.year);
+        if (sourcePlan) {
+          const copiedItemsCount = await carryOverAnnualPlanItems(db, sourcePlan.id, result.lastID, now);
+          carryOverResult = {
+            copied_items_count: copiedItemsCount,
+            source_plan_id: sourcePlan.id,
+            source_year: Number(sourcePlan.year)
+          };
+        }
+      }
       createdRecord = await db.get('SELECT * FROM annual_plans WHERE id = ? AND is_deleted = 0', [result.lastID]);
       await db.run('COMMIT');
     } catch (error) {
@@ -65,7 +174,13 @@ router.post('/annual-plans', async (req, res) => {
       throw error;
     }
     
-    res.json({ success: true, data: createdRecord || { id: result.lastID } });
+    res.json({
+      success: true,
+      data: {
+        ...(createdRecord || { id: result.lastID }),
+        carry_over: carryOverResult
+      }
+    });
   } catch (error) {
     console.error('Error creating annual plan:', error);
     res.status(500).json({ success: false, message: '新增年度计划失败' });
