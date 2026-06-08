@@ -1,4 +1,4 @@
-export const MARKET_ASSIST_EVALUATOR_VERSION = "silver-swing-v1.2";
+export const MARKET_ASSIST_EVALUATOR_VERSION = "silver-swing-v1.3";
 
 export interface MarketPricePoint {
   trade_date?: string;
@@ -46,6 +46,7 @@ export interface SilverSwingMetrics {
   ma250: number | null;
   closeVsMa20Percent: number | null;
   closeVsMa60Percent: number | null;
+  closeVsMa250Percent: number | null;
 }
 
 export interface SilverSwingRuleEvaluation {
@@ -217,7 +218,8 @@ export const calculateSilverSwingMetrics = (
       ma200,
       ma250,
       closeVsMa20Percent: percentChange(ma20, point.close),
-      closeVsMa60Percent: percentChange(ma60, point.close)
+      closeVsMa60Percent: percentChange(ma60, point.close),
+      closeVsMa250Percent: percentChange(ma250, point.close)
     }
   };
 };
@@ -314,6 +316,11 @@ const evaluateRule = (
           && (maxSingleDayRise === undefined || compareLt(metrics.bestSingleDayRise10dPercent, maxSingleDayRise))
       };
     }
+    case "ma250_stretch":
+      return {
+        ruleKey: rule.ruleKey,
+        hit: compareGte(metrics.closeVsMa250Percent, threshold.block_wave_buy_vs_ma250_gte_percent)
+      };
     case "fast_drop":
       return {
         ruleKey: rule.ruleKey,

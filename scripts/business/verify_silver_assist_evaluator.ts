@@ -22,6 +22,7 @@ const requiredRules = [
   "fast_rise",
   "overheat_rise",
   "slow_rise",
+  "ma250_stretch",
   "fast_drop",
   "falling_knife",
   "slow_decline",
@@ -68,17 +69,17 @@ const regressionSamples = [
   },
   {
     date: "2025-12-05",
-    shouldHit: ["slow_rise"],
+    shouldHit: ["slow_rise", "ma250_stretch"],
     shouldMiss: ["extreme_volatility", "fast_rise", "overheat_rise", "fast_drop", "falling_knife", "sideways"]
   },
   {
     date: "2025-12-24",
-    shouldHit: ["high_volatility", "fast_rise", "overheat_rise"],
+    shouldHit: ["high_volatility", "fast_rise", "overheat_rise", "ma250_stretch"],
     shouldMiss: ["extreme_volatility", "falling_knife"]
   },
   {
     date: "2026-01-29",
-    shouldHit: ["extreme_volatility", "fast_rise", "overheat_rise"],
+    shouldHit: ["extreme_volatility", "fast_rise", "overheat_rise", "ma250_stretch"],
     shouldMiss: ["falling_knife", "sideways"]
   },
   {

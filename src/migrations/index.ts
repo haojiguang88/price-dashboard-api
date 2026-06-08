@@ -4046,6 +4046,44 @@ const migrations: Migration[] = [
         source_note = excluded.source_note,
         updated_at = CURRENT_TIMESTAMP;
     `
+  },
+  {
+    id: '20260608_005_add_silver_ma250_stretch_rule',
+    name: 'Add silver MA250 stretch discipline rule',
+    sql: `
+      INSERT INTO market_assist_rules
+        (asset_symbol, asset_label, rule_group, group_label, rule_key, rule_name, rule_type, priority, threshold_json, action_hint, display_order, status, note, evidence_window, source_note)
+      VALUES
+        (
+          'SGE_AGTD',
+          '白银延期',
+          'silver_swing_plan',
+          '白银实物波段计划口径',
+          'ma250_stretch',
+          '远离年线/趋势拉伸',
+          'structure',
+          'high',
+          '{"logic":"tiered","block_wave_buy_vs_ma250_gte_percent":35,"sell_ladder_vs_ma250_gte_percent":45,"sell_ladder_vs_ma20_gte_percent":8,"force_sell_vs_ma250_gte_percent":60}',
+          '距年线过远时不再新增波段仓；45%+且短线偏热时开始挂梯子卖，60%+至少卖一笔波段。',
+          32,
+          'active',
+          '这条不是猜顶，而是防止慢涨后离年线过远还继续打满。用于约束 2025-12 这种没有触发暴涨、但价格已经大幅跑赢年线的阶段。',
+          'SGE_AGTD 2025-12 拉伸样本与 2026 极端波动前置阶段',
+          '由白银实物波段模拟校准：35% 降低买入权限，45%+MA20偏热开始卖梯子，60% 强制至少处理一笔波段仓'
+        )
+      ON CONFLICT(asset_symbol, rule_group, rule_key) DO UPDATE SET
+        rule_name = excluded.rule_name,
+        rule_type = excluded.rule_type,
+        priority = excluded.priority,
+        threshold_json = excluded.threshold_json,
+        action_hint = excluded.action_hint,
+        display_order = excluded.display_order,
+        status = excluded.status,
+        note = excluded.note,
+        evidence_window = excluded.evidence_window,
+        source_note = excluded.source_note,
+        updated_at = CURRENT_TIMESTAMP;
+    `
   }
 
 ];

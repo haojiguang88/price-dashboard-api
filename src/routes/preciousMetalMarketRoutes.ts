@@ -115,6 +115,7 @@ const stateStepConfigs = [
   { key: "overheat_rise", label: "连续过热", color: "#fb923c", tone: "danger" },
   { key: "fast_rise", label: "暴涨", color: "#facc15", tone: "opportunity" },
   { key: "slow_rise", label: "慢涨", color: "#84cc16", tone: "opportunity" },
+  { key: "ma250_stretch", label: "远离年线", color: "#38bdf8", tone: "watch" },
   { key: "sideways", label: "横盘", color: "#94a3b8", tone: "neutral" },
   { key: "healthy_pullback", label: "回踩不破", color: "#34d399", tone: "opportunity" },
   { key: "slow_decline", label: "阴跌", color: "#c084fc", tone: "watch" },
@@ -137,6 +138,7 @@ const pickPrimaryState = (evaluation: SilverSwingEvaluation) => {
   if (hits.has("fast_drop")) return { key: "fast_drop", label: "暴跌", tone: "danger" };
   if (hits.has("overheat_rise")) return { key: "overheat_rise", label: "连续过热", tone: "danger" };
   if (hits.has("fast_rise")) return { key: "fast_rise", label: "暴涨", tone: "opportunity" };
+  if (hits.has("ma250_stretch")) return { key: "ma250_stretch", label: "远离年线", tone: "watch" };
   if (hits.has("high_volatility") && hits.has("slow_rise")) {
     return { key: "high_volatility_slow_rise", label: "高波动 + 慢涨", tone: "watch" };
   }
@@ -151,10 +153,16 @@ const pickPrimaryState = (evaluation: SilverSwingEvaluation) => {
   return { key: "neutral", label: "中性观察", tone: "neutral" };
 };
 
-const buildActionBias = (evaluation: SilverSwingEvaluation) => {
+const buildActionBias = (evaluation: SilverSwingEvaluation, rules: any[] = []) => {
   const hits = new Set(evaluation.hitRuleKeys);
   const metrics = evaluation.metrics;
-  const metricText = `1日 ${formatSignedPercent(metrics.dailyReturnPercent)}，5日 ${formatSignedPercent(metrics.return5dPercent)}，10日 ${formatSignedPercent(metrics.return10dPercent)}，20日 ${formatSignedPercent(metrics.return20dPercent)}，20日振幅 ${formatSignedPercent(metrics.range20dPercent)}`;
+  const metricText = `1日 ${formatSignedPercent(metrics.dailyReturnPercent)}，5日 ${formatSignedPercent(metrics.return5dPercent)}，10日 ${formatSignedPercent(metrics.return10dPercent)}，20日 ${formatSignedPercent(metrics.return20dPercent)}，20日振幅 ${formatSignedPercent(metrics.range20dPercent)}，距年线 ${formatSignedPercent(metrics.closeVsMa250Percent)}`;
+  const stretchRule = rules.find(rule => rule.rule_key === "ma250_stretch");
+  const stretchThreshold = parseJsonValue(stretchRule?.threshold_json) || {};
+  const blockWaveBuyVsMa250 = Number(stretchThreshold.block_wave_buy_vs_ma250_gte_percent ?? 35);
+  const sellLadderVsMa250 = Number(stretchThreshold.sell_ladder_vs_ma250_gte_percent ?? 45);
+  const sellLadderVsMa20 = Number(stretchThreshold.sell_ladder_vs_ma20_gte_percent ?? 8);
+  const forceSellVsMa250 = Number(stretchThreshold.force_sell_vs_ma250_gte_percent ?? 60);
 
   if (hits.has("extreme_volatility")) {
     return {
@@ -187,6 +195,41 @@ const buildActionBias = (evaluation: SilverSwingEvaluation) => {
       position_hint: "有仓开始搭梯子卖；无仓不追涨。",
       summary: `暴涨信号命中。${metricText}。`
     };
+  }
+  if (hits.has("ma250_stretch")) {
+    const ma250Stretch = metrics.closeVsMa250Percent;
+    const ma20Stretch = metrics.closeVsMa20Percent;
+    const forceSell = ma250Stretch !== null && ma250Stretch >= forceSellVsMa250;
+    const ladderSell = ma250Stretch !== null
+      && ma250Stretch >= sellLadderVsMa250
+      && ma20Stretch !== null
+      && ma20Stretch >= sellLadderVsMa20;
+    const buyReduced = ma250Stretch !== null && ma250Stretch >= blockWaveBuyVsMa250;
+
+    if (forceSell) {
+      return {
+        buy_permission: "blocked",
+        sell_discipline: "open",
+        position_hint: "离年线过远，已有波段仓至少卖一笔；不再新增波段仓。",
+        summary: `年线拉伸进入强纪律区。${metricText}，距MA20 ${formatSignedPercent(ma20Stretch)}。`
+      };
+    }
+    if (ladderSell) {
+      return {
+        buy_permission: "blocked",
+        sell_discipline: "open",
+        position_hint: "开始挂卖出梯子；先处理波段仓，防止慢涨后突然回吐。",
+        summary: `年线拉伸进入梯子卖区。${metricText}，距MA20 ${formatSignedPercent(ma20Stretch)}。`
+      };
+    }
+    if (buyReduced) {
+      return {
+        buy_permission: "reduced",
+        sell_discipline: "watch",
+        position_hint: "只允许底仓/小仓观察，不新增波段仓，不一把打满。",
+        summary: `价格已经明显跑在年线上方。${metricText}，距MA20 ${formatSignedPercent(ma20Stretch)}。`
+      };
+    }
   }
   if (hits.has("high_volatility") && hits.has("slow_rise")) {
     return {
@@ -322,7 +365,7 @@ const buildCurrentSignalPayload = (
   const primaryState = pickPrimaryState(evaluation);
   const actionBias = ruleGroup === "precious_metal_plan" || symbolConfig.symbol === "XAUUSD"
     ? buildGoldAnchorBias(evaluation)
-    : buildActionBias(evaluation);
+    : buildActionBias(evaluation, rules);
   const hitSet = new Set(evaluation.hitRuleKeys);
   const ruleMap = new Map(rules.map((rule: any) => [rule.rule_key, rule]));
   const stateSteps = stateStepConfigs.map(config => {
