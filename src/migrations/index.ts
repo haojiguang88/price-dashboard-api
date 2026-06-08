@@ -3464,6 +3464,588 @@ const migrations: Migration[] = [
         note: '用户口述案例；具体涉及银行、总发行量、各渠道放货日期和当前价格可后续补证。'
       });
     }
+  },
+  {
+    id: '20260607_001_create_market_assist_rules',
+    name: 'Create market assist rules for precious metal planning discipline',
+    sql: `
+      CREATE TABLE IF NOT EXISTS market_assist_rules (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        asset_symbol TEXT NOT NULL,
+        asset_label TEXT NOT NULL,
+        rule_group TEXT NOT NULL,
+        group_label TEXT NOT NULL,
+        rule_key TEXT NOT NULL,
+        rule_name TEXT NOT NULL,
+        rule_type TEXT NOT NULL DEFAULT 'threshold',
+        priority TEXT NOT NULL DEFAULT 'medium',
+        threshold_json TEXT NOT NULL DEFAULT '{}',
+        action_hint TEXT,
+        display_order INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'active',
+        note TEXT,
+        evidence_window TEXT,
+        source_note TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(asset_symbol, rule_group, rule_key)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_market_assist_rules_scope
+        ON market_assist_rules(asset_symbol, rule_group, status, display_order);
+
+      INSERT OR IGNORE INTO market_assist_rules
+        (asset_symbol, asset_label, rule_group, group_label, rule_key, rule_name, rule_type, priority, threshold_json, action_hint, display_order, status, note, evidence_window, source_note)
+      VALUES
+        (
+          'SGE_AGTD',
+          '白银延期',
+          'silver_swing_plan',
+          '白银波段计划口径',
+          'extreme_volatility',
+          '极端高波动',
+          'state_gate',
+          'high',
+          '{"window_intervals":20,"close_points":21,"score_gte":3,"logic":"hit_at_least_3_of_4","conditions":[{"metric":"avg_abs_daily_return","gte_percent":3},{"metric":"daily_return_std","gte_percent":4.5},{"metric":"high_low_range_20_intervals","gte_percent":35},{"metric":"days_abs_return_gte_4pct","gte_days":6}]}',
+          '买入权限关闭，卖出纪律打开；只处理仓位，不新增仓位。',
+          10,
+          'active',
+          '极端高波动不是预测区，是纪律区。有仓按梯子卖或减仓，暴跌后禁止接飞刀，等高波动解除和结构修复后再评估买入。',
+          '2026白银极端波动轮次：2026-01-05 至 2026-04-20',
+          '由 SGE_AGTD 2025-12-01 至 2026-06-05 历史数据反推'
+        ),
+        (
+          'SGE_AGTD',
+          '白银延期',
+          'silver_swing_plan',
+          '白银波段计划口径',
+          'fast_rise',
+          '暴涨',
+          'threshold',
+          'high',
+          '{"logic":"any","daily_return_gte_percent":6,"return_3d_gte_percent":10,"return_5d_gte_percent":15}',
+          '有仓开始卖出纪律；无仓禁止追涨。',
+          20,
+          'active',
+          '暴涨先想卖，不把短线加速当永久趋势。',
+          '2026白银波动样本',
+          '由 SGE_AGTD 2025-12-01 至 2026-06-05 历史数据反推'
+        ),
+        (
+          'SGE_AGTD',
+          '白银延期',
+          'silver_swing_plan',
+          '白银波段计划口径',
+          'overheat_rise',
+          '连续暴涨/过热',
+          'threshold',
+          'high',
+          '{"logic":"any","return_5d_gte_percent":20,"return_20d_gte_percent":35}',
+          '卖出优先，至少减波段仓；不再幻想继续直线飞。',
+          30,
+          'active',
+          '连续暴涨属于利润兑现区，尤其配合实物端加价抢收、讨论热度爆炸时。',
+          '2026白银波动样本',
+          '由 SGE_AGTD 2025-12-01 至 2026-06-05 历史数据反推'
+        ),
+        (
+          'SGE_AGTD',
+          '白银延期',
+          'silver_swing_plan',
+          '白银波段计划口径',
+          'fast_drop',
+          '暴跌',
+          'threshold',
+          'high',
+          '{"logic":"any","daily_return_lte_percent":-5,"return_3d_lte_percent":-10,"return_5d_lte_percent":-12}',
+          '买入权限关闭，先防接飞刀。',
+          40,
+          'active',
+          '暴跌不是便宜提醒，是风险闸门。等止跌结构和实物端承接恢复。',
+          '2026白银波动样本',
+          '由 SGE_AGTD 2025-12-01 至 2026-06-05 历史数据反推'
+        ),
+        (
+          'SGE_AGTD',
+          '白银延期',
+          'silver_swing_plan',
+          '白银波段计划口径',
+          'falling_knife',
+          '极端暴跌/飞刀',
+          'threshold',
+          'high',
+          '{"logic":"any","daily_return_lte_percent":-8,"return_3d_lte_percent":-15,"return_5d_lte_percent":-20}',
+          '绝对不补仓，等结构修复。',
+          50,
+          'active',
+          '飞刀状态下不讨论抄底，只讨论已有仓位、现金和风险。',
+          '2026白银波动样本',
+          '由 SGE_AGTD 2025-12-01 至 2026-06-05 历史数据反推'
+        ),
+        (
+          'SGE_AGTD',
+          '白银延期',
+          'silver_swing_plan',
+          '白银波段计划口径',
+          'slow_decline',
+          '阴跌',
+          'threshold',
+          'medium',
+          '{"logic":"all","return_10d_lte_percent":-5,"down_days_10d_gte":6,"max_single_day_drop_gt_percent":-6}',
+          '慢刀子割肉，不能抄底；有仓考虑慢慢出。',
+          60,
+          'active',
+          '阴跌比单日暴跌更磨人，不能因为没有崩盘就当安全。',
+          '2026白银波动样本',
+          '由 SGE_AGTD 2025-12-01 至 2026-06-05 历史数据反推'
+        ),
+        (
+          'SGE_AGTD',
+          '白银延期',
+          'silver_swing_plan',
+          '白银波段计划口径',
+          'sideways',
+          '横盘',
+          'threshold',
+          'medium',
+          '{"logic":"all","abs_return_10d_lte_percent":2.5,"range_10d_lte_percent":8}',
+          '真横盘才允许观察，不急着动作。',
+          70,
+          'active',
+          '横盘要同时看净涨跌和振幅，只是跌慢了不等于横盘。',
+          '2026白银波动样本',
+          '由 SGE_AGTD 2025-12-01 至 2026-06-05 历史数据反推'
+        ),
+        (
+          'SGE_AGTD',
+          '白银延期',
+          'silver_swing_plan',
+          '白银波段计划口径',
+          'medium_sideways',
+          '中期横盘',
+          'threshold',
+          'low',
+          '{"logic":"all","abs_return_20d_lte_percent":4,"range_20d_lte_percent":12}',
+          '中期安静区才观察，2026 这轮几乎没出现。',
+          80,
+          'active',
+          '中期横盘要求更严，防止把高波动后的弱势拉扯误判成盘整。',
+          '2026白银波动样本',
+          '由 SGE_AGTD 2025-12-01 至 2026-06-05 历史数据反推'
+        ),
+        (
+          'SGE_AGTD',
+          '白银延期',
+          'silver_swing_plan',
+          '白银波段计划口径',
+          'healthy_pullback',
+          '回踩不破',
+          'structure',
+          'medium',
+          '{"logic":"all","drawdown_from_recent_high_between_percent":[5,12],"no_effective_break_ma":["MA20","MA60"],"recover_within_days":[3,5],"excluded_states":["extreme_volatility","falling_knife"]}',
+          '才算健康回踩；暴跌和极端高波动下不适用。',
+          90,
+          'active',
+          '回踩不破必须排除飞刀状态，需要看均线、恢复速度和实物端承接，不是跌了一截就叫回踩。',
+          '2026白银波动样本',
+          '由 SGE_AGTD 2025-12-01 至 2026-06-05 历史数据反推'
+        );
+    `
+  },
+  {
+    id: '20260607_002_calibrate_silver_high_volatility_rule',
+    name: 'Add calibrated high volatility rule for silver swing planning',
+    sql: `
+      INSERT INTO market_assist_rules
+        (asset_symbol, asset_label, rule_group, group_label, rule_key, rule_name, rule_type, priority, threshold_json, action_hint, display_order, status, note, evidence_window, source_note)
+      VALUES
+        (
+          'SGE_AGTD',
+          '白银延期',
+          'silver_swing_plan',
+          '白银波段计划口径',
+          'high_volatility',
+          '高波动',
+          'state_gate',
+          'high',
+          '{"window_intervals":20,"close_points":21,"score_gte":3,"logic":"hit_at_least_3_of_4","conditions":[{"metric":"avg_abs_daily_return","gte_percent":2},{"metric":"daily_return_std","gte_percent":3},{"metric":"high_low_range_20_intervals","gte_percent":20},{"metric":"days_abs_return_gte_4pct","gte_days":3}],"excluded_states":["extreme_volatility"]}',
+          '买入降权，不开大仓；有仓按纪律管理，等波动冷却和结构修复。',
+          15,
+          'active',
+          '高波动不是普通横盘，也不是极端纪律区。它更像冷却/警戒区：可以观察和复盘，但不能把短暂反弹或两三天横住当成安全。',
+          '2011、2020、2026 白银高波动样本；2026-05-18 至 2026-06-05 仍处高波动冷却区',
+          '由 SGE_AGTD 2006-10-30 至 2026-06-05 历史数据校准；极端高波动命中 5 段，高波动用于承接极端前后和当前冷却段'
+        )
+      ON CONFLICT(asset_symbol, rule_group, rule_key) DO UPDATE SET
+        rule_name = excluded.rule_name,
+        rule_type = excluded.rule_type,
+        priority = excluded.priority,
+        threshold_json = excluded.threshold_json,
+        action_hint = excluded.action_hint,
+        display_order = excluded.display_order,
+        status = excluded.status,
+        note = excluded.note,
+        evidence_window = excluded.evidence_window,
+        source_note = excluded.source_note,
+        updated_at = CURRENT_TIMESTAMP;
+    `
+  },
+  {
+    id: '20260608_001_refine_silver_extreme_volatility_discipline',
+    name: 'Refine silver extreme volatility discipline rules',
+    sql: `
+      UPDATE market_assist_rules
+      SET action_hint = '买入权限关闭，卖出纪律打开；只处理已有仓位，不新增仓位。',
+          note = '极端高波动不是预测区，是纪律区。先按子纪律处理：买入锁定、卖出梯子、飞刀防守、恢复评估。暴涨时处理利润和波段仓，暴跌后禁止接飞刀，等高波动解除和结构修复后再评估买入。',
+          updated_at = CURRENT_TIMESTAMP
+      WHERE asset_symbol = 'SGE_AGTD'
+        AND rule_group = 'silver_swing_plan'
+        AND rule_key = 'extreme_volatility';
+
+      INSERT INTO market_assist_rules
+        (asset_symbol, asset_label, rule_group, group_label, rule_key, rule_name, rule_type, priority, threshold_json, action_hint, display_order, status, note, evidence_window, source_note)
+      VALUES
+        (
+          'SGE_AGTD',
+          '白银延期',
+          'silver_swing_plan',
+          '白银波段计划口径',
+          'extreme_buy_lock',
+          '极端期买入锁定',
+          'discipline',
+          'high',
+          '{"logic":"discipline_only","applies_when":["extreme_volatility"],"buy_permission":"closed","allowed_actions":["review_existing_position","sell_plan","cash_protection"],"blocked_actions":["new_buy","average_down","chase_rise"],"reopen_requires":["extreme_volatility_cleared","no_falling_knife","structure_repaired","physical_premium_normalized"]}',
+          '不新开仓，不补仓，不追涨；只复核已有仓位、现金和卖出计划。',
+          11,
+          'active',
+          '极端高波动里最容易把“机会”看成“必须上车”。纪律上先关买入权限，避免连续暴涨追进去，也避免暴跌后接飞刀。',
+          '2011、2020、2026 极端高波动样本',
+          '由用户口径“极端高波动时买入权限关闭，卖出纪律打开”细化'
+        ),
+        (
+          'SGE_AGTD',
+          '白银延期',
+          'silver_swing_plan',
+          '白银波段计划口径',
+          'extreme_sell_ladder',
+          '极端期卖出梯子',
+          'discipline',
+          'high',
+          '{"logic":"discipline_only","applies_when":["extreme_volatility","fast_rise","overheat_rise"],"sell_priority":["swing_position","profit_position","core_position_if_continuous_overheat"],"execution":["split_batches","lock_profit_first","avoid_top_guessing"],"core_position_exception":"continuous_overheat_can_sell_core_too"}',
+          '大涨先卖波段仓，连续过热时底仓也可以按计划参与出货。',
+          12,
+          'active',
+          '极端拉升时不要猜最高点。先落袋，再谈卖飞。若叠加实物端加价抢收、全网讨论、LOF/周边过热，卖出纪律优先级继续提高。',
+          '2020八月拉升、2026一月拉升样本',
+          '结合用户口径：暴涨要出货，底仓在连续暴涨机会里也能出'
+        ),
+        (
+          'SGE_AGTD',
+          '白银延期',
+          'silver_swing_plan',
+          '白银波段计划口径',
+          'extreme_crash_guard',
+          '极端期飞刀防守',
+          'discipline',
+          'high',
+          '{"logic":"discipline_only","applies_when":["extreme_volatility","fast_drop","falling_knife"],"buy_permission":"closed","wait_for":["no_new_low","fast_drop_cleared","physical_bid_recovered","premium_spread_normalized"],"blocked_actions":["catch_falling_knife","dense_average_down","use_core_cash_to_rescue"]}',
+          '暴跌不接飞刀，不密集补仓；等止跌结构和实物收货恢复。',
+          13,
+          'active',
+          '暴跌不是便宜提醒。尤其极端高波动里，第一段暴跌后可能还有第二段、第三段，商家补跌和情绪退潮也会滞后。',
+          '2020疫情杀跌、2026二月和三月暴跌样本',
+          '结合用户口径：暴跌不接飞刀，阴跌不抄底'
+        ),
+        (
+          'SGE_AGTD',
+          '白银延期',
+          'silver_swing_plan',
+          '白银波段计划口径',
+          'extreme_reentry_check',
+          '极端后恢复评估',
+          'discipline',
+          'medium',
+          '{"logic":"discipline_only","applies_after":["extreme_volatility"],"reentry_requires":["extreme_volatility_false","falling_knife_false","fast_drop_false","high_volatility_cooling","sideways_or_healthy_pullback","physical_market_can_buy_without_rush"],"position_action":"small_batch_only_after_recheck"}',
+          '极端解除后也不立刻大买，只能小批次重新评估。',
+          14,
+          'active',
+          '极端高波动结束不等于安全。要先看高波动是否冷却、飞刀是否解除、是否横住或回踩不破，以及实物端是否从抢购/补跌/没人要恢复到正常成交。',
+          '2011反抽后继续阴跌、2020疫情修复、2026高波动冷却样本',
+          '用于把极端状态之后的重新评估和仓位分层衔接起来'
+        )
+      ON CONFLICT(asset_symbol, rule_group, rule_key) DO UPDATE SET
+        rule_name = excluded.rule_name,
+        rule_type = excluded.rule_type,
+        priority = excluded.priority,
+        threshold_json = excluded.threshold_json,
+        action_hint = excluded.action_hint,
+        display_order = excluded.display_order,
+        status = excluded.status,
+        note = excluded.note,
+        evidence_window = excluded.evidence_window,
+        source_note = excluded.source_note,
+        updated_at = CURRENT_TIMESTAMP;
+    `
+  },
+  {
+    id: '20260608_002_add_silver_slow_rise_rule',
+    name: 'Add silver slow rise rule for swing planning',
+    sql: `
+      INSERT INTO market_assist_rules
+        (asset_symbol, asset_label, rule_group, group_label, rule_key, rule_name, rule_type, priority, threshold_json, action_hint, display_order, status, note, evidence_window, source_note)
+      VALUES
+        (
+          'SGE_AGTD',
+          '白银延期',
+          'silver_swing_plan',
+          '白银波段计划口径',
+          'slow_rise',
+          '慢涨',
+          'threshold',
+          'medium',
+          '{"logic":"all","return_10d_gte_percent":4,"return_20d_gte_percent":8,"return_20d_lte_percent":30,"up_days_10d_gte":5,"max_single_day_rise_lt_percent":6,"excluded_states":["extreme_volatility","fast_rise","overheat_rise","fast_drop","falling_knife"]}',
+          '慢涨不出，不追涨；有仓按计划持有观察，卖点提前挂好。',
+          35,
+          'active',
+          '慢涨不是暴涨，也不是横盘。它更适合执行“慢涨不出”：有仓别急着一把卖飞，但也不因为涨得舒服就追高加仓。',
+          '2025-12 白银温和上行段、2026-04 反弹段',
+          '由 SGE_AGTD 历史数据和用户口径“慢涨不出”补充'
+        )
+      ON CONFLICT(asset_symbol, rule_group, rule_key) DO UPDATE SET
+        rule_name = excluded.rule_name,
+        rule_type = excluded.rule_type,
+        priority = excluded.priority,
+        threshold_json = excluded.threshold_json,
+        action_hint = excluded.action_hint,
+        display_order = excluded.display_order,
+        status = excluded.status,
+        note = excluded.note,
+        evidence_window = excluded.evidence_window,
+        source_note = excluded.source_note,
+        updated_at = CURRENT_TIMESTAMP;
+    `
+  },
+  {
+    id: '20260608_003_refine_silver_healthy_pullback_rule',
+    name: 'Refine silver healthy pullback rule for dynamic state line',
+    sql: `
+      UPDATE market_assist_rules
+      SET threshold_json = '{"logic":"all","drawdown_from_recent_high_between_percent":[5,12],"close_vs_ma20_gte_percent":-2,"close_vs_ma60_gte_percent":-1,"recovery_from_5d_low_gte_percent":2.5,"excluded_states":["extreme_volatility","fast_drop","falling_knife"]}',
+          action_hint = '才算健康回踩；暴跌和极端高波动下不适用。',
+          note = '回踩不破必须同时满足：从近20日高点有适度回撤、没有有效跌破 MA20/MA60、且从近5日低点有修复。它不是跌了一截就抄底。',
+          updated_at = CURRENT_TIMESTAMP
+      WHERE asset_symbol = 'SGE_AGTD'
+        AND rule_group = 'silver_swing_plan'
+        AND rule_key = 'healthy_pullback';
+    `
+  },
+  {
+    id: '20260608_004_add_gold_background_anchor_rules',
+    name: 'Add gold background anchor rules for precious metal market page',
+    sql: `
+      INSERT INTO market_assist_rules
+        (asset_symbol, asset_label, rule_group, group_label, rule_key, rule_name, rule_type, priority, threshold_json, action_hint, display_order, status, note, evidence_window, source_note)
+      VALUES
+        (
+          'XAUUSD',
+          '黄金现货',
+          'precious_metal_plan',
+          '黄金背景锚点口径',
+          'extreme_volatility',
+          '极端高波动',
+          'state_gate',
+          'high',
+          '{"window_intervals":20,"close_points":21,"score_gte":3,"logic":"hit_at_least_3_of_4","conditions":[{"metric":"avg_abs_daily_return","gte_percent":1.6},{"metric":"daily_return_std","gte_percent":2.2},{"metric":"high_low_range_20_intervals","gte_percent":18},{"metric":"days_abs_return_gte_4pct","gte_days":2}]}',
+          '只作贵金属天气预报；白银和纪念币风控提高纪律权重。',
+          10,
+          'active',
+          '黄金单价高，生意侧不直接做执行，只判断宏观和贵金属背景是否进入极端天气。',
+          'XAUUSD 近多年高波动样本，服务黄金背景锚',
+          '由 XAUUSD 历史价格按背景锚点口径配置，阈值低于白银执行版敏感度'
+        ),
+        (
+          'XAUUSD',
+          '黄金现货',
+          'precious_metal_plan',
+          '黄金背景锚点口径',
+          'high_volatility',
+          '高波动',
+          'state_gate',
+          'high',
+          '{"window_intervals":20,"close_points":21,"score_gte":3,"logic":"hit_at_least_3_of_4","conditions":[{"metric":"avg_abs_daily_return","gte_percent":1},{"metric":"daily_return_std","gte_percent":1.4},{"metric":"high_low_range_20_intervals","gte_percent":10},{"metric":"days_abs_return_gte_4pct","gte_days":1}],"excluded_states":["extreme_volatility"]}',
+          '宏观扰动未冷却，只提高背景风控敏感度。',
+          15,
+          'active',
+          '高波动不是买卖信号，只说明黄金背景不安静，白银和纪念币计划不要忽略宏观扰动。',
+          'XAUUSD 高波动和事件扰动样本',
+          '黄金背景锚点口径'
+        ),
+        (
+          'XAUUSD',
+          '黄金现货',
+          'precious_metal_plan',
+          '黄金背景锚点口径',
+          'fast_rise',
+          '暴涨',
+          'threshold',
+          'medium',
+          '{"logic":"any","daily_return_gte_percent":3.5,"return_3d_gte_percent":6,"return_5d_gte_percent":8}',
+          '黄金情绪偏热，白银/纪念币同步过热时防回吐。',
+          20,
+          'active',
+          '黄金暴涨只作为贵金属情绪升温提醒，不触发生意侧黄金买入。',
+          'XAUUSD 短线加速样本',
+          '黄金背景锚点口径'
+        ),
+        (
+          'XAUUSD',
+          '黄金现货',
+          'precious_metal_plan',
+          '黄金背景锚点口径',
+          'overheat_rise',
+          '连续暴涨/过热',
+          'threshold',
+          'medium',
+          '{"logic":"any","return_5d_gte_percent":10,"return_20d_gte_percent":18}',
+          '贵金属情绪过热，只提醒防追高和防利润回吐。',
+          30,
+          'active',
+          '黄金连续过热时更像环境警报，尤其用来提醒白银和纪念币别把情绪高点当常态。',
+          'XAUUSD 连续拉升样本',
+          '黄金背景锚点口径'
+        ),
+        (
+          'XAUUSD',
+          '黄金现货',
+          'precious_metal_plan',
+          '黄金背景锚点口径',
+          'slow_rise',
+          '慢涨',
+          'threshold',
+          'medium',
+          '{"logic":"all","return_10d_gte_percent":2.5,"return_20d_gte_percent":5,"return_20d_lte_percent":18,"up_days_10d_gte":5,"max_single_day_rise_lt_percent":3.5,"excluded_states":["extreme_volatility","fast_rise","overheat_rise","fast_drop","falling_knife"]}',
+          '黄金背景偏暖，可作为白银和纪念币大方向加分项。',
+          35,
+          'active',
+          '慢涨说明贵金属背景温和偏强，但仍不是黄金实体买入建议。',
+          'XAUUSD 慢涨样本',
+          '黄金背景锚点口径'
+        ),
+        (
+          'XAUUSD',
+          '黄金现货',
+          'precious_metal_plan',
+          '黄金背景锚点口径',
+          'fast_drop',
+          '暴跌',
+          'threshold',
+          'medium',
+          '{"logic":"any","daily_return_lte_percent":-3.5,"return_3d_lte_percent":-6,"return_5d_lte_percent":-8}',
+          '黄金背景转冷，不直接抄底，观察白银是否同步走坏。',
+          40,
+          'active',
+          '黄金暴跌说明贵金属背景受冲击，生意侧用于降温，不用于接飞刀。',
+          'XAUUSD 快速下杀样本',
+          '黄金背景锚点口径'
+        ),
+        (
+          'XAUUSD',
+          '黄金现货',
+          'precious_metal_plan',
+          '黄金背景锚点口径',
+          'falling_knife',
+          '极端暴跌/飞刀',
+          'threshold',
+          'high',
+          '{"logic":"any","daily_return_lte_percent":-5.5,"return_3d_lte_percent":-10,"return_5d_lte_percent":-14}',
+          '黄金飞刀只作风险提示，白银和纪念币计划优先防守。',
+          50,
+          'active',
+          '极端暴跌不是便宜提醒，是贵金属背景风险暴露。',
+          'XAUUSD 极端下杀样本',
+          '黄金背景锚点口径'
+        ),
+        (
+          'XAUUSD',
+          '黄金现货',
+          'precious_metal_plan',
+          '黄金背景锚点口径',
+          'slow_decline',
+          '阴跌',
+          'threshold',
+          'medium',
+          '{"logic":"all","return_10d_lte_percent":-3.5,"down_days_10d_gte":6,"max_single_day_drop_gt_percent":-4}',
+          '黄金背景偏冷，观察白银和纪念币是否同步承压。',
+          60,
+          'active',
+          '黄金阴跌用于提示贵金属背景慢慢降温，不是单独动作信号。',
+          'XAUUSD 阴跌样本',
+          '黄金背景锚点口径'
+        ),
+        (
+          'XAUUSD',
+          '黄金现货',
+          'precious_metal_plan',
+          '黄金背景锚点口径',
+          'sideways',
+          '横盘',
+          'threshold',
+          'low',
+          '{"logic":"all","abs_return_10d_lte_percent":1.8,"range_10d_lte_percent":5}',
+          '黄金背景安静，继续看白银和纪念币自身结构。',
+          70,
+          'active',
+          '黄金横盘说明大方向暂时没给强提示。',
+          'XAUUSD 横盘样本',
+          '黄金背景锚点口径'
+        ),
+        (
+          'XAUUSD',
+          '黄金现货',
+          'precious_metal_plan',
+          '黄金背景锚点口径',
+          'medium_sideways',
+          '中期横盘',
+          'threshold',
+          'low',
+          '{"logic":"all","abs_return_20d_lte_percent":3,"range_20d_lte_percent":8}',
+          '中期背景安静，只作参考。',
+          80,
+          'active',
+          '中期横盘用于识别黄金背景没有明显方向的阶段。',
+          'XAUUSD 中期横盘样本',
+          '黄金背景锚点口径'
+        ),
+        (
+          'XAUUSD',
+          '黄金现货',
+          'precious_metal_plan',
+          '黄金背景锚点口径',
+          'healthy_pullback',
+          '回踩不破',
+          'structure',
+          'low',
+          '{"logic":"all","drawdown_from_recent_high_between_percent":[3,8],"close_vs_ma20_gte_percent":-1.5,"close_vs_ma60_gte_percent":-1,"recovery_from_5d_low_gte_percent":1.5,"excluded_states":["extreme_volatility","fast_drop","falling_knife"]}',
+          '黄金背景健康回踩，只作贵金属趋势参考。',
+          90,
+          'active',
+          '黄金回踩不破只表示背景没有明显走坏，不直接给黄金实体动作。',
+          'XAUUSD 回踩修复样本',
+          '黄金背景锚点口径'
+        )
+      ON CONFLICT(asset_symbol, rule_group, rule_key) DO UPDATE SET
+        rule_name = excluded.rule_name,
+        rule_type = excluded.rule_type,
+        priority = excluded.priority,
+        threshold_json = excluded.threshold_json,
+        action_hint = excluded.action_hint,
+        display_order = excluded.display_order,
+        status = excluded.status,
+        note = excluded.note,
+        evidence_window = excluded.evidence_window,
+        source_note = excluded.source_note,
+        updated_at = CURRENT_TIMESTAMP;
+    `
   }
 
 ];

@@ -1,6 +1,13 @@
 import express from "express";
 import getDb, { getDatabasePath } from "../config/database";
 import { getSilverAnchorEvidence } from "../services/marketAnchorService";
+import {
+  evaluateSilverSwingRules,
+  MARKET_ASSIST_EVALUATOR_VERSION,
+  type MarketAssistRuleInput,
+  type MarketPricePoint,
+  type SilverSwingEvaluation
+} from "../services/marketAssistEvaluator";
 
 const router = express.Router();
 
@@ -36,6 +43,15 @@ const percentChange = (current: unknown, previous: unknown) => {
     return null;
   }
   return ((currentNumber - previousNumber) / previousNumber) * 100;
+};
+
+const parseJsonValue = (value: unknown) => {
+  if (value === null || value === undefined || value === "") return null;
+  try {
+    return JSON.parse(String(value));
+  } catch {
+    return null;
+  }
 };
 
 const loadMainQuoteSummaries = async (db: any) => {
@@ -79,6 +95,262 @@ const loadMainQuoteSummaries = async (db: any) => {
   }
 
   return summaries;
+};
+
+const formatSignedPercent = (value: number | null | undefined) => {
+  if (value === null || value === undefined || !Number.isFinite(Number(value))) return "-";
+  const numberValue = Number(value);
+  return `${numberValue > 0 ? "+" : ""}${numberValue.toFixed(2)}%`;
+};
+
+const getEvaluatorVersion = (symbol: string, ruleGroup: string) => (
+  symbol === "XAUUSD" || ruleGroup === "precious_metal_plan"
+    ? "gold-anchor-v1.0"
+    : MARKET_ASSIST_EVALUATOR_VERSION
+);
+
+const stateStepConfigs = [
+  { key: "extreme_volatility", label: "极端高波动", color: "#fb7185", tone: "danger" },
+  { key: "high_volatility", label: "高波动", color: "#f59e0b", tone: "watch" },
+  { key: "overheat_rise", label: "连续过热", color: "#fb923c", tone: "danger" },
+  { key: "fast_rise", label: "暴涨", color: "#facc15", tone: "opportunity" },
+  { key: "slow_rise", label: "慢涨", color: "#84cc16", tone: "opportunity" },
+  { key: "sideways", label: "横盘", color: "#94a3b8", tone: "neutral" },
+  { key: "healthy_pullback", label: "回踩不破", color: "#34d399", tone: "opportunity" },
+  { key: "slow_decline", label: "阴跌", color: "#c084fc", tone: "watch" },
+  { key: "fast_drop", label: "暴跌", color: "#f87171", tone: "danger" },
+  { key: "falling_knife", label: "飞刀", color: "#ef4444", tone: "danger" }
+];
+
+const pickPrimaryState = (evaluation: SilverSwingEvaluation) => {
+  const hits = new Set(evaluation.hitRuleKeys);
+  if (hits.has("extreme_volatility") && (hits.has("fast_drop") || hits.has("falling_knife"))) {
+    return { key: "extreme_crash", label: "极端高波动 + 飞刀", tone: "danger" };
+  }
+  if (hits.has("extreme_volatility") && (hits.has("overheat_rise") || hits.has("fast_rise"))) {
+    return { key: "extreme_overheat", label: "极端高波动 + 过热", tone: "danger" };
+  }
+  if (hits.has("extreme_volatility")) {
+    return { key: "extreme_volatility", label: "极端高波动", tone: "danger" };
+  }
+  if (hits.has("falling_knife")) return { key: "falling_knife", label: "飞刀", tone: "danger" };
+  if (hits.has("fast_drop")) return { key: "fast_drop", label: "暴跌", tone: "danger" };
+  if (hits.has("overheat_rise")) return { key: "overheat_rise", label: "连续过热", tone: "danger" };
+  if (hits.has("fast_rise")) return { key: "fast_rise", label: "暴涨", tone: "opportunity" };
+  if (hits.has("high_volatility") && hits.has("slow_rise")) {
+    return { key: "high_volatility_slow_rise", label: "高波动 + 慢涨", tone: "watch" };
+  }
+  if (hits.has("high_volatility") && hits.has("slow_decline")) {
+    return { key: "high_volatility_slow_decline", label: "高波动 + 阴跌", tone: "watch" };
+  }
+  if (hits.has("high_volatility")) return { key: "high_volatility", label: "高波动冷却", tone: "watch" };
+  if (hits.has("slow_rise")) return { key: "slow_rise", label: "慢涨观察", tone: "opportunity" };
+  if (hits.has("slow_decline")) return { key: "slow_decline", label: "阴跌", tone: "watch" };
+  if (hits.has("healthy_pullback")) return { key: "healthy_pullback", label: "回踩不破", tone: "opportunity" };
+  if (hits.has("sideways") || hits.has("medium_sideways")) return { key: "sideways", label: "横盘观察", tone: "neutral" };
+  return { key: "neutral", label: "中性观察", tone: "neutral" };
+};
+
+const buildActionBias = (evaluation: SilverSwingEvaluation) => {
+  const hits = new Set(evaluation.hitRuleKeys);
+  const metrics = evaluation.metrics;
+  const metricText = `1日 ${formatSignedPercent(metrics.dailyReturnPercent)}，5日 ${formatSignedPercent(metrics.return5dPercent)}，10日 ${formatSignedPercent(metrics.return10dPercent)}，20日 ${formatSignedPercent(metrics.return20dPercent)}，20日振幅 ${formatSignedPercent(metrics.range20dPercent)}`;
+
+  if (hits.has("extreme_volatility")) {
+    return {
+      buy_permission: "closed",
+      sell_discipline: "open",
+      position_hint: "买入关闭；只处理已有仓位。暴涨优先落袋，暴跌禁止接飞刀。",
+      summary: `极端高波动命中。${metricText}。`
+    };
+  }
+  if (hits.has("falling_knife") || hits.has("fast_drop")) {
+    return {
+      buy_permission: "closed",
+      sell_discipline: "defensive",
+      position_hint: "不补仓，不接飞刀；先等止跌结构和高波动冷却。",
+      summary: `暴跌/飞刀信号命中。${metricText}。`
+    };
+  }
+  if (hits.has("overheat_rise")) {
+    return {
+      buy_permission: "blocked",
+      sell_discipline: "open",
+      position_hint: "卖出纪律优先；先动波段仓，连续过热时趋势仓和底仓也按计划参与。",
+      summary: `连续暴涨/过热命中。${metricText}。`
+    };
+  }
+  if (hits.has("fast_rise")) {
+    return {
+      buy_permission: "blocked",
+      sell_discipline: "open",
+      position_hint: "有仓开始搭梯子卖；无仓不追涨。",
+      summary: `暴涨信号命中。${metricText}。`
+    };
+  }
+  if (hits.has("high_volatility") && hits.has("slow_rise")) {
+    return {
+      buy_permission: "reduced",
+      sell_discipline: "watch",
+      position_hint: "高波动里慢涨也不追；有仓不急着一把卖飞，但要保留梯子卖点。",
+      summary: `高波动叠加慢涨。${metricText}。`
+    };
+  }
+  if (hits.has("high_volatility") && hits.has("slow_decline")) {
+    return {
+      buy_permission: "reduced",
+      sell_discipline: "watch",
+      position_hint: "买入降权，不开大仓；阴跌不补，波段仓继续保守。",
+      summary: `高波动冷却叠加阴跌。${metricText}。`
+    };
+  }
+  if (hits.has("high_volatility")) {
+    return {
+      buy_permission: "reduced",
+      sell_discipline: "watch",
+      position_hint: "买入降权，只允许小批次复核；等待波动继续冷却。",
+      summary: `高波动冷却区。${metricText}。`
+    };
+  }
+  if (hits.has("slow_rise")) {
+    return {
+      buy_permission: "normal",
+      sell_discipline: "watch",
+      position_hint: "慢涨不出，不追涨；有仓按计划持有观察，卖点提前挂好。",
+      summary: `慢涨信号命中。${metricText}。`
+    };
+  }
+  if (hits.has("slow_decline")) {
+    return {
+      buy_permission: "reduced",
+      sell_discipline: "watch",
+      position_hint: "阴跌不补仓；波段仓降权，必要时慢慢出。",
+      summary: `阴跌信号命中。${metricText}。`
+    };
+  }
+  if (hits.has("sideways") || hits.has("healthy_pullback")) {
+    return {
+      buy_permission: "small_batch",
+      sell_discipline: "normal",
+      position_hint: "允许小批次重新评估，不一把打满。",
+      summary: `结构进入观察修复区。${metricText}。`
+    };
+  }
+  return {
+    buy_permission: "normal",
+    sell_discipline: "normal",
+    position_hint: "未命中强纪律信号，按计划仓位和价格区间执行。",
+    summary: `当前为中性观察。${metricText}。`
+  };
+};
+
+const buildGoldAnchorBias = (evaluation: SilverSwingEvaluation) => {
+  const hits = new Set(evaluation.hitRuleKeys);
+  const metrics = evaluation.metrics;
+  const metricText = `1日 ${formatSignedPercent(metrics.dailyReturnPercent)}，5日 ${formatSignedPercent(metrics.return5dPercent)}，10日 ${formatSignedPercent(metrics.return10dPercent)}，20日 ${formatSignedPercent(metrics.return20dPercent)}，20日振幅 ${formatSignedPercent(metrics.range20dPercent)}`;
+
+  if (hits.has("extreme_volatility")) {
+    return {
+      buy_permission: "background_only",
+      sell_discipline: "no_execution",
+      position_hint: "黄金进入极端波动天气，只作贵金属大方向风险提示；白银和纪念币计划要提高纪律权重。",
+      summary: `黄金背景锚进入极端高波动。${metricText}。`
+    };
+  }
+  if (hits.has("falling_knife") || hits.has("fast_drop")) {
+    return {
+      buy_permission: "background_only",
+      sell_discipline: "no_execution",
+      position_hint: "黄金快速下杀，说明贵金属背景转冷或事件冲击加剧；不直接给买入结论。",
+      summary: `黄金背景锚出现暴跌/飞刀。${metricText}。`
+    };
+  }
+  if (hits.has("overheat_rise") || hits.has("fast_rise")) {
+    return {
+      buy_permission: "background_only",
+      sell_discipline: "no_execution",
+      position_hint: "黄金短线过热，贵金属情绪偏热；白银/纪念币若同步过热，要优先防回吐。",
+      summary: `黄金背景锚偏热。${metricText}。`
+    };
+  }
+  if (hits.has("high_volatility")) {
+    return {
+      buy_permission: "background_only",
+      sell_discipline: "no_execution",
+      position_hint: "黄金处在高波动背景，说明宏观/避险扰动还没冷却；只提高风控敏感度。",
+      summary: `黄金背景锚处于高波动。${metricText}。`
+    };
+  }
+  if (hits.has("slow_decline")) {
+    return {
+      buy_permission: "background_only",
+      sell_discipline: "no_execution",
+      position_hint: "黄金慢跌，贵金属背景偏冷；观察白银是否跟跌或出现背离。",
+      summary: `黄金背景锚阴跌。${metricText}。`
+    };
+  }
+  if (hits.has("slow_rise")) {
+    return {
+      buy_permission: "background_only",
+      sell_discipline: "no_execution",
+      position_hint: "黄金慢涨，贵金属背景偏暖；可作为白银和纪念币大方向的加分项。",
+      summary: `黄金背景锚慢涨。${metricText}。`
+    };
+  }
+  if (hits.has("sideways") || hits.has("medium_sideways") || hits.has("healthy_pullback")) {
+    return {
+      buy_permission: "background_only",
+      sell_discipline: "no_execution",
+      position_hint: "黄金结构相对平稳，只作为背景锚点观察，不单独触发动作。",
+      summary: `黄金背景锚进入观察区。${metricText}。`
+    };
+  }
+  return {
+    buy_permission: "background_only",
+    sell_discipline: "no_execution",
+    position_hint: "黄金未命中强信号，继续作为贵金属天气预报和白银/纪念币背景参考。",
+    summary: `黄金背景锚中性观察。${metricText}。`
+  };
+};
+
+const buildCurrentSignalPayload = (
+  symbolConfig: typeof MAIN_PRICE_SYMBOLS[number],
+  evaluation: SilverSwingEvaluation,
+  rules: any[],
+  ruleGroup: string
+) => {
+  const primaryState = pickPrimaryState(evaluation);
+  const actionBias = ruleGroup === "precious_metal_plan" || symbolConfig.symbol === "XAUUSD"
+    ? buildGoldAnchorBias(evaluation)
+    : buildActionBias(evaluation);
+  const hitSet = new Set(evaluation.hitRuleKeys);
+  const ruleMap = new Map(rules.map((rule: any) => [rule.rule_key, rule]));
+  const stateSteps = stateStepConfigs.map(config => {
+    const rule = ruleMap.get(config.key);
+    const active = config.key === "sideways"
+      ? hitSet.has("sideways") || hitSet.has("medium_sideways")
+      : hitSet.has(config.key);
+    return {
+      ...config,
+      active,
+      rule_name: rule?.rule_name || config.label,
+      action_hint: rule?.action_hint || "",
+      note: rule?.note || ""
+    };
+  });
+
+  return {
+    symbol: symbolConfig,
+    evaluator_version: getEvaluatorVersion(symbolConfig.symbol, ruleGroup),
+    generated_at: new Date().toISOString(),
+    trade_date: evaluation.date,
+    close: evaluation.close,
+    primary_state: primaryState,
+    action_bias: actionBias,
+    hit_rule_keys: evaluation.hitRuleKeys,
+    state_steps: stateSteps,
+    metrics: evaluation.metrics
+  };
 };
 
 router.get("/precious-metal-market/overview", async (_req, res) => {
@@ -142,6 +414,132 @@ router.get("/precious-metal-market/overview", async (_req, res) => {
         training_gates: [],
         task_status: null
       }
+    });
+  }
+});
+
+router.get("/precious-metal-market/assist-rules", async (req, res) => {
+  try {
+    const db = await getDb();
+    const requestedSymbol = String(req.query.symbol || "SGE_AGTD").trim().toUpperCase();
+    const symbolConfig = MAIN_PRICE_SYMBOLS.find(item => item.symbol === requestedSymbol) || MAIN_PRICE_SYMBOLS[1];
+    const ruleGroup = String(req.query.rule_group || "silver_swing_plan").trim();
+    const includeArchived = String(req.query.include_archived || "").trim() === "1";
+    const rows = await db.all(
+      `SELECT id,
+              asset_symbol,
+              asset_label,
+              rule_group,
+              group_label,
+              rule_key,
+              rule_name,
+              rule_type,
+              priority,
+              threshold_json,
+              action_hint,
+              display_order,
+              status,
+              note,
+              evidence_window,
+              source_note,
+              updated_at
+       FROM market_assist_rules
+       WHERE asset_symbol = ?
+         AND rule_group = ?
+         ${includeArchived ? "" : "AND status <> 'archived'"}
+       ORDER BY display_order ASC, id ASC`,
+      [symbolConfig.symbol, ruleGroup]
+    );
+
+    res.json({
+      success: true,
+      data: {
+        symbol: symbolConfig,
+        rule_group: ruleGroup,
+        evaluator_version: getEvaluatorVersion(symbolConfig.symbol, ruleGroup),
+        items: rows.map((row: any) => ({
+          ...row,
+          threshold: parseJsonValue(row.threshold_json)
+        }))
+      }
+    });
+  } catch (error) {
+    res.status(200).json({
+      success: false,
+      message: (error as Error).message || "贵金属计划口径读取失败",
+      data: { items: [] }
+    });
+  }
+});
+
+router.get("/precious-metal-market/current-signal", async (req, res) => {
+  try {
+    const db = await getDb();
+    const requestedSymbol = String(req.query.symbol || "SGE_AGTD").trim().toUpperCase();
+    const symbolConfig = MAIN_PRICE_SYMBOLS.find(item => item.symbol === requestedSymbol) || MAIN_PRICE_SYMBOLS[1];
+    const ruleGroup = String(req.query.rule_group || "silver_swing_plan").trim();
+    const points = await db.all(
+      `SELECT trade_date, close
+       FROM market_anchor_daily_prices
+       WHERE symbol = ?
+         AND source = ?
+         AND close IS NOT NULL
+       ORDER BY trade_date ASC`,
+      [symbolConfig.symbol, symbolConfig.source]
+    ) as MarketPricePoint[];
+    const rules = await db.all(
+      `SELECT rule_key, rule_type, threshold_json, status, display_order
+       FROM market_assist_rules
+       WHERE asset_symbol = ?
+         AND rule_group = ?
+         AND status = 'active'
+       ORDER BY display_order ASC`,
+      [symbolConfig.symbol, ruleGroup]
+    ) as MarketAssistRuleInput[];
+    const ruleRows = await db.all(
+      `SELECT rule_key, rule_name, rule_type, action_hint, note
+       FROM market_assist_rules
+       WHERE asset_symbol = ?
+         AND rule_group = ?
+         AND status = 'active'
+       ORDER BY display_order ASC`,
+      [symbolConfig.symbol, ruleGroup]
+    );
+
+    if (!points.length || !rules.length) {
+      res.json({
+        success: true,
+        data: {
+          symbol: symbolConfig,
+          evaluator_version: getEvaluatorVersion(symbolConfig.symbol, ruleGroup),
+          generated_at: new Date().toISOString(),
+          trade_date: "",
+          close: null,
+          primary_state: { key: "unconfigured", label: "未配置", tone: "neutral" },
+          action_bias: {
+            buy_permission: "unknown",
+            sell_discipline: "unknown",
+            position_hint: "当前标的暂无动态辅助口径。",
+            summary: "暂无足够数据或规则。"
+          },
+          hit_rule_keys: [],
+          state_steps: [],
+          metrics: null
+        }
+      });
+      return;
+    }
+
+    const evaluation = evaluateSilverSwingRules(points, rules);
+    res.json({
+      success: true,
+      data: buildCurrentSignalPayload(symbolConfig, evaluation, ruleRows, ruleGroup)
+    });
+  } catch (error) {
+    res.status(200).json({
+      success: false,
+      message: (error as Error).message || "贵金属动态信号读取失败",
+      data: null
     });
   }
 });

@@ -9,6 +9,7 @@
     "build": "tsc",
     "setup:business-tasks": "sh -c '${TASK_CENTER_PYTHON:-python3} -m pip install -r requirements-business-tasks.txt'",
     "sync:online-prices": "python3 scripts/business/sync_online_price_records.py",
+    "test:silver-assist": "tsx scripts/business/verify_silver_assist_evaluator.ts",
     "start": "npm run start:business",
     "start:business": "sh -c 'NODE_ENV=${NODE_ENV:-production} PORT=${PORT:-3001} node dist/index.js'",
     "restart:local": "sh -c 'port=${PORT:-3001}; pid=$(lsof -tiTCP:$port -sTCP:LISTEN || true); if [ -n \"$pid\" ]; then kill $pid; fi; npm run start:business'"
