@@ -122,7 +122,7 @@ export const getTodoCenterData = async (workspaceInput: unknown) => {
       mt.note,
       mt.updated_at
     FROM manual_todos mt
-    ${manualFilter.whereClause ? `WHERE ${manualFilter.whereClause}` : ""}
+    WHERE ${manualFilter.whereClause ? `${manualFilter.whereClause} AND` : ""} mt.status IN ('pending', 'in_progress')
   `, manualFilter.params);
 
   const summary = [...buyingPlanTodos, ...sellingPlanTodos, ...watchlistTodos, ...manualTodos];
