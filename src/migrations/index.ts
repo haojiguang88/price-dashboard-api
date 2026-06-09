@@ -4084,6 +4084,150 @@ const migrations: Migration[] = [
         source_note = excluded.source_note,
         updated_at = CURRENT_TIMESTAMP;
     `
+  },
+  {
+    id: '20260609_001_create_market_assist_rule_versions',
+    name: 'Create market assist rule version records',
+    sql: `
+      CREATE TABLE IF NOT EXISTS market_assist_rule_versions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        asset_symbol TEXT NOT NULL,
+        asset_label TEXT NOT NULL,
+        rule_group TEXT NOT NULL,
+        group_label TEXT NOT NULL,
+        version_key TEXT NOT NULL,
+        version_name TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'active',
+        effective_date TEXT,
+        change_reason TEXT,
+        threshold_summary TEXT,
+        sample_window TEXT,
+        regression_command TEXT,
+        regression_summary TEXT,
+        snapshot_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(asset_symbol, rule_group, version_key)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_market_assist_rule_versions_scope
+        ON market_assist_rule_versions(asset_symbol, rule_group, status, effective_date DESC, id DESC);
+
+      INSERT INTO market_assist_rule_versions
+        (asset_symbol, asset_label, rule_group, group_label, version_key, version_name, status, effective_date, change_reason, threshold_summary, sample_window, regression_command, regression_summary, snapshot_json)
+      VALUES
+        (
+          'SGE_AGTD',
+          '白银延期',
+          'silver_swing_plan',
+          '白银实物波段计划口径',
+          'silver-swing-v1.3',
+          '白银实物波段纪律 v1.3',
+          'active',
+          '2026-06-09',
+          '锁定 2011、2020、2026 固定样本；细化高波动解除、MA250 拉伸、慢涨/阴跌/飞刀纪律。',
+          '极端高波动按近20交易日 4 条口径 3 条命中识别；高波动按 4 条口径 3 条命中识别；飞刀/暴跌/阴跌/横盘/回踩不破/慢涨独立判断；MA250 拉伸约束波段仓新增和梯子卖出。',
+          'SGE_AGTD 2006-10-30 ~ 当前最新；固定样本覆盖 2011、2020、2025-2026，并锁住 4 轮极端高波动簇。',
+          'npm run test:precious-metal-assist',
+          '白银 13 个固定样本 + 极端高波动簇；黄金 11 个背景锚样本；改阈值后必须先跑回归。',
+          '{"evaluator_version":"silver-swing-v1.3","asset_role":"白银实物波段执行锚","hard_disciplines":["极端高波动时买入权限关闭，卖出纪律打开","暴跌/飞刀不接，阴跌不抄底","MA250 过度拉伸时不打满波段仓"],"core_thresholds":{"extreme_volatility":"近20交易日均绝对波动>=3%、波动标准差>=4.5%、区间振幅>=35%、大波动天数>=6，4中3命中","high_volatility":"近20交易日均绝对波动>=2%、波动标准差>=3%、区间振幅>=20%、大波动天数>=3，4中3命中","ma250_stretch":"距年线>=35%限制新增波段仓，>=45%且短线偏热开始梯子卖，>=60%至少处理一笔波段仓"},"regression_command":"npm run test:precious-metal-assist"}'
+        ),
+        (
+          'XAUUSD',
+          '黄金现货',
+          'precious_metal_plan',
+          '黄金背景锚点口径',
+          'gold-anchor-v1.0',
+          '黄金背景锚点 v1.0',
+          'active',
+          '2026-06-09',
+          '黄金只做贵金属天气预报，不给生意侧黄金实体买卖结论；用于辅助白银和纪念币背景判断。',
+          '黄金阈值比白银更敏感：极端高波动、高波动、暴涨、暴跌、阴跌、横盘、慢涨和回踩不破只作为背景状态。',
+          'XAUUSD 1979-12-26 ~ 当前最新；固定样本覆盖 2011、2020、2025-2026。',
+          'npm run test:precious-metal-assist',
+          '黄金 11 个背景锚样本；只锁背景状态，不生成黄金实体执行动作。',
+          '{"evaluator_version":"gold-anchor-v1.0","asset_role":"贵金属天气预报背景锚","hard_disciplines":["黄金不直接授予白银买入权限","黄金飞刀/暴跌只提高防守权重","黄金慢涨只作为贵金属背景加分"],"core_thresholds":{"extreme_volatility":"近20交易日 4 条口径 3 条命中，阈值低于白银执行版","fast_rise":"单日>=3.5%、3日>=6%、5日>=8% 任一命中","falling_knife":"单日<=-5.5%、3日<=-10%、5日<=-14% 任一命中"},"regression_command":"npm run test:precious-metal-assist"}'
+        )
+      ON CONFLICT(asset_symbol, rule_group, version_key) DO UPDATE SET
+        version_name = excluded.version_name,
+        status = excluded.status,
+        effective_date = excluded.effective_date,
+        change_reason = excluded.change_reason,
+        threshold_summary = excluded.threshold_summary,
+        sample_window = excluded.sample_window,
+        regression_command = excluded.regression_command,
+        regression_summary = excluded.regression_summary,
+        snapshot_json = excluded.snapshot_json,
+        updated_at = CURRENT_TIMESTAMP;
+    `
+  },
+  {
+    id: '20260609_002_create_market_physical_observations',
+    name: 'Create lightweight physical market observations',
+    sql: `
+      CREATE TABLE IF NOT EXISTS market_physical_observations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        asset_symbol TEXT NOT NULL,
+        asset_label TEXT NOT NULL,
+        observation_date TEXT NOT NULL,
+        reference_close REAL,
+        merchant_sell_price REAL,
+        merchant_sell_premium REAL,
+        buyback_price REAL,
+        buyback_premium REAL,
+        supply_status TEXT NOT NULL DEFAULT 'unknown',
+        transaction_heat TEXT NOT NULL DEFAULT 'unknown',
+        social_heat TEXT NOT NULL DEFAULT 'unknown',
+        reliability TEXT NOT NULL DEFAULT 'manual_limited',
+        source_note TEXT,
+        note TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_market_physical_observations_symbol_date
+        ON market_physical_observations(asset_symbol, observation_date DESC, id DESC);
+    `
+  },
+  {
+    id: '20260609_003_narrow_gold_anchor_wording',
+    name: 'Narrow gold anchor wording to background-only usage',
+    sql: `
+      UPDATE market_assist_rules
+      SET action_hint = CASE rule_key
+            WHEN 'extreme_volatility' THEN '只作贵金属天气预报；白银和纪念币风控提高纪律权重，但不单独触发买卖。'
+            WHEN 'high_volatility' THEN '宏观扰动未冷却，只提高背景风控敏感度，不生成执行动作。'
+            WHEN 'fast_rise' THEN '黄金情绪偏热；白银/纪念币同步过热时只提高防回吐权重。'
+            WHEN 'overheat_rise' THEN '贵金属情绪过热，只提醒防追高和防利润回吐，不单独触发出货。'
+            WHEN 'slow_rise' THEN '黄金背景偏暖，只作为白银和纪念币大方向加分项。'
+            WHEN 'fast_drop' THEN '黄金背景转冷，只提示风险，不直接抄底。'
+            WHEN 'falling_knife' THEN '黄金飞刀只作风险提示，白银和纪念币计划优先防守。'
+            WHEN 'slow_decline' THEN '黄金背景偏冷，观察白银和纪念币是否同步承压。'
+            WHEN 'sideways' THEN '黄金背景安静，继续看白银和纪念币自身结构。'
+            WHEN 'medium_sideways' THEN '中期背景安静，只作参考。'
+            WHEN 'healthy_pullback' THEN '黄金背景健康回踩，只作贵金属趋势参考。'
+            ELSE action_hint
+          END,
+          note = CASE rule_key
+            WHEN 'extreme_volatility' THEN '黄金单价高，生意侧不直接做执行，只判断宏观和贵金属背景是否进入极端天气。'
+            WHEN 'fast_rise' THEN '黄金暴涨只作为贵金属情绪升温提醒，不触发生意侧黄金买入，也不单独触发白银/纪念币卖出。'
+            WHEN 'overheat_rise' THEN '黄金连续过热更像环境警报，用来提醒白银和纪念币别把情绪高点当常态。'
+            WHEN 'slow_rise' THEN '慢涨说明贵金属背景温和偏强，但仍不是黄金实体买入建议。'
+            WHEN 'fast_drop' THEN '黄金暴跌说明贵金属背景受冲击，生意侧用于降温，不用于接飞刀。'
+            ELSE note
+          END,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE asset_symbol = 'XAUUSD'
+        AND rule_group = 'precious_metal_plan';
+
+      UPDATE market_assist_rule_versions
+      SET change_reason = '黄金只做贵金属天气预报，不给生意侧黄金实体买卖结论；也不单独授予白银或纪念币买卖权限。',
+          threshold_summary = '阈值不变；极端高波动、高波动、暴涨、暴跌、阴跌、横盘、慢涨和回踩不破只作为背景状态。',
+          updated_at = CURRENT_TIMESTAMP
+      WHERE asset_symbol = 'XAUUSD'
+        AND rule_group = 'precious_metal_plan'
+        AND version_key = 'gold-anchor-v1.0';
+    `
   }
 
 ];

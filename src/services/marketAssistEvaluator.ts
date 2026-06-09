@@ -49,11 +49,28 @@ export interface SilverSwingMetrics {
   closeVsMa250Percent: number | null;
 }
 
+export type SilverSwingRuleLogic = "any" | "all" | "score" | "none";
+
+export interface SilverSwingRuleCheck {
+  key: string;
+  label: string;
+  actual: number | null;
+  operator: "gte" | "lte" | "lt" | "gt" | "between";
+  threshold: number | [number, number] | null;
+  unit: "%" | "天";
+  hit: boolean;
+  text: string;
+}
+
 export interface SilverSwingRuleEvaluation {
   ruleKey: string;
   hit: boolean;
+  logic?: SilverSwingRuleLogic;
+  checks?: SilverSwingRuleCheck[];
   score?: number;
   scoreTotal?: number;
+  scoreRequired?: number;
+  suppressedBy?: string[];
 }
 
 export interface SilverSwingEvaluation {
@@ -239,6 +256,58 @@ const compareLt = (value: number | null, threshold: unknown) => {
   return value !== null && thresholdNumber !== null && value < thresholdNumber;
 };
 
+const compareGt = (value: number | null, threshold: unknown) => {
+  const thresholdNumber = toNumber(threshold);
+  return value !== null && thresholdNumber !== null && value > thresholdNumber;
+};
+
+const formatCheckValue = (value: number | [number, number] | null, unit: "%" | "天"): string => {
+  if (Array.isArray(value)) {
+    return value.map(item => formatCheckValue(item, unit)).join(" ~ ");
+  }
+  if (value === null || !Number.isFinite(Number(value))) return "-";
+  if (unit === "天") return `${Number(value).toFixed(0)}天`;
+  const numberValue = Number(value);
+  const prefix = numberValue > 0 ? "+" : "";
+  return `${prefix}${numberValue.toFixed(2)}%`;
+};
+
+const operatorLabels: Record<SilverSwingRuleCheck["operator"], string> = {
+  gte: ">=",
+  lte: "<=",
+  lt: "<",
+  gt: ">",
+  between: "介于"
+};
+
+const buildCheck = (input: {
+  key: string;
+  label: string;
+  actual: number | null;
+  operator: SilverSwingRuleCheck["operator"];
+  threshold: number | [number, number] | null;
+  unit?: SilverSwingRuleCheck["unit"];
+  hit: boolean;
+}): SilverSwingRuleCheck => {
+  const unit = input.unit || "%";
+  const actualText = formatCheckValue(input.actual, unit);
+  const thresholdText = formatCheckValue(input.threshold, unit);
+  return {
+    key: input.key,
+    label: input.label,
+    actual: input.actual,
+    operator: input.operator,
+    threshold: input.threshold,
+    unit,
+    hit: input.hit,
+    text: `${input.label} ${actualText} ${operatorLabels[input.operator]} ${thresholdText}：${input.hit ? "命中" : "未命中"}`
+  };
+};
+
+const compareBetween = (value: number | null, min: number, max: number) => (
+  value !== null && value >= min && value <= max
+);
+
 const getMetricValue = (metrics: SilverSwingMetrics, metric: string) => {
   switch (metric) {
     case "avg_abs_daily_return":
@@ -254,25 +323,60 @@ const getMetricValue = (metrics: SilverSwingMetrics, metric: string) => {
   }
 };
 
+const scoreMetricLabels: Record<string, { label: string; unit: "%" | "天" }> = {
+  avg_abs_daily_return: { label: "20日平均绝对日波动", unit: "%" },
+  daily_return_std: { label: "20日波动标准差", unit: "%" },
+  high_low_range_20_intervals: { label: "20日高低振幅", unit: "%" },
+  days_abs_return_gte_4pct: { label: "20日内大波动天数", unit: "天" }
+};
+
 const evaluateScoreRule = (
   metrics: SilverSwingMetrics,
   threshold: Record<string, unknown>
-): { hit: boolean; score: number; scoreTotal: number } => {
+): { hit: boolean; logic: SilverSwingRuleLogic; checks: SilverSwingRuleCheck[]; score: number; scoreTotal: number; scoreRequired: number } => {
   const conditions = Array.isArray(threshold.conditions) ? threshold.conditions : [];
-  const score = conditions.reduce((total, condition) => {
-    if (!condition || typeof condition !== "object") return total;
+  const checks = conditions.flatMap((condition, index) => {
+    if (!condition || typeof condition !== "object") return [];
     const conditionRecord = condition as Record<string, unknown>;
-    const metricValue = getMetricValue(metrics, String(conditionRecord.metric || ""));
+    const metricKey = String(conditionRecord.metric || "");
+    const metricValue = getMetricValue(metrics, metricKey);
+    const metricMeta = scoreMetricLabels[metricKey] || { label: metricKey || `条件${index + 1}`, unit: "%" as const };
     if (conditionRecord.gte_percent !== undefined) {
-      return total + (compareGte(metricValue, conditionRecord.gte_percent) ? 1 : 0);
+      const thresholdValue = toNumber(conditionRecord.gte_percent);
+      return [buildCheck({
+        key: metricKey || `condition_${index + 1}`,
+        label: metricMeta.label,
+        actual: metricValue,
+        operator: "gte",
+        threshold: thresholdValue,
+        unit: metricMeta.unit,
+        hit: compareGte(metricValue, thresholdValue)
+      })];
     }
     if (conditionRecord.gte_days !== undefined) {
-      return total + (compareGte(metricValue, conditionRecord.gte_days) ? 1 : 0);
+      const thresholdValue = toNumber(conditionRecord.gte_days);
+      return [buildCheck({
+        key: metricKey || `condition_${index + 1}`,
+        label: metricMeta.label,
+        actual: metricValue,
+        operator: "gte",
+        threshold: thresholdValue,
+        unit: "天",
+        hit: compareGte(metricValue, thresholdValue)
+      })];
     }
-    return total;
-  }, 0);
+    return [];
+  });
+  const score = checks.filter(check => check.hit).length;
   const expectedScore = toNumber(threshold.score_gte) ?? 3;
-  return { hit: score >= expectedScore, score, scoreTotal: conditions.length };
+  return {
+    hit: score >= expectedScore,
+    logic: "score",
+    checks,
+    score,
+    scoreTotal: checks.length,
+    scoreRequired: expectedScore
+  };
 };
 
 const evaluateRule = (
@@ -291,77 +395,285 @@ const evaluateRule = (
       const result = evaluateScoreRule(metrics, threshold);
       return { ruleKey: rule.ruleKey, ...result };
     }
-    case "fast_rise":
+    case "fast_rise": {
+      const checks = [
+        buildCheck({
+          key: "daily_return",
+          label: "1日涨幅",
+          actual: metrics.dailyReturnPercent,
+          operator: "gte",
+          threshold: toNumber(threshold.daily_return_gte_percent),
+          hit: compareGte(metrics.dailyReturnPercent, threshold.daily_return_gte_percent)
+        }),
+        buildCheck({
+          key: "return_3d",
+          label: "3日涨幅",
+          actual: metrics.return3dPercent,
+          operator: "gte",
+          threshold: toNumber(threshold.return_3d_gte_percent),
+          hit: compareGte(metrics.return3dPercent, threshold.return_3d_gte_percent)
+        }),
+        buildCheck({
+          key: "return_5d",
+          label: "5日涨幅",
+          actual: metrics.return5dPercent,
+          operator: "gte",
+          threshold: toNumber(threshold.return_5d_gte_percent),
+          hit: compareGte(metrics.return5dPercent, threshold.return_5d_gte_percent)
+        })
+      ];
       return {
         ruleKey: rule.ruleKey,
-        hit: compareGte(metrics.dailyReturnPercent, threshold.daily_return_gte_percent)
-          || compareGte(metrics.return3dPercent, threshold.return_3d_gte_percent)
-          || compareGte(metrics.return5dPercent, threshold.return_5d_gte_percent)
+        hit: checks.some(check => check.hit),
+        logic: "any",
+        checks
       };
-    case "overheat_rise":
+    }
+    case "overheat_rise": {
+      const checks = [
+        buildCheck({
+          key: "return_5d",
+          label: "5日涨幅",
+          actual: metrics.return5dPercent,
+          operator: "gte",
+          threshold: toNumber(threshold.return_5d_gte_percent),
+          hit: compareGte(metrics.return5dPercent, threshold.return_5d_gte_percent)
+        }),
+        buildCheck({
+          key: "return_20d",
+          label: "20日涨幅",
+          actual: metrics.return20dPercent,
+          operator: "gte",
+          threshold: toNumber(threshold.return_20d_gte_percent),
+          hit: compareGte(metrics.return20dPercent, threshold.return_20d_gte_percent)
+        })
+      ];
       return {
         ruleKey: rule.ruleKey,
-        hit: compareGte(metrics.return5dPercent, threshold.return_5d_gte_percent)
-          || compareGte(metrics.return20dPercent, threshold.return_20d_gte_percent)
+        hit: checks.some(check => check.hit),
+        logic: "any",
+        checks
       };
+    }
     case "slow_rise": {
       const max20dReturn = threshold.return_20d_lte_percent;
       const maxSingleDayRise = threshold.max_single_day_rise_lt_percent;
+      const checks = [
+        buildCheck({
+          key: "return_10d",
+          label: "10日涨幅",
+          actual: metrics.return10dPercent,
+          operator: "gte",
+          threshold: toNumber(threshold.return_10d_gte_percent),
+          hit: compareGte(metrics.return10dPercent, threshold.return_10d_gte_percent)
+        }),
+        buildCheck({
+          key: "return_20d_min",
+          label: "20日涨幅下限",
+          actual: metrics.return20dPercent,
+          operator: "gte",
+          threshold: toNumber(threshold.return_20d_gte_percent),
+          hit: compareGte(metrics.return20dPercent, threshold.return_20d_gte_percent)
+        }),
+        buildCheck({
+          key: "return_20d_max",
+          label: "20日涨幅上限",
+          actual: metrics.return20dPercent,
+          operator: "lte",
+          threshold: max20dReturn === undefined ? null : toNumber(max20dReturn),
+          hit: max20dReturn === undefined || compareLte(metrics.return20dPercent, max20dReturn)
+        }),
+        buildCheck({
+          key: "up_days_10d",
+          label: "10日上涨天数",
+          actual: metrics.upDays10d,
+          operator: "gte",
+          threshold: toNumber(threshold.up_days_10d_gte),
+          unit: "天",
+          hit: compareGte(metrics.upDays10d, threshold.up_days_10d_gte)
+        }),
+        buildCheck({
+          key: "best_single_day_rise_10d",
+          label: "10日最大单日涨幅",
+          actual: metrics.bestSingleDayRise10dPercent,
+          operator: "lt",
+          threshold: maxSingleDayRise === undefined ? null : toNumber(maxSingleDayRise),
+          hit: maxSingleDayRise === undefined || compareLt(metrics.bestSingleDayRise10dPercent, maxSingleDayRise)
+        })
+      ];
       return {
         ruleKey: rule.ruleKey,
-        hit: compareGte(metrics.return10dPercent, threshold.return_10d_gte_percent)
-          && compareGte(metrics.return20dPercent, threshold.return_20d_gte_percent)
-          && (max20dReturn === undefined || compareLte(metrics.return20dPercent, max20dReturn))
-          && compareGte(metrics.upDays10d, threshold.up_days_10d_gte)
-          && (maxSingleDayRise === undefined || compareLt(metrics.bestSingleDayRise10dPercent, maxSingleDayRise))
+        hit: checks.every(check => check.hit),
+        logic: "all",
+        checks
       };
     }
-    case "ma250_stretch":
+    case "ma250_stretch": {
+      const checks = [
+        buildCheck({
+          key: "block_wave_buy_vs_ma250",
+          label: "距MA250年线",
+          actual: metrics.closeVsMa250Percent,
+          operator: "gte",
+          threshold: toNumber(threshold.block_wave_buy_vs_ma250_gte_percent),
+          hit: compareGte(metrics.closeVsMa250Percent, threshold.block_wave_buy_vs_ma250_gte_percent)
+        }),
+        buildCheck({
+          key: "sell_ladder_vs_ma250",
+          label: "卖出梯子年线距离",
+          actual: metrics.closeVsMa250Percent,
+          operator: "gte",
+          threshold: toNumber(threshold.sell_ladder_vs_ma250_gte_percent),
+          hit: compareGte(metrics.closeVsMa250Percent, threshold.sell_ladder_vs_ma250_gte_percent)
+        }),
+        buildCheck({
+          key: "sell_ladder_vs_ma20",
+          label: "卖出梯子MA20距离",
+          actual: metrics.closeVsMa20Percent,
+          operator: "gte",
+          threshold: toNumber(threshold.sell_ladder_vs_ma20_gte_percent),
+          hit: compareGte(metrics.closeVsMa20Percent, threshold.sell_ladder_vs_ma20_gte_percent)
+        }),
+        buildCheck({
+          key: "force_sell_vs_ma250",
+          label: "强制至少卖一笔年线距离",
+          actual: metrics.closeVsMa250Percent,
+          operator: "gte",
+          threshold: toNumber(threshold.force_sell_vs_ma250_gte_percent),
+          hit: compareGte(metrics.closeVsMa250Percent, threshold.force_sell_vs_ma250_gte_percent)
+        })
+      ];
       return {
         ruleKey: rule.ruleKey,
-        hit: compareGte(metrics.closeVsMa250Percent, threshold.block_wave_buy_vs_ma250_gte_percent)
+        hit: checks[0]?.hit || false,
+        logic: "any",
+        checks
       };
+    }
     case "fast_drop":
-      return {
-        ruleKey: rule.ruleKey,
-        hit: compareLte(metrics.dailyReturnPercent, threshold.daily_return_lte_percent)
-          || compareLte(metrics.return3dPercent, threshold.return_3d_lte_percent)
-          || compareLte(metrics.return5dPercent, threshold.return_5d_lte_percent)
-      };
     case "falling_knife":
+    {
+      const checks = [
+        buildCheck({
+          key: "daily_return",
+          label: "1日跌幅",
+          actual: metrics.dailyReturnPercent,
+          operator: "lte",
+          threshold: toNumber(threshold.daily_return_lte_percent),
+          hit: compareLte(metrics.dailyReturnPercent, threshold.daily_return_lte_percent)
+        }),
+        buildCheck({
+          key: "return_3d",
+          label: "3日跌幅",
+          actual: metrics.return3dPercent,
+          operator: "lte",
+          threshold: toNumber(threshold.return_3d_lte_percent),
+          hit: compareLte(metrics.return3dPercent, threshold.return_3d_lte_percent)
+        }),
+        buildCheck({
+          key: "return_5d",
+          label: "5日跌幅",
+          actual: metrics.return5dPercent,
+          operator: "lte",
+          threshold: toNumber(threshold.return_5d_lte_percent),
+          hit: compareLte(metrics.return5dPercent, threshold.return_5d_lte_percent)
+        })
+      ];
       return {
         ruleKey: rule.ruleKey,
-        hit: compareLte(metrics.dailyReturnPercent, threshold.daily_return_lte_percent)
-          || compareLte(metrics.return3dPercent, threshold.return_3d_lte_percent)
-          || compareLte(metrics.return5dPercent, threshold.return_5d_lte_percent)
+        hit: checks.some(check => check.hit),
+        logic: "any",
+        checks
       };
+    }
     case "slow_decline": {
       const maxDropThreshold = toNumber(threshold.max_single_day_drop_gt_percent);
+      const checks = [
+        buildCheck({
+          key: "return_10d",
+          label: "10日跌幅",
+          actual: metrics.return10dPercent,
+          operator: "lte",
+          threshold: toNumber(threshold.return_10d_lte_percent),
+          hit: compareLte(metrics.return10dPercent, threshold.return_10d_lte_percent)
+        }),
+        buildCheck({
+          key: "down_days_10d",
+          label: "10日下跌天数",
+          actual: metrics.downDays10d,
+          operator: "gte",
+          threshold: toNumber(threshold.down_days_10d_gte),
+          unit: "天",
+          hit: compareGte(metrics.downDays10d, threshold.down_days_10d_gte)
+        }),
+        buildCheck({
+          key: "worst_single_day_drop_10d",
+          label: "10日最大单日跌幅未到崩盘",
+          actual: metrics.worstSingleDayDrop10dPercent,
+          operator: "gt",
+          threshold: maxDropThreshold,
+          hit: maxDropThreshold === null || compareGt(metrics.worstSingleDayDrop10dPercent, maxDropThreshold)
+        })
+      ];
       return {
         ruleKey: rule.ruleKey,
-        hit: compareLte(metrics.return10dPercent, threshold.return_10d_lte_percent)
-          && compareGte(metrics.downDays10d, threshold.down_days_10d_gte)
-          && (
-            maxDropThreshold === null
-            || (
-              metrics.worstSingleDayDrop10dPercent !== null
-              && metrics.worstSingleDayDrop10dPercent > maxDropThreshold
-            )
-          )
+        hit: checks.every(check => check.hit),
+        logic: "all",
+        checks
       };
     }
-    case "sideways":
+    case "sideways": {
+      const checks = [
+        buildCheck({
+          key: "abs_return_10d",
+          label: "10日净涨跌绝对值",
+          actual: metrics.return10dPercent === null ? null : Math.abs(metrics.return10dPercent),
+          operator: "lte",
+          threshold: toNumber(threshold.abs_return_10d_lte_percent),
+          hit: compareLte(metrics.return10dPercent === null ? null : Math.abs(metrics.return10dPercent), threshold.abs_return_10d_lte_percent)
+        }),
+        buildCheck({
+          key: "range_10d",
+          label: "10日振幅",
+          actual: metrics.range10dPercent,
+          operator: "lte",
+          threshold: toNumber(threshold.range_10d_lte_percent),
+          hit: compareLte(metrics.range10dPercent, threshold.range_10d_lte_percent)
+        })
+      ];
       return {
         ruleKey: rule.ruleKey,
-        hit: compareLte(metrics.return10dPercent === null ? null : Math.abs(metrics.return10dPercent), threshold.abs_return_10d_lte_percent)
-          && compareLte(metrics.range10dPercent, threshold.range_10d_lte_percent)
+        hit: checks.every(check => check.hit),
+        logic: "all",
+        checks
       };
-    case "medium_sideways":
+    }
+    case "medium_sideways": {
+      const checks = [
+        buildCheck({
+          key: "abs_return_20d",
+          label: "20日净涨跌绝对值",
+          actual: metrics.return20dPercent === null ? null : Math.abs(metrics.return20dPercent),
+          operator: "lte",
+          threshold: toNumber(threshold.abs_return_20d_lte_percent),
+          hit: compareLte(metrics.return20dPercent === null ? null : Math.abs(metrics.return20dPercent), threshold.abs_return_20d_lte_percent)
+        }),
+        buildCheck({
+          key: "range_20d",
+          label: "20日振幅",
+          actual: metrics.range20dPercent,
+          operator: "lte",
+          threshold: toNumber(threshold.range_20d_lte_percent),
+          hit: compareLte(metrics.range20dPercent, threshold.range_20d_lte_percent)
+        })
+      ];
       return {
         ruleKey: rule.ruleKey,
-        hit: compareLte(metrics.return20dPercent === null ? null : Math.abs(metrics.return20dPercent), threshold.abs_return_20d_lte_percent)
-          && compareLte(metrics.range20dPercent, threshold.range_20d_lte_percent)
+        hit: checks.every(check => check.hit),
+        logic: "all",
+        checks
       };
+    }
     case "healthy_pullback": {
       const drawdownRange = Array.isArray(threshold.drawdown_from_recent_high_between_percent)
         ? threshold.drawdown_from_recent_high_between_percent
@@ -371,13 +683,45 @@ const evaluateRule = (
       const drawdown = metrics.drawdownFrom20dHighPercent === null
         ? null
         : Math.abs(Math.min(metrics.drawdownFrom20dHighPercent, 0));
+      const checks = [
+        buildCheck({
+          key: "drawdown_from_recent_high",
+          label: "近20日高点回撤",
+          actual: drawdown,
+          operator: "between",
+          threshold: [minDrawdown, maxDrawdown],
+          hit: compareBetween(drawdown, minDrawdown, maxDrawdown)
+        }),
+        buildCheck({
+          key: "close_vs_ma20",
+          label: "距MA20",
+          actual: metrics.closeVsMa20Percent,
+          operator: "gte",
+          threshold: toNumber(threshold.close_vs_ma20_gte_percent ?? -2),
+          hit: compareGte(metrics.closeVsMa20Percent, threshold.close_vs_ma20_gte_percent ?? -2)
+        }),
+        buildCheck({
+          key: "close_vs_ma60",
+          label: "距MA60",
+          actual: metrics.closeVsMa60Percent,
+          operator: "gte",
+          threshold: toNumber(threshold.close_vs_ma60_gte_percent ?? -1),
+          hit: compareGte(metrics.closeVsMa60Percent, threshold.close_vs_ma60_gte_percent ?? -1)
+        }),
+        buildCheck({
+          key: "recovery_from_5d_low",
+          label: "近5日低点修复",
+          actual: metrics.recoveryFrom5dLowPercent,
+          operator: "gte",
+          threshold: toNumber(threshold.recovery_from_5d_low_gte_percent ?? 2.5),
+          hit: compareGte(metrics.recoveryFrom5dLowPercent, threshold.recovery_from_5d_low_gte_percent ?? 2.5)
+        })
+      ];
       return {
         ruleKey: rule.ruleKey,
-        hit: compareGte(drawdown, minDrawdown)
-          && compareLte(drawdown, maxDrawdown)
-          && compareGte(metrics.closeVsMa20Percent, threshold.close_vs_ma20_gte_percent ?? -2)
-          && compareGte(metrics.closeVsMa60Percent, threshold.close_vs_ma60_gte_percent ?? -1)
-          && compareGte(metrics.recoveryFrom5dLowPercent, threshold.recovery_from_5d_low_gte_percent ?? 2.5)
+        hit: checks.every(check => check.hit),
+        logic: "all",
+        checks
       };
     }
     default:
@@ -400,8 +744,9 @@ export const evaluateSilverSwingRules = (
     const excludedStates = Array.isArray(rule?.threshold.excluded_states)
       ? rule?.threshold.excluded_states.map(value => String(value))
       : [];
-    if (excludedStates.some(ruleKey => rawHitMap.get(ruleKey))) {
-      return { ...evaluation, hit: false };
+    const suppressedBy = excludedStates.filter(ruleKey => rawHitMap.get(ruleKey));
+    if (suppressedBy.length) {
+      return { ...evaluation, hit: false, suppressedBy };
     }
     return evaluation;
   });

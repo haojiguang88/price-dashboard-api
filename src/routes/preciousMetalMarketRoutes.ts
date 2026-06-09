@@ -54,6 +54,122 @@ const parseJsonValue = (value: unknown) => {
   }
 };
 
+const normalizeText = (value: unknown) => String(value ?? "").trim();
+
+const parseOptionalNumber = (value: unknown) => {
+  if (value === null || value === undefined || value === "") return null;
+  const numberValue = Number(value);
+  return Number.isFinite(numberValue) ? numberValue : null;
+};
+
+const normalizeDate = (value: unknown) => {
+  const text = normalizeText(value);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return text;
+  if (/^\d{8}$/.test(text)) return `${text.slice(0, 4)}-${text.slice(4, 6)}-${text.slice(6, 8)}`;
+  return new Date().toISOString().slice(0, 10);
+};
+
+const roundNumber = (value: number | null, digits = 3) => {
+  if (value === null || !Number.isFinite(value)) return null;
+  const factor = 10 ** digits;
+  return Math.round(value * factor) / factor;
+};
+
+const serializePhysicalObservation = (row: any) => ({
+  id: Number(row.id),
+  asset_symbol: row.asset_symbol,
+  asset_label: row.asset_label,
+  observation_date: row.observation_date,
+  reference_close: row.reference_close === null || row.reference_close === undefined ? null : Number(row.reference_close),
+  merchant_sell_price: row.merchant_sell_price === null || row.merchant_sell_price === undefined ? null : Number(row.merchant_sell_price),
+  merchant_sell_premium: row.merchant_sell_premium === null || row.merchant_sell_premium === undefined ? null : Number(row.merchant_sell_premium),
+  buyback_price: row.buyback_price === null || row.buyback_price === undefined ? null : Number(row.buyback_price),
+  buyback_premium: row.buyback_premium === null || row.buyback_premium === undefined ? null : Number(row.buyback_premium),
+  supply_status: row.supply_status || "unknown",
+  transaction_heat: row.transaction_heat || "unknown",
+  social_heat: row.social_heat || "unknown",
+  reliability: row.reliability || "manual_limited",
+  source_note: row.source_note || "",
+  note: row.note || "",
+  created_at: row.created_at || "",
+  updated_at: row.updated_at || ""
+});
+
+const buildPhysicalGuidance = (observation: ReturnType<typeof serializePhysicalObservation> | null) => {
+  if (!observation) {
+    return {
+      key: "missing",
+      label: "缺少实物端观察",
+      tone: "neutral",
+      summary: "当前只看盘面状态；实物端加价、回收价和成交热度需要人工补充。",
+      action_hint: "不影响盘面判断。"
+    };
+  }
+
+  const sellPremium = Number(observation.merchant_sell_premium);
+  const buybackPremium = Number(observation.buyback_premium);
+  const hotSocial = ["crowded", "high"].includes(observation.social_heat);
+  const hotTransaction = ["hot", "warm"].includes(observation.transaction_heat);
+  const hardToBuy = ["need_grab", "limited"].includes(observation.supply_status);
+  const easyToBuy = ["easy_buy", "normal"].includes(observation.supply_status);
+  const coldTransaction = ["cold", "quiet"].includes(observation.transaction_heat);
+
+  if ((Number.isFinite(buybackPremium) && buybackPremium >= 2)
+    || (Number.isFinite(sellPremium) && sellPremium >= 3)
+    || hotSocial
+    || (hotTransaction && hardToBuy)) {
+    return {
+      key: "physical_hot",
+      label: "实物端偏热",
+      tone: "watch",
+      summary: "实物端出现加价、抢货或讨论升温，只能提高卖出纪律和防追高权重。",
+      action_hint: "有仓优先检查梯子卖点；无仓不因实物端热度追买。"
+    };
+  }
+
+  if (easyToBuy && coldTransaction) {
+    return {
+      key: "physical_cooling",
+      label: "实物端转冷",
+      tone: "weak",
+      summary: "供给变容易、成交热度下降，说明盘面修复需要更多确认。",
+      action_hint: "不急着补仓，等待盘面高波动解除和结构修复。"
+    };
+  }
+
+  return {
+    key: "physical_neutral",
+    label: "实物端中性",
+    tone: "neutral",
+    summary: "实物端没有给出强烈背离，只作为盘面判断的现场补充。",
+    action_hint: "继续以盘面状态线和仓位计划为主。"
+  };
+};
+
+const writePhysicalObservationAuditLog = async (db: any, record: any) => {
+  const now = new Date().toISOString();
+  await db.run(
+    `INSERT INTO audit_logs
+      (id, timestamp, module, action, target, status, detail, entity_id, path, domain, workspace, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      `physical_observation_create_${record.id}_${Date.now()}`,
+      now,
+      "贵金属实物端观察",
+      "create",
+      `${record.asset_label} / ${record.observation_date}`,
+      "success",
+      record.note || record.source_note || "手动记录实物端辅助信息",
+      String(record.id),
+      "/market/precious-metals",
+      "business",
+      "business",
+      now,
+      now
+    ]
+  ).catch(() => undefined);
+};
+
 const loadMainQuoteSummaries = async (db: any) => {
   const summaries = [];
 
@@ -122,6 +238,186 @@ const stateStepConfigs = [
   { key: "fast_drop", label: "暴跌", color: "#f87171", tone: "danger" },
   { key: "falling_knife", label: "飞刀", color: "#ef4444", tone: "danger" }
 ];
+
+const getHitSet = (evaluation: SilverSwingEvaluation) => new Set(evaluation.hitRuleKeys);
+
+const getEvaluationRule = (evaluation: SilverSwingEvaluation, ruleKey: string) => (
+  evaluation.rules.find(rule => rule.ruleKey === ruleKey)
+);
+
+const getRuleScore = (evaluation: SilverSwingEvaluation, ruleKey: string) => {
+  const rule = getEvaluationRule(evaluation, ruleKey);
+  return Number.isFinite(Number(rule?.score)) ? Number(rule?.score) : null;
+};
+
+const isHighVolatilityLike = (evaluation: SilverSwingEvaluation) => {
+  const hits = getHitSet(evaluation);
+  return hits.has("high_volatility") || hits.has("extreme_volatility");
+};
+
+const countBackwardWhile = (
+  evaluations: SilverSwingEvaluation[],
+  predicate: (evaluation: SilverSwingEvaluation) => boolean
+) => {
+  let count = 0;
+  for (let index = evaluations.length - 1; index >= 0; index -= 1) {
+    if (!predicate(evaluations[index])) break;
+    count += 1;
+  }
+  return count;
+};
+
+const buildVolatilityRestoreConditions = (
+  evaluation: SilverSwingEvaluation,
+  clearStreakDays: number
+) => {
+  const hits = getHitSet(evaluation);
+  const noExtreme = !hits.has("extreme_volatility");
+  const noHighVolatility = !hits.has("high_volatility");
+  const noFallingKnife = !hits.has("falling_knife") && !hits.has("fast_drop");
+  const noOverheat = !hits.has("overheat_rise") && !hits.has("fast_rise");
+  const enoughCoolingDays = clearStreakDays >= 5;
+  const structureRepaired = hits.has("sideways")
+    || hits.has("medium_sideways")
+    || hits.has("healthy_pullback")
+    || (hits.has("slow_rise") && noOverheat);
+
+  const statusOf = (passed: boolean, blocked = false) => (
+    passed ? "passed" : blocked ? "blocked" : "pending"
+  );
+
+  return [
+    {
+      key: "extreme_cleared",
+      label: "极端高波动未命中",
+      status: statusOf(noExtreme, !noExtreme),
+      text: noExtreme ? "极端纪律区已离开。" : "仍在极端高波动，买入权限关闭。"
+    },
+    {
+      key: "high_volatility_cleared",
+      label: "高波动未命中",
+      status: statusOf(noHighVolatility),
+      text: noHighVolatility ? "高波动主规则暂未命中。" : "仍在高波动，买入只能降权观察。"
+    },
+    {
+      key: "falling_knife_cleared",
+      label: "暴跌/飞刀未命中",
+      status: statusOf(noFallingKnife, !noFallingKnife),
+      text: noFallingKnife ? "没有暴跌/飞刀拦截。" : "仍有暴跌/飞刀信号，不接。"
+    },
+    {
+      key: "overheat_cleared",
+      label: "暴涨/过热未命中",
+      status: statusOf(noOverheat),
+      text: noOverheat ? "没有追涨拦截。" : "仍有暴涨/过热信号，先看卖出纪律。"
+    },
+    {
+      key: "cooling_days",
+      label: "解除观察至少5个交易日",
+      status: statusOf(enoughCoolingDays),
+      text: enoughCoolingDays
+        ? `已连续 ${clearStreakDays} 个交易日未命中高波动/极端。`
+        : `当前仅连续 ${clearStreakDays} 个交易日未命中高波动/极端。`
+    },
+    {
+      key: "structure_repaired",
+      label: "结构有修复证据",
+      status: statusOf(structureRepaired),
+      text: structureRepaired
+        ? "横盘、回踩不破或温和慢涨给出结构修复证据。"
+        : "暂未看到横盘、回踩不破或温和慢涨的结构证据。"
+    }
+  ];
+};
+
+const buildVolatilityPhase = (
+  evaluation: SilverSwingEvaluation,
+  recentEvaluations: SilverSwingEvaluation[]
+) => {
+  const hits = getHitSet(evaluation);
+  const highRule = getEvaluationRule(evaluation, "high_volatility");
+  const highScore = getRuleScore(evaluation, "high_volatility");
+  const previousEvaluation = recentEvaluations.length > 1
+    ? recentEvaluations[recentEvaluations.length - 2]
+    : null;
+  const previousHighScore = previousEvaluation ? getRuleScore(previousEvaluation, "high_volatility") : null;
+  const scoreRequired = Number.isFinite(Number(highRule?.scoreRequired)) ? Number(highRule?.scoreRequired) : 3;
+  const scoreTotal = Number.isFinite(Number(highRule?.scoreTotal)) ? Number(highRule?.scoreTotal) : null;
+  const highVolatilityStreakDays = countBackwardWhile(recentEvaluations, isHighVolatilityLike);
+  const clearStreakDays = countBackwardWhile(recentEvaluations, evaluationItem => !isHighVolatilityLike(evaluationItem));
+  const recentWindow = recentEvaluations.slice(-20);
+  const recentHighVolatilityDays20 = recentWindow.filter(isHighVolatilityLike).length;
+  const hasDirectionalShock = hits.has("fast_drop")
+    || hits.has("falling_knife")
+    || hits.has("fast_rise")
+    || hits.has("overheat_rise");
+  const highHit = hits.has("high_volatility");
+  const extremeHit = hits.has("extreme_volatility");
+  const scoreCooling = highScore !== null
+    && highScore <= scoreRequired
+    && previousHighScore !== null
+    && previousHighScore >= highScore;
+
+  let key = "quiet";
+  let label = "波动平稳";
+  let tone = "neutral";
+  let summary = "当前没有高波动/极端高波动命中，但仍按计划价格、仓位和实物端信息复核。";
+  let buyPermissionHint = "恢复复核权限，不等于自动买入。";
+
+  if (extremeHit) {
+    key = "extreme";
+    label = "极端高波动";
+    tone = "danger";
+    summary = "仍在极端纪律区，买入权限关闭，优先已有仓位、现金和卖出纪律。";
+    buyPermissionHint = "关闭买入权限。";
+  } else if (highHit) {
+    if (highVolatilityStreakDays <= 3) {
+      key = "starting";
+      label = "高波动刚开始";
+      tone = "watch";
+      summary = "高波动刚进入命中区，先别把短暂反弹或快速下跌当成稳定结构。";
+    } else if (scoreCooling && !hasDirectionalShock) {
+      key = "cooling";
+      label = "高波动冷却中";
+      tone = "watch";
+      summary = "高波动仍命中，但分数已贴近阈值且没有方向性冲击，进入观察冷却阶段。";
+    } else {
+      key = "continuing";
+      label = "高波动延续";
+      tone = "watch";
+      summary = "高波动还在延续，买入继续降权；有仓按纪律管理，不急着判断已经安全。";
+    }
+    buyPermissionHint = "买入降权，只允许观察或小批次复核。";
+  } else if (recentHighVolatilityDays20 > 0 && clearStreakDays < 5) {
+    key = "cooling";
+    label = "高波动解除观察中";
+    tone = "watch";
+    summary = "高波动主规则暂未命中，但解除天数还短，先看是否反复。";
+    buyPermissionHint = "只恢复观察，不恢复大仓权限。";
+  } else if (recentHighVolatilityDays20 > 0 && clearStreakDays >= 5) {
+    key = "basically_cleared";
+    label = "高波动基本解除";
+    tone = "opportunity";
+    summary = "高波动已连续多日未命中，可以恢复计划复核；仍需看价格区间、实物端和仓位纪律。";
+    buyPermissionHint = "恢复复核权限，不等于自动买入。";
+  }
+
+  return {
+    key,
+    label,
+    tone,
+    summary,
+    buy_permission_hint: buyPermissionHint,
+    high_volatility_score: highScore,
+    high_volatility_score_total: scoreTotal,
+    high_volatility_score_required: scoreRequired,
+    previous_high_volatility_score: previousHighScore,
+    high_volatility_streak_days: highVolatilityStreakDays,
+    clear_streak_days: clearStreakDays,
+    recent_high_volatility_days_20: recentHighVolatilityDays20,
+    restore_conditions: buildVolatilityRestoreConditions(evaluation, clearStreakDays)
+  };
+};
 
 const pickPrimaryState = (evaluation: SilverSwingEvaluation) => {
   const hits = new Set(evaluation.hitRuleKeys);
@@ -296,7 +592,7 @@ const buildGoldAnchorBias = (evaluation: SilverSwingEvaluation) => {
     return {
       buy_permission: "background_only",
       sell_discipline: "no_execution",
-      position_hint: "黄金进入极端波动天气，只作贵金属大方向风险提示；白银和纪念币计划要提高纪律权重。",
+      position_hint: "黄金进入极端波动天气，只作贵金属大方向风险提示；白银和纪念币计划要提高纪律权重，不能单独触发买卖。",
       summary: `黄金背景锚进入极端高波动。${metricText}。`
     };
   }
@@ -304,7 +600,7 @@ const buildGoldAnchorBias = (evaluation: SilverSwingEvaluation) => {
     return {
       buy_permission: "background_only",
       sell_discipline: "no_execution",
-      position_hint: "黄金快速下杀，说明贵金属背景转冷或事件冲击加剧；不直接给买入结论。",
+      position_hint: "黄金快速下杀，说明贵金属背景转冷或事件冲击加剧；只提示背景风险，不直接给买入结论。",
       summary: `黄金背景锚出现暴跌/飞刀。${metricText}。`
     };
   }
@@ -312,7 +608,7 @@ const buildGoldAnchorBias = (evaluation: SilverSwingEvaluation) => {
     return {
       buy_permission: "background_only",
       sell_discipline: "no_execution",
-      position_hint: "黄金短线过热，贵金属情绪偏热；白银/纪念币若同步过热，要优先防回吐。",
+      position_hint: "黄金短线过热，贵金属情绪偏热；白银/纪念币若同步过热，只提高防回吐权重，不单独触发卖出。",
       summary: `黄金背景锚偏热。${metricText}。`
     };
   }
@@ -336,7 +632,7 @@ const buildGoldAnchorBias = (evaluation: SilverSwingEvaluation) => {
     return {
       buy_permission: "background_only",
       sell_discipline: "no_execution",
-      position_hint: "黄金慢涨，贵金属背景偏暖；可作为白银和纪念币大方向的加分项。",
+      position_hint: "黄金慢涨，贵金属背景偏暖；只能作为白银和纪念币大方向的加分项。",
       summary: `黄金背景锚慢涨。${metricText}。`
     };
   }
@@ -360,7 +656,8 @@ const buildCurrentSignalPayload = (
   symbolConfig: typeof MAIN_PRICE_SYMBOLS[number],
   evaluation: SilverSwingEvaluation,
   rules: any[],
-  ruleGroup: string
+  ruleGroup: string,
+  recentEvaluations: SilverSwingEvaluation[] = [evaluation]
 ) => {
   const primaryState = pickPrimaryState(evaluation);
   const actionBias = ruleGroup === "precious_metal_plan" || symbolConfig.symbol === "XAUUSD"
@@ -391,6 +688,10 @@ const buildCurrentSignalPayload = (
     primary_state: primaryState,
     action_bias: actionBias,
     hit_rule_keys: evaluation.hitRuleKeys,
+    rule_evaluations: evaluation.rules,
+    volatility_phase: symbolConfig.symbol === "SGE_AGTD"
+      ? buildVolatilityPhase(evaluation, recentEvaluations.length ? recentEvaluations : [evaluation])
+      : null,
     state_steps: stateSteps,
     metrics: evaluation.metrics
   };
@@ -466,7 +767,8 @@ router.get("/precious-metal-market/assist-rules", async (req, res) => {
     const db = await getDb();
     const requestedSymbol = String(req.query.symbol || "SGE_AGTD").trim().toUpperCase();
     const symbolConfig = MAIN_PRICE_SYMBOLS.find(item => item.symbol === requestedSymbol) || MAIN_PRICE_SYMBOLS[1];
-    const ruleGroup = String(req.query.rule_group || "silver_swing_plan").trim();
+    const defaultRuleGroup = symbolConfig.symbol === "XAUUSD" ? "precious_metal_plan" : "silver_swing_plan";
+    const ruleGroup = String(req.query.rule_group || defaultRuleGroup).trim();
     const includeArchived = String(req.query.include_archived || "").trim() === "1";
     const rows = await db.all(
       `SELECT id,
@@ -515,12 +817,203 @@ router.get("/precious-metal-market/assist-rules", async (req, res) => {
   }
 });
 
+router.get("/precious-metal-market/rule-versions", async (req, res) => {
+  try {
+    const db = await getDb();
+    const requestedSymbol = String(req.query.symbol || "SGE_AGTD").trim().toUpperCase();
+    const symbolConfig = MAIN_PRICE_SYMBOLS.find(item => item.symbol === requestedSymbol) || MAIN_PRICE_SYMBOLS[1];
+    const defaultRuleGroup = symbolConfig.symbol === "XAUUSD" ? "precious_metal_plan" : "silver_swing_plan";
+    const ruleGroup = String(req.query.rule_group || defaultRuleGroup).trim();
+    const includeArchived = String(req.query.include_archived || "").trim() === "1";
+    const requestedLimit = Number(req.query.limit || 5);
+    const limit = Number.isFinite(requestedLimit) ? Math.min(Math.max(Math.floor(requestedLimit), 1), 20) : 5;
+    const rows = await db.all(
+      `SELECT id,
+              asset_symbol,
+              asset_label,
+              rule_group,
+              group_label,
+              version_key,
+              version_name,
+              status,
+              effective_date,
+              change_reason,
+              threshold_summary,
+              sample_window,
+              regression_command,
+              regression_summary,
+              snapshot_json,
+              updated_at
+       FROM market_assist_rule_versions
+       WHERE asset_symbol = ?
+         AND rule_group = ?
+         ${includeArchived ? "" : "AND status <> 'archived'"}
+       ORDER BY effective_date DESC, id DESC
+       LIMIT ?`,
+      [symbolConfig.symbol, ruleGroup, limit]
+    );
+
+    res.json({
+      success: true,
+      data: {
+        symbol: symbolConfig,
+        rule_group: ruleGroup,
+        evaluator_version: getEvaluatorVersion(symbolConfig.symbol, ruleGroup),
+        items: rows.map((row: any) => ({
+          ...row,
+          snapshot: parseJsonValue(row.snapshot_json)
+        }))
+      }
+    });
+  } catch (error) {
+    res.status(200).json({
+      success: false,
+      message: (error as Error).message || "贵金属阈值版本记录读取失败",
+      data: { items: [] }
+    });
+  }
+});
+
+router.get("/precious-metal-market/physical-observations", async (req, res) => {
+  try {
+    const db = await getDb();
+    const requestedSymbol = String(req.query.symbol || "SGE_AGTD").trim().toUpperCase();
+    const symbolConfig = MAIN_PRICE_SYMBOLS.find(item => item.symbol === requestedSymbol) || MAIN_PRICE_SYMBOLS[1];
+    const requestedLimit = Number(req.query.limit || 8);
+    const limit = Number.isFinite(requestedLimit) ? Math.min(Math.max(Math.floor(requestedLimit), 1), 30) : 8;
+    const rows = await db.all(
+      `SELECT *
+       FROM market_physical_observations
+       WHERE asset_symbol = ?
+       ORDER BY observation_date DESC, id DESC
+       LIMIT ?`,
+      [symbolConfig.symbol, limit]
+    );
+    const latestMarket = await db.get(
+      `SELECT trade_date, close
+       FROM market_anchor_daily_prices
+       WHERE symbol = ?
+         AND source = ?
+         AND close IS NOT NULL
+       ORDER BY trade_date DESC, id DESC
+       LIMIT 1`,
+      [symbolConfig.symbol, symbolConfig.source]
+    );
+    const items = rows.map(serializePhysicalObservation);
+    const latest = items[0] || null;
+
+    res.json({
+      success: true,
+      data: {
+        symbol: symbolConfig,
+        latest_market: latestMarket
+          ? { trade_date: latestMarket.trade_date, close: Number(latestMarket.close) }
+          : null,
+        latest,
+        guidance: buildPhysicalGuidance(latest),
+        items
+      }
+    });
+  } catch (error) {
+    res.status(200).json({
+      success: false,
+      message: (error as Error).message || "贵金属实物端观察读取失败",
+      data: { items: [], latest: null, guidance: buildPhysicalGuidance(null) }
+    });
+  }
+});
+
+router.post("/precious-metal-market/physical-observations", async (req, res) => {
+  try {
+    const db = await getDb();
+    const body = req.body || {};
+    const requestedSymbol = String(body.symbol || "SGE_AGTD").trim().toUpperCase();
+    const symbolConfig = MAIN_PRICE_SYMBOLS.find(item => item.symbol === requestedSymbol) || MAIN_PRICE_SYMBOLS[1];
+    const observationDate = normalizeDate(body.observation_date);
+    const latestMarket = await db.get(
+      `SELECT trade_date, close
+       FROM market_anchor_daily_prices
+       WHERE symbol = ?
+         AND source = ?
+         AND close IS NOT NULL
+       ORDER BY trade_date DESC, id DESC
+       LIMIT 1`,
+      [symbolConfig.symbol, symbolConfig.source]
+    );
+    const referenceClose = parseOptionalNumber(body.reference_close) ?? (
+      latestMarket?.close === null || latestMarket?.close === undefined ? null : Number(latestMarket.close)
+    );
+    const merchantSellPrice = parseOptionalNumber(body.merchant_sell_price);
+    const buybackPrice = parseOptionalNumber(body.buyback_price);
+    const merchantSellPremium = parseOptionalNumber(body.merchant_sell_premium)
+      ?? (merchantSellPrice !== null && referenceClose !== null ? roundNumber(merchantSellPrice - referenceClose) : null);
+    const buybackPremium = parseOptionalNumber(body.buyback_premium)
+      ?? (buybackPrice !== null && referenceClose !== null ? roundNumber(buybackPrice - referenceClose) : null);
+    const supplyStatus = normalizeText(body.supply_status) || "unknown";
+    const transactionHeat = normalizeText(body.transaction_heat) || "unknown";
+    const socialHeat = normalizeText(body.social_heat) || "unknown";
+    const sourceNote = normalizeText(body.source_note);
+    const note = normalizeText(body.note);
+
+    if (!note && !sourceNote && merchantSellPrice === null && buybackPrice === null && supplyStatus === "unknown" && transactionHeat === "unknown" && socialHeat === "unknown") {
+      res.status(400).json({ success: false, message: "至少补一项实物端观察", data: null });
+      return;
+    }
+
+    const result = await db.run(
+      `INSERT INTO market_physical_observations
+        (asset_symbol, asset_label, observation_date, reference_close, merchant_sell_price, merchant_sell_premium, buyback_price, buyback_premium, supply_status, transaction_heat, social_heat, reliability, source_note, note, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+      [
+        symbolConfig.symbol,
+        symbolConfig.label,
+        observationDate,
+        referenceClose,
+        merchantSellPrice,
+        merchantSellPremium,
+        buybackPrice,
+        buybackPremium,
+        supplyStatus,
+        transactionHeat,
+        socialHeat,
+        "manual_limited",
+        sourceNote,
+        note
+      ]
+    );
+    const created = await db.get(
+      `SELECT *
+       FROM market_physical_observations
+       WHERE id = ?`,
+      [result.lastID]
+    );
+    const item = serializePhysicalObservation(created);
+    await writePhysicalObservationAuditLog(db, item);
+
+    res.json({
+      success: true,
+      message: "实物端观察已记录",
+      data: {
+        item,
+        guidance: buildPhysicalGuidance(item)
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: (error as Error).message || "贵金属实物端观察保存失败",
+      data: null
+    });
+  }
+});
+
 router.get("/precious-metal-market/current-signal", async (req, res) => {
   try {
     const db = await getDb();
     const requestedSymbol = String(req.query.symbol || "SGE_AGTD").trim().toUpperCase();
     const symbolConfig = MAIN_PRICE_SYMBOLS.find(item => item.symbol === requestedSymbol) || MAIN_PRICE_SYMBOLS[1];
-    const ruleGroup = String(req.query.rule_group || "silver_swing_plan").trim();
+    const defaultRuleGroup = symbolConfig.symbol === "XAUUSD" ? "precious_metal_plan" : "silver_swing_plan";
+    const ruleGroup = String(req.query.rule_group || defaultRuleGroup).trim();
     const points = await db.all(
       `SELECT trade_date, close
        FROM market_anchor_daily_prices
@@ -566,6 +1059,7 @@ router.get("/precious-metal-market/current-signal", async (req, res) => {
             summary: "暂无足够数据或规则。"
           },
           hit_rule_keys: [],
+          volatility_phase: null,
           state_steps: [],
           metrics: null
         }
@@ -574,9 +1068,13 @@ router.get("/precious-metal-market/current-signal", async (req, res) => {
     }
 
     const evaluation = evaluateSilverSwingRules(points, rules);
+    const recentTargetDates = points.slice(-45).map(point => String(point.trade_date || point.date || ""));
+    const recentEvaluations = recentTargetDates
+      .filter(Boolean)
+      .map(date => evaluateSilverSwingRules(points, rules, date));
     res.json({
       success: true,
-      data: buildCurrentSignalPayload(symbolConfig, evaluation, ruleRows, ruleGroup)
+      data: buildCurrentSignalPayload(symbolConfig, evaluation, ruleRows, ruleGroup, recentEvaluations)
     });
   } catch (error) {
     res.status(200).json({
