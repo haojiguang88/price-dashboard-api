@@ -84,6 +84,17 @@ const toOptionalText = (value: unknown): string | null => {
 
 const isRestockEvent = (eventType: string): boolean => eventType.includes('补货');
 
+const uniqueTextOptions = (items: Array<string | null | undefined>): string[] => {
+  const seen = new Set<string>();
+  return items
+    .map((item) => String(item || '').trim())
+    .filter((item) => {
+      if (!item || seen.has(item)) return false;
+      seen.add(item);
+      return true;
+    });
+};
+
 const parseDateOnlyUtc = (value: string): number | null => {
   const dateText = value.slice(0, 10);
   if (!isValidDateOnly(dateText)) return null;
@@ -321,6 +332,11 @@ router.get('/product-supply-events', async (req, res) => {
             '有倒计时',
             ...hydratedItems.map((item) => item.countdown_status),
           ])).sort(),
+          channel_regions: uniqueTextOptions([
+            '小程序送到家',
+            '海外',
+            ...hydratedItems.map((item) => item.channel_region),
+          ]),
         },
         summary: {
           event_count: items.length,
