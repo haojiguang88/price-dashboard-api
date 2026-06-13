@@ -153,6 +153,8 @@ const initDatabase = async (db: Database) => {
   await db.exec("CREATE INDEX IF NOT EXISTS idx_workspace_tags_workspace_name ON workspace_tags(workspace, name)");
   await db.exec("CREATE TABLE IF NOT EXISTS user_preferences (id INTEGER PRIMARY KEY AUTOINCREMENT, user_key TEXT NOT NULL DEFAULT 'default', preference_key TEXT NOT NULL, preference_value TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(user_key, preference_key))");
   await db.exec("CREATE INDEX IF NOT EXISTS idx_user_preferences_user_key ON user_preferences(user_key, preference_key)");
+  await db.exec("CREATE TABLE IF NOT EXISTS dashboard_action_statuses (id INTEGER PRIMARY KEY AUTOINCREMENT, workspace TEXT NOT NULL DEFAULT 'business', action_key TEXT NOT NULL, action_title TEXT NOT NULL DEFAULT '', action_source TEXT NOT NULL DEFAULT '', status TEXT NOT NULL CHECK(status IN ('handled', 'ignored')), note TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(workspace, action_key))");
+  await db.exec("CREATE INDEX IF NOT EXISTS idx_dashboard_action_statuses_scope ON dashboard_action_statuses(workspace, status, updated_at DESC)");
 
   console.log("SQLite database connected and base tables created if not exists");
   console.log("Record tables will be created via migrations");

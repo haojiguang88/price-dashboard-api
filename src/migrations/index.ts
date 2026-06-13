@@ -4228,6 +4228,27 @@ const migrations: Migration[] = [
         AND rule_group = 'precious_metal_plan'
         AND version_key = 'gold-anchor-v1.0';
     `
+  },
+  {
+    id: '20260613_001_create_dashboard_action_statuses',
+    name: 'Create dashboard action queue handled ignored statuses',
+    sql: `
+      CREATE TABLE IF NOT EXISTS dashboard_action_statuses (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        workspace TEXT NOT NULL DEFAULT 'business',
+        action_key TEXT NOT NULL,
+        action_title TEXT NOT NULL DEFAULT '',
+        action_source TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL CHECK(status IN ('handled', 'ignored')),
+        note TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(workspace, action_key)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_dashboard_action_statuses_scope
+        ON dashboard_action_statuses(workspace, status, updated_at DESC);
+    `
   }
 
 ];
