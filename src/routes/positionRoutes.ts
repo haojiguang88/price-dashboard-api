@@ -44,6 +44,20 @@ const roundMetric = (value: number | null, digits = 2) => {
   return Number(value.toFixed(digits));
 };
 
+const QUANTITY_EPSILON = 0.000001;
+
+const roundQuantity = (value: number) => Number(value.toFixed(2));
+
+const parseQuantityInput = (value: any) => {
+  const text = String(value ?? '').trim();
+  if (!/^\d+(\.\d{1,2})?$/.test(text)) return null;
+
+  const numberValue = Number(text);
+  if (!Number.isFinite(numberValue) || numberValue <= 0) return null;
+
+  return roundQuantity(numberValue);
+};
+
 const toDateValue = (date: string) => new Date(`${date}T00:00:00`).getTime();
 
 const diffDays = (fromDate: string, toDate: string) => {
@@ -82,7 +96,7 @@ const compactPositionItem = (item: PositionInsightItem) => ({
   category_id: item.category_id,
   object_id: item.object_id,
   variant_id: item.variant_id,
-  total_quantity: roundMetric(item.total_quantity, 0),
+  total_quantity: roundMetric(item.total_quantity, 2),
   total_cost: roundMetric(item.total_cost),
   avg_price: roundMetric(item.avg_price),
   current_price: roundMetric(item.current_price),
@@ -525,9 +539,9 @@ router.post("/position-batches", async (req, res) => {
       return res.status(400).json({ status: "error", message: "批次价格必须是大于 0 的数字" });
     }
     
-    // 校验数量是否为整数且大于 0
-    if (!Number.isInteger(batch_quantity) || batch_quantity <= 0) {
-      return res.status(400).json({ status: "error", message: "批次数量必须是整数且大于 0" });
+    const normalizedBatchQuantity = parseQuantityInput(batch_quantity);
+    if (normalizedBatchQuantity === null) {
+      return res.status(400).json({ status: "error", message: "批次数量必须大于 0，最多保留 2 位小数" });
     }
     
     // 校验日期
@@ -569,7 +583,7 @@ router.post("/position-batches", async (req, res) => {
     }
 
     // 计算批次成本
-    const batch_cost = batch_price * batch_quantity;
+    const batch_cost = batch_price * normalizedBatchQuantity;
     
     // 开始事务
     await db.run("BEGIN TRANSACTION");
@@ -595,7 +609,7 @@ router.post("/position-batches", async (req, res) => {
       const now = new Date().toISOString();
       const batchResult = await db.run(
         "INSERT INTO position_batches (position_id, batch_price, batch_quantity, batch_cost, remaining_quantity, batch_date, note, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        [position.id, batch_price, batch_quantity, batch_cost, batch_quantity, String(batch_date).trim(), note, now, now]
+        [position.id, batch_price, normalizedBatchQuantity, batch_cost, normalizedBatchQuantity, String(batch_date).trim(), note, now, now]
       );
       await refreshPositionAggregate(db, position.id, now);
       
@@ -651,8 +665,9 @@ router.put("/position-batches/:id", async (req, res) => {
         return res.status(400).json({ status: "error", message: "批次价格必须是大于 0 的数字" });
       }
 
-      if (!Number.isInteger(batch_quantity) || batch_quantity <= 0) {
-        return res.status(400).json({ status: "error", message: "批次数量必须是整数且大于 0" });
+      const normalizedBatchQuantity = parseQuantityInput(batch_quantity);
+      if (normalizedBatchQuantity === null) {
+        return res.status(400).json({ status: "error", message: "批次数量必须大于 0，最多保留 2 位小数" });
       }
 
       if (!isValidDateOnly(String(batch_date).trim())) {
@@ -673,13 +688,17 @@ router.put("/position-batches/:id", async (req, res) => {
         );
       } else {
         // 计算批次成本
-        const batch_cost = batch_price * batch_quantity;
+        const normalizedBatchQuantity = parseQuantityInput(batch_quantity);
+        if (normalizedBatchQuantity === null) {
+          throw new Error("批次数量必须大于 0，最多保留 2 位小数");
+        }
+        const batch_cost = batch_price * normalizedBatchQuantity;
         
         // 更新批次记录
         const now = new Date().toISOString();
         await db.run(
           "UPDATE position_batches SET batch_price = ?, batch_quantity = ?, batch_cost = ?, remaining_quantity = ?, batch_date = ?, note = ?, updated_at = ? WHERE id = ?",
-          [batch_price, batch_quantity, batch_cost, batch_quantity, String(batch_date).trim(), note, now, id]
+          [batch_price, normalizedBatchQuantity, batch_cost, normalizedBatchQuantity, String(batch_date).trim(), note, now, id]
         );
         await refreshPositionAggregate(db, existingBatch.position_id, now);
       }
@@ -765,9 +784,9 @@ router.post("/positions/:id/sell", async (req, res) => {
       return res.status(400).json({ status: "error", message: "缺少必填字段: batch_id, quantity, price, sell_date" });
     }
     
-    // 校验卖出数量是否为正整数
-    if (!Number.isInteger(quantity) || quantity <= 0) {
-      return res.status(400).json({ status: "error", message: "卖出数量必须是正整数" });
+    const normalizedSellQuantity = parseQuantityInput(quantity);
+    if (normalizedSellQuantity === null) {
+      return res.status(400).json({ status: "error", message: "卖出数量必须大于 0，最多保留 2 位小数" });
     }
     
     // 校验卖出价格是否为正数
@@ -790,7 +809,8 @@ router.post("/positions/:id/sell", async (req, res) => {
       }
       
       // 检查批次剩余数量是否足够
-      if (batch.remaining_quantity < quantity) {
+      const remainingQuantity = roundQuantity(toFiniteNumber(batch.remaining_quantity, 0));
+      if (remainingQuantity + QUANTITY_EPSILON < normalizedSellQuantity) {
         throw new Error("批次剩余数量不足");
       }
       
@@ -801,26 +821,27 @@ router.post("/positions/:id/sell", async (req, res) => {
       }
       
       // 计算卖出金额、成本和利润
-      const sell_amount = quantity * price;
-      const sell_cost = quantity * batch.batch_price;
+      const sell_amount = normalizedSellQuantity * price;
+      const sell_cost = normalizedSellQuantity * batch.batch_price;
       const profit = sell_amount - sell_cost;
       
       // 创建卖出记录
       const now = new Date().toISOString();
       await db.run(
         "INSERT INTO sell_records (category_name, object_name, variant_name, quantity, price, amount, cost, profit, sell_date, buy_date, batch_id, position_id, note, ended_position_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        [position.category_name, position.object_name, position.variant_name, quantity, price, sell_amount, sell_cost, profit, String(sell_date).trim(), batch.batch_date, batch_id, id, note, null, now, now]
+        [position.category_name, position.object_name, position.variant_name, normalizedSellQuantity, price, sell_amount, sell_cost, profit, String(sell_date).trim(), batch.batch_date, batch_id, id, note, null, now, now]
       );
       
       // 扣减批次剩余数量
-      const new_remaining_quantity = batch.remaining_quantity - quantity;
+      const new_remaining_quantity = roundQuantity(remainingQuantity - normalizedSellQuantity);
+      const final_remaining_quantity = new_remaining_quantity <= QUANTITY_EPSILON ? 0 : new_remaining_quantity;
       await db.run(
         "UPDATE position_batches SET remaining_quantity = ?, updated_at = ? WHERE id = ?",
-        [new_remaining_quantity, now, batch_id]
+        [final_remaining_quantity, now, batch_id]
       );
       
       // 删除空批次
-      if (new_remaining_quantity === 0) {
+      if (final_remaining_quantity === 0) {
         await db.run("DELETE FROM position_batches WHERE id = ?", [batch_id]);
       }
       await refreshPositionAggregate(db, id, now);
@@ -849,13 +870,13 @@ router.post("/positions/:id/sell", async (req, res) => {
         // 更新现有记录
         await db.run(
           "UPDATE ended_positions SET quantity = quantity + ?, amount = amount + ?, cost = cost + ?, profit = profit + ?, updated_at = ? WHERE id = ?",
-          [quantity, sell_amount, sell_cost, profit, now, endedPosition.id]
+          [normalizedSellQuantity, sell_amount, sell_cost, profit, now, endedPosition.id]
         );
       } else {
         // 创建新记录
         await db.run(
           "INSERT INTO ended_positions (source_id, category_name, object_name, variant_name, quantity, amount, cost, profit, sell_date, buy_date, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-          [String(id), position.category_name, position.object_name, position.variant_name || '', quantity, sell_amount, sell_cost, profit, String(sell_date).trim(), batch.batch_date, now, now]
+          [String(id), position.category_name, position.object_name, position.variant_name || '', normalizedSellQuantity, sell_amount, sell_cost, profit, String(sell_date).trim(), batch.batch_date, now, now]
         );
         // 获取新创建的记录 ID
         const newEndedPosition = await db.get(
@@ -914,7 +935,7 @@ router.post("/positions/:id/sell", async (req, res) => {
         message: "卖出成功", 
         data: {
           batch_id,
-          quantity,
+          quantity: normalizedSellQuantity,
           price,
           sell_date,
           sell_amount,

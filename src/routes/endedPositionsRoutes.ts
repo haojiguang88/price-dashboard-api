@@ -62,7 +62,7 @@ const compactEndedItem = (item: EndedInsightRow) => {
     category_id: item.category_id,
     object_id: item.object_id,
     variant_id: item.variant_id,
-    quantity: roundValue(toNumber(item.quantity), 0),
+    quantity: roundValue(toNumber(item.quantity), 2),
     amount: roundValue(toNumber(item.amount)),
     cost: roundValue(cost),
     profit: roundValue(profit),
@@ -114,7 +114,7 @@ const buildEndedPositionInsights = (positions: EndedInsightRow[], sellRecords: S
     return [...groupMap.values()]
       .map(group => ({
         ...group,
-        quantity: roundValue(group.quantity, 0),
+        quantity: roundValue(group.quantity, 2),
         amount: roundValue(group.amount),
         cost: roundValue(group.cost),
         profit: roundValue(group.profit),
