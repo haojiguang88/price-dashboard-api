@@ -236,10 +236,41 @@ const stateStepConfigs = [
   { key: "healthy_pullback", label: "回踩不破", color: "#34d399", tone: "opportunity" },
   { key: "slow_decline", label: "阴跌", color: "#c084fc", tone: "watch" },
   { key: "fast_drop", label: "暴跌", color: "#f87171", tone: "danger" },
+  { key: "rebound_repair", label: "反抽修复", color: "#60a5fa", tone: "watch" },
   { key: "falling_knife", label: "飞刀", color: "#ef4444", tone: "danger" }
 ];
 
 const getHitSet = (evaluation: SilverSwingEvaluation) => new Set(evaluation.hitRuleKeys);
+
+const buildDisplayOnlyStep = (stepKey: string, evaluation: SilverSwingEvaluation) => {
+  if (stepKey !== "rebound_repair") return null;
+
+  const metrics = evaluation.metrics;
+  const return3d = metrics.return3dPercent;
+  const return5d = metrics.return5dPercent;
+  const return10d = metrics.return10dPercent;
+  const worstDrop10d = metrics.worstSingleDayDrop10dPercent;
+  const drawdown20d = metrics.drawdownFrom20dHighPercent;
+  const recovery5d = metrics.recoveryFrom5dLowPercent;
+  const strongRebound = (return3d !== null && return3d >= 5)
+    || (
+      metrics.dailyReturnPercent !== null
+      && metrics.dailyReturnPercent >= 3
+      && recovery5d !== null
+      && recovery5d >= 5
+    );
+  const notTrendContinuation = return5d === null || return5d <= 3;
+  const priorShock = (worstDrop10d !== null && worstDrop10d <= -3.5)
+    || (return10d !== null && return10d <= -4)
+    || (drawdown20d !== null && drawdown20d <= -6);
+  const active = strongRebound && notTrendContinuation && priorShock;
+
+  return {
+    active,
+    action_hint: "展示节点：短线从下跌后快速修复，不改变买卖权限；后续看高波动是否解除、能否横住或回踩不破。",
+    note: `3日 ${formatSignedPercent(return3d)}，5日 ${formatSignedPercent(return5d)}，10日最深单日 ${formatSignedPercent(worstDrop10d)}，距20日高点 ${formatSignedPercent(drawdown20d)}。`
+  };
+};
 
 const getEvaluationRule = (evaluation: SilverSwingEvaluation, ruleKey: string) => (
   evaluation.rules.find(rule => rule.ruleKey === ruleKey)
@@ -667,15 +698,18 @@ const buildCurrentSignalPayload = (
   const ruleMap = new Map(rules.map((rule: any) => [rule.rule_key, rule]));
   const stateSteps = stateStepConfigs.map(config => {
     const rule = ruleMap.get(config.key);
-    const active = config.key === "sideways"
-      ? hitSet.has("sideways") || hitSet.has("medium_sideways")
-      : hitSet.has(config.key);
+    const displayOnlyStep = buildDisplayOnlyStep(config.key, evaluation);
+    const active = displayOnlyStep
+      ? displayOnlyStep.active
+      : config.key === "sideways"
+        ? hitSet.has("sideways") || hitSet.has("medium_sideways")
+        : hitSet.has(config.key);
     return {
       ...config,
       active,
       rule_name: rule?.rule_name || config.label,
-      action_hint: rule?.action_hint || "",
-      note: rule?.note || ""
+      action_hint: displayOnlyStep?.action_hint || rule?.action_hint || "",
+      note: displayOnlyStep?.note || rule?.note || ""
     };
   });
 
