@@ -12,6 +12,7 @@
     "test:silver-assist": "tsx scripts/business/verify_silver_assist_evaluator.ts",
     "test:precious-metal-assist": "tsx scripts/business/verify_precious_metal_assist_evaluator.ts",
     "report:precious-metal-thresholds": "tsx scripts/business/calibrate_precious_metal_thresholds.ts",
+    "report:precious-metal-cycle-context": "tsx scripts/business/precious_metal_cycle_context.ts",
     "start": "npm run start:business",
     "start:business": "sh -c 'NODE_ENV=${NODE_ENV:-production} PORT=${PORT:-3001} node dist/index.js'",
     "restart:local": "sh -c 'port=${PORT:-3001}; pid=$(lsof -tiTCP:$port -sTCP:LISTEN || true); if [ -n \"$pid\" ]; then kill $pid; fi; npm run start:business'"
