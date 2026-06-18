@@ -994,7 +994,7 @@ const migrations: Migration[] = [
   },
 {
     id: '20260530_003_remove_commodity_metals_task_from_business_db',
-    name: 'Keep commodity metals task in business task center',
+    name: 'No-op: commodity metals task belongs to business task center',
     sql: `
       SELECT 1;
     `
