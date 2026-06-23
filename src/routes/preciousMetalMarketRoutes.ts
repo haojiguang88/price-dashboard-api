@@ -236,39 +236,114 @@ const stateStepConfigs = [
   { key: "healthy_pullback", label: "回踩不破", color: "#34d399", tone: "opportunity" },
   { key: "slow_decline", label: "阴跌", color: "#c084fc", tone: "watch" },
   { key: "fast_drop", label: "暴跌", color: "#f87171", tone: "danger" },
+  { key: "rebound", label: "反抽", color: "#93c5fd", tone: "watch" },
   { key: "rebound_repair", label: "反抽修复", color: "#60a5fa", tone: "watch" },
   { key: "falling_knife", label: "飞刀", color: "#ef4444", tone: "danger" }
 ];
 
 const getHitSet = (evaluation: SilverSwingEvaluation) => new Set(evaluation.hitRuleKeys);
 
-const buildDisplayOnlyStep = (stepKey: string, evaluation: SilverSwingEvaluation) => {
-  if (stepKey !== "rebound_repair") return null;
+const getReboundDisplayThresholds = (symbol: string) => (
+  symbol === "XAUUSD"
+    ? {
+      rebound: {
+        return3dGte: 5,
+        dailyReturnGte: 2.5,
+        recovery5dGte: 4,
+        return5dLte: 8,
+        worstDrop10dLte: -3,
+        return10dLte: -3,
+        drawdown20dLte: -5
+      },
+      repair: {
+        closeVsMa20Gte: -1,
+        closeVsMa60Gte: -2,
+        recovery5dGte: 3,
+        return5dGte: -1,
+        range10dVs20dLte: 0.75
+      }
+    }
+    : {
+      rebound: {
+        return3dGte: 5,
+        dailyReturnGte: 3,
+        recovery5dGte: 5,
+        return5dLte: 8,
+        worstDrop10dLte: -3.5,
+        return10dLte: -4,
+        drawdown20dLte: -6
+      },
+      repair: {
+        closeVsMa20Gte: -1.5,
+        closeVsMa60Gte: -2.5,
+        recovery5dGte: 4,
+        return5dGte: -1,
+        range10dVs20dLte: 0.75
+      }
+    }
+);
+
+const buildDisplayOnlyStep = (stepKey: string, evaluation: SilverSwingEvaluation, symbol: string) => {
+  if (stepKey !== "rebound" && stepKey !== "rebound_repair") return null;
 
   const metrics = evaluation.metrics;
+  const thresholds = getReboundDisplayThresholds(symbol);
+  const reboundThresholds = thresholds.rebound;
+  const repairThresholds = thresholds.repair;
   const return3d = metrics.return3dPercent;
   const return5d = metrics.return5dPercent;
   const return10d = metrics.return10dPercent;
   const worstDrop10d = metrics.worstSingleDayDrop10dPercent;
   const drawdown20d = metrics.drawdownFrom20dHighPercent;
   const recovery5d = metrics.recoveryFrom5dLowPercent;
-  const strongRebound = (return3d !== null && return3d >= 5)
+  const shortRebound = (return3d !== null && return3d >= reboundThresholds.return3dGte)
     || (
       metrics.dailyReturnPercent !== null
-      && metrics.dailyReturnPercent >= 3
+      && metrics.dailyReturnPercent >= reboundThresholds.dailyReturnGte
       && recovery5d !== null
-      && recovery5d >= 5
+      && recovery5d >= reboundThresholds.recovery5dGte
     );
-  const notTrendContinuation = return5d === null || return5d <= 3;
-  const priorShock = (worstDrop10d !== null && worstDrop10d <= -3.5)
-    || (return10d !== null && return10d <= -4)
-    || (drawdown20d !== null && drawdown20d <= -6);
-  const active = strongRebound && notTrendContinuation && priorShock;
+  const notTrendContinuation = return5d === null || return5d <= reboundThresholds.return5dLte;
+  const priorShock = (worstDrop10d !== null && worstDrop10d <= reboundThresholds.worstDrop10dLte)
+    || (return10d !== null && return10d <= reboundThresholds.return10dLte)
+    || (drawdown20d !== null && drawdown20d <= reboundThresholds.drawdown20dLte);
+  const reboundActive = shortRebound && notTrendContinuation && priorShock;
+
+  if (stepKey === "rebound") {
+    return {
+      active: reboundActive,
+      action_hint: symbol === "XAUUSD"
+        ? "展示节点：黄金前面出现暴跌/阴跌/回落后，1-3日快速反弹；只作观察，不改变买卖权限。"
+        : "展示节点：前面出现暴跌/阴跌/回落后，1-3日快速反弹；只作观察，不改变买卖权限。",
+      note: `1日 ${formatSignedPercent(metrics.dailyReturnPercent)}，3日 ${formatSignedPercent(return3d)}，5日 ${formatSignedPercent(return5d)}，10日最深单日 ${formatSignedPercent(worstDrop10d)}，距20日高点 ${formatSignedPercent(drawdown20d)}。`
+    };
+  }
+
+  const closeVsMa20 = metrics.closeVsMa20Percent;
+  const closeVsMa60 = metrics.closeVsMa60Percent;
+  const range10d = metrics.range10dPercent;
+  const range20d = metrics.range20dPercent;
+  const nearKeyAverage = (closeVsMa20 !== null && closeVsMa20 >= repairThresholds.closeVsMa20Gte)
+    || (closeVsMa60 !== null && closeVsMa60 >= repairThresholds.closeVsMa60Gte);
+  const noFreshLow = recovery5d !== null && recovery5d >= repairThresholds.recovery5dGte;
+  const shortTrendStabilized = return5d === null || return5d >= repairThresholds.return5dGte;
+  const volatilityContracting = range10d !== null
+    && range20d !== null
+    && range20d > 0
+    && range10d <= range20d * repairThresholds.range10dVs20dLte;
+  const repairActive = priorShock
+    && (reboundActive || noFreshLow)
+    && nearKeyAverage
+    && noFreshLow
+    && shortTrendStabilized
+    && volatilityContracting;
 
   return {
-    active,
-    action_hint: "展示节点：短线从下跌后快速修复，不改变买卖权限；后续看高波动是否解除、能否横住或回踩不破。",
-    note: `3日 ${formatSignedPercent(return3d)}，5日 ${formatSignedPercent(return5d)}，10日最深单日 ${formatSignedPercent(worstDrop10d)}，距20日高点 ${formatSignedPercent(drawdown20d)}。`
+    active: repairActive,
+    action_hint: symbol === "XAUUSD"
+      ? "展示节点：黄金反抽后重新靠近/站回 MA20 或 MA60，且没有继续创新低、波动开始收敛；只提升背景状态，不给黄金实体买入，也不直接放行白银/纪念币。"
+      : "展示节点：反抽后重新靠近/站回 MA20 或 MA60，且没有继续创新低、波动开始收敛；只降低悲观，不直接放行买入。",
+    note: `5日 ${formatSignedPercent(return5d)}，距MA20 ${formatSignedPercent(closeVsMa20)}，距MA60 ${formatSignedPercent(closeVsMa60)}，离5日低点 ${formatSignedPercent(recovery5d)}，10日振幅 ${formatSignedPercent(range10d)} / 20日振幅 ${formatSignedPercent(range20d)}。`
   };
 };
 
@@ -698,7 +773,7 @@ const buildCurrentSignalPayload = (
   const ruleMap = new Map(rules.map((rule: any) => [rule.rule_key, rule]));
   const stateSteps = stateStepConfigs.map(config => {
     const rule = ruleMap.get(config.key);
-    const displayOnlyStep = buildDisplayOnlyStep(config.key, evaluation);
+    const displayOnlyStep = buildDisplayOnlyStep(config.key, evaluation, symbolConfig.symbol);
     const active = displayOnlyStep
       ? displayOnlyStep.active
       : config.key === "sideways"
