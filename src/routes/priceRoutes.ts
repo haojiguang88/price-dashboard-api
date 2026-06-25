@@ -105,8 +105,12 @@ interface PriceQualityAlert {
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const LARGE_PRICE_MOVE_PERCENT = 30;
+const STRONG_JUMP_PERCENT = 20;
+const STRONG_JUMP_AMOUNT = 1000;
+const HIGH_UNIT_PRICE_STANDARD_JUMP_DAYS = 14;
 const MEDIAN_OUTLIER_RATIO = 0.5;
 const ISOLATED_NEIGHBOR_CLOSE_PERCENT = 15;
+const HIGH_UNIT_PRICE_STANDARD_CATEGORIES = new Set(["苹果手机", "游戏机"]);
 const VALID_QUALITY_ALERT_STATUSES = new Set<PriceQualityAlertStatus>(["pending", "ignored", "fixed"]);
 
 const toTrimmedText = (value: unknown) => (
@@ -634,6 +638,17 @@ const averageNumber = (values: Array<number | null | undefined>) => {
 
 const ratio = (count: number, total: number) => (total > 0 ? count / total : 0);
 
+const isStrongPriceJump = (
+  jump: Pick<JumpInsight, "category_name" | "from_date" | "to_date" | "change_percent" | "change_amount">
+) => {
+  if (HIGH_UNIT_PRICE_STANDARD_CATEGORIES.has(jump.category_name)) {
+    const gapDays = daysBetween(jump.from_date, jump.to_date);
+    if (gapDays > HIGH_UNIT_PRICE_STANDARD_JUMP_DAYS) return false;
+    return Math.abs(jump.change_percent) >= STRONG_JUMP_PERCENT;
+  }
+  return Math.abs(jump.change_percent) >= STRONG_JUMP_PERCENT || Math.abs(jump.change_amount) >= STRONG_JUMP_AMOUNT;
+};
+
 const buildPriceAnalysisAssistant = (seriesStats: SeriesStats[], jumps: JumpInsight[], latestDate: string) => {
   const activeSeries = seriesStats.filter(item => item.days_since_latest <= 7);
   const staleSeries = seriesStats.filter(item => item.days_since_latest >= 14);
@@ -646,7 +661,7 @@ const buildPriceAnalysisAssistant = (seriesStats: SeriesStats[], jumps: JumpInsi
   const upRatio = ratio(activeUp.length, activeMovedSeries.length);
   const downRatio = ratio(activeDown.length, activeMovedSeries.length);
   const staleRatio = ratio(staleSeries.length, seriesStats.length);
-  const strongJumpCount = jumps.filter(item => Math.abs(item.change_percent) >= 20 || Math.abs(item.change_amount) >= 1000).length;
+  const strongJumpCount = jumps.filter(isStrongPriceJump).length;
   const bigDrawdownCount = activeSeries.filter(item => item.drawdown_percent <= -30).length;
   const recordLowCount = activeSeries.filter(item => item.historical_low_break_percent !== null).length;
   const recordHighCount = activeSeries.filter(item => item.historical_high_break_percent !== null).length;
@@ -706,7 +721,7 @@ const buildPriceAnalysisAssistant = (seriesStats: SeriesStats[], jumps: JumpInsi
     const drawdowns = active.filter(item => item.drawdown_percent <= -30);
     const lows = active.filter(item => item.historical_low_break_percent !== null);
     const highs = active.filter(item => item.historical_high_break_percent !== null);
-    const categoryJumps = jumps.filter(item => item.category_name === category && (Math.abs(item.change_percent) >= 20 || Math.abs(item.change_amount) >= 1000));
+    const categoryJumps = jumps.filter(item => item.category_name === category && isStrongPriceJump(item));
     const avgLatestChange = averageNumber(moved.map(item => item.change_percent));
     const categoryUpRatio = ratio(latestUp.length, moved.length);
     const categoryDownRatio = ratio(latestDown.length, moved.length);
@@ -934,7 +949,7 @@ const buildPriceInsights = (records: PriceRecordRow[]) => {
   const activeSeries = seriesStats.filter(item => item.days_since_latest <= 7);
   const staleSeries = seriesStats.filter(item => item.days_since_latest >= 14);
   const suspectedAnomalies = jumps
-    .filter(item => Math.abs(item.change_percent) >= 20 || Math.abs(item.change_amount) >= 1000)
+    .filter(isStrongPriceJump)
     .sort((a, b) => Math.abs(b.change_percent) - Math.abs(a.change_percent))
     .slice(0, 20)
     .map(toJumpInsightItem);
