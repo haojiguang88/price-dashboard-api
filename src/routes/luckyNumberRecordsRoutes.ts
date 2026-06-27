@@ -5,6 +5,7 @@ const router = express.Router();
 
 const DEFAULT_YEAR = "2025年";
 const SEED_PREFERENCE_KEY = "lucky_number_seed_version";
+const RATING_TYPES = ["首日", "首期", "首年", "普通"];
 
 const normalizeText = (value: unknown) => String(value ?? "").trim();
 
@@ -15,14 +16,23 @@ const normalizeYear = (value: unknown) => {
   return DEFAULT_YEAR;
 };
 
+const normalizeRatingType = (value: unknown) => {
+  const text = normalizeText(value);
+  return RATING_TYPES.includes(text) ? text : "普通";
+};
+
 const serializeRecord = (row: any) => ({
   id: String(row.id),
   product_name: row.product_name || "",
   number_code: row.number_code || "",
   year: row.year || DEFAULT_YEAR,
   raw_type: row.raw_type || "",
+  rating_type: row.rating_type || "普通",
+  rating_score: row.rating_score || "",
   source_raw: row.source_raw || "",
   note: row.note || "",
+  is_sold: Number(row.is_sold || 0),
+  sold_at: row.sold_at || "",
   created_at: row.created_at || "",
   updated_at: row.updated_at || ""
 });
@@ -33,6 +43,8 @@ const buildPayload = (body: Record<string, any>, existing?: any) => {
     number_code: normalizeText(body.number_code ?? existing?.number_code),
     year: normalizeYear(body.year ?? existing?.year),
     raw_type: normalizeText(body.raw_type ?? existing?.raw_type),
+    rating_type: normalizeRatingType(body.rating_type ?? existing?.rating_type),
+    rating_score: normalizeText(body.rating_score ?? existing?.rating_score),
     source_raw: normalizeText(body.source_raw ?? existing?.source_raw),
     note: normalizeText(body.note ?? existing?.note)
   };
@@ -84,6 +96,11 @@ const listRecords = async (db: any, query: Record<string, any> = {}) => {
   const q = normalizeText(query.q);
   const productName = normalizeText(query.product_name);
   const year = normalizeText(query.year);
+  const includeSold = ["1", "true", "yes"].includes(normalizeText(query.include_sold).toLowerCase());
+
+  if (!includeSold) {
+    where.push("COALESCE(is_sold, 0) = 0");
+  }
 
   if (q) {
     where.push("(product_name LIKE ? OR number_code LIKE ? OR raw_type LIKE ? OR note LIKE ?)");
@@ -125,13 +142,15 @@ router.post("/lucky-number-records", async (req, res) => {
     const now = new Date().toISOString();
     const result = await db.run(
       `INSERT INTO lucky_number_records
-        (product_name, number_code, year, raw_type, source_raw, note, is_deleted, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+        (product_name, number_code, year, raw_type, rating_type, rating_score, source_raw, note, is_deleted, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
       [
         payload.product_name,
         payload.number_code,
         payload.year,
         payload.raw_type,
+        payload.rating_type,
+        payload.rating_score,
         payload.source_raw,
         payload.note,
         now,
@@ -186,13 +205,15 @@ router.post("/lucky-number-records/batch", async (req, res) => {
 
       const result = await db.run(
         `INSERT OR IGNORE INTO lucky_number_records
-          (product_name, number_code, year, raw_type, source_raw, note, is_deleted, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+          (product_name, number_code, year, raw_type, rating_type, rating_score, source_raw, note, is_deleted, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
         [
           payload.product_name,
           payload.number_code,
           payload.year,
           payload.raw_type,
+          payload.rating_type,
+          payload.rating_score,
           payload.source_raw,
           payload.note,
           now,
@@ -244,13 +265,15 @@ router.put("/lucky-number-records/:id", async (req, res) => {
     const now = new Date().toISOString();
     await db.run(
       `UPDATE lucky_number_records
-       SET product_name = ?, number_code = ?, year = ?, raw_type = ?, source_raw = ?, note = ?, updated_at = ?
+       SET product_name = ?, number_code = ?, year = ?, raw_type = ?, rating_type = ?, rating_score = ?, source_raw = ?, note = ?, updated_at = ?
        WHERE id = ? AND COALESCE(is_deleted, 0) = 0`,
       [
         payload.product_name,
         payload.number_code,
         payload.year,
         payload.raw_type,
+        payload.rating_type,
+        payload.rating_score,
         payload.source_raw,
         payload.note,
         now,
@@ -263,6 +286,32 @@ router.put("/lucky-number-records/:id", async (req, res) => {
     res.json({ success: true, data: serializeRecord(record), message: "编辑靓号记录成功" });
   } catch (error) {
     res.status(400).json({ success: false, message: (error as Error).message || "编辑靓号记录失败" });
+  }
+});
+
+router.post("/lucky-number-records/:id/sell", async (req, res) => {
+  try {
+    const db = await getDb();
+    const existing = await loadRecord(db, String(req.params.id));
+    if (!existing) {
+      return res.status(404).json({ success: false, message: "靓号记录不存在" });
+    }
+
+    const now = new Date().toISOString();
+    if (!Number(existing.is_sold || 0)) {
+      await db.run(
+        `UPDATE lucky_number_records
+         SET is_sold = 1, sold_at = ?, updated_at = ?
+         WHERE id = ? AND COALESCE(is_deleted, 0) = 0`,
+        [now, now, existing.id]
+      );
+    }
+
+    const record = await loadRecord(db, String(existing.id));
+    await writeLuckyAuditLog(db, "sell", record, "标记为已卖出，不再进入靓号统计看板");
+    res.json({ success: true, data: serializeRecord(record), message: "靓号记录已标记卖出" });
+  } catch (error) {
+    res.status(400).json({ success: false, message: (error as Error).message || "标记卖出失败" });
   }
 });
 

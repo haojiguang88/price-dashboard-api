@@ -2622,8 +2622,12 @@ const migrations: Migration[] = [
           number_code TEXT NOT NULL,
           year TEXT NOT NULL DEFAULT '2025年',
           raw_type TEXT NOT NULL DEFAULT '',
+          rating_type TEXT NOT NULL DEFAULT '普通',
+          rating_score TEXT NOT NULL DEFAULT '',
           source_raw TEXT,
           note TEXT,
+          is_sold INTEGER NOT NULL DEFAULT 0,
+          sold_at TEXT,
           is_deleted INTEGER NOT NULL DEFAULT 0,
           created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
           updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -4392,6 +4396,22 @@ const migrations: Migration[] = [
           ]
         );
       }
+    }
+  },
+  {
+    id: '20260627_002_add_lucky_number_rating_fields',
+    name: 'Add lucky number rating fields',
+    run: async (db: any) => {
+      await ensureMigrationColumn(db, 'lucky_number_records', 'rating_type', "TEXT NOT NULL DEFAULT '普通'");
+      await ensureMigrationColumn(db, 'lucky_number_records', 'rating_score', "TEXT NOT NULL DEFAULT ''");
+    }
+  },
+  {
+    id: '20260627_003_add_lucky_number_sold_status',
+    name: 'Add lucky number sold status',
+    run: async (db: any) => {
+      await ensureMigrationColumn(db, 'lucky_number_records', 'is_sold', 'INTEGER NOT NULL DEFAULT 0');
+      await ensureMigrationColumn(db, 'lucky_number_records', 'sold_at', 'TEXT');
     }
   }
 
