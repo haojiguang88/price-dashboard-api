@@ -18,7 +18,7 @@ const normalizeYear = (value: unknown) => {
 
 const normalizeRatingType = (value: unknown) => {
   const text = normalizeText(value);
-  return RATING_TYPES.includes(text) ? text : "普通";
+  return RATING_TYPES.includes(text) ? text : "";
 };
 
 const serializeRecord = (row: any) => ({
@@ -27,7 +27,7 @@ const serializeRecord = (row: any) => ({
   number_code: row.number_code || "",
   year: row.year || DEFAULT_YEAR,
   raw_type: row.raw_type || "",
-  rating_type: row.rating_type || "普通",
+  rating_type: row.rating_type || "",
   rating_score: row.rating_score || "",
   source_raw: row.source_raw || "",
   note: row.note || "",
