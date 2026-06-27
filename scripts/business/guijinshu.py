@@ -482,8 +482,8 @@ def main():
     parser.add_argument(
         "--source",
         choices=["auto", "dehuang", "jijinhao"],
-        default="auto",
-        help="Use primary Dehuang source, fallback Jijinhao source, or auto fallback when primary is stale",
+        default="jijinhao",
+        help="Use Jijinhao recycle source by default; dehuang and auto are kept for compatibility",
     )
     parser.add_argument(
         "--max-source-age-days",
@@ -506,21 +506,10 @@ def main():
 
     requested = requested_target_list(args.targets)
     primary_definitions = load_target_definitions(str(db_path), PRIMARY_SOURCE_KEY, PRIMARY_TARGETS)
+    if not primary_definitions:
+        primary_definitions = PRIMARY_TARGETS
     primary_targets = select_primary_targets(requested, primary_definitions)
     selected_objects = select_target_objects(requested, primary_definitions)
-
-    if not primary_definitions:
-        print(json.dumps({
-            "success": True,
-            "status": "skipped",
-            "skipped": True,
-            "message": "商品贵金属价格更新已跳过：当前没有启用的数据源映射",
-            "inserted_count": 0,
-            "updated_count": 0,
-            "skipped_count": 0,
-            "records": [],
-        }, ensure_ascii=False))
-        return
 
     records = []
     seen_keys = []

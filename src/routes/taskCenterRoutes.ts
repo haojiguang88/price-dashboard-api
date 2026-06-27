@@ -484,13 +484,24 @@ function buildPrimaryWithBackupFailureResult(
 }
 
 async function runCommodityMetalsPriceUpdate(config: any, timeoutMs: number, taskName: string): Promise<BusinessTaskRunResult> {
+  const source = ['auto', 'dehuang', 'jijinhao'].includes(String(config.source || '').trim())
+    ? String(config.source).trim()
+    : 'jijinhao';
+  const historyDays = Number(config.history_days ?? config.historyDays ?? 30);
+  const maxSourceAgeDays = Number(config.max_source_age_days ?? config.maxSourceAgeDays ?? 2);
   const args = [
     '--db',
     getDatabasePath(),
     '--targets',
     Array.isArray(config.targets)
       ? config.targets.join(',')
-      : String(config.targets || '黄金9999,白银')
+      : String(config.targets || '黄金9999,白银'),
+    '--source',
+    source,
+    '--history-days',
+    String(Number.isFinite(historyDays) && historyDays > 0 ? Math.round(historyDays) : 30),
+    '--max-source-age-days',
+    String(Number.isFinite(maxSourceAgeDays) && maxSourceAgeDays > 0 ? maxSourceAgeDays : 2)
   ];
   if (config.dry_run) args.push('--dry-run');
 

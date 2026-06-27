@@ -4249,6 +4249,150 @@ const migrations: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_dashboard_action_statuses_scope
         ON dashboard_action_statuses(workspace, status, updated_at DESC);
     `
+  },
+  {
+    id: '20260627_001_switch_commodity_metals_to_jijinhao',
+    name: 'Switch commodity metals task to Jijinhao recycle source',
+    run: async (db: any) => {
+      if (await migrationTableExists(db, 'task_center_tasks')) {
+        const task = await dbGet<any>(
+          db,
+          `SELECT id, config_json
+           FROM task_center_tasks
+           WHERE task_key = ?`,
+          ['commodity_metals_price_update']
+        );
+
+        if (task) {
+          let config: Record<string, any> = {};
+          try {
+            config = JSON.parse(String(task.config_json || '{}'));
+          } catch {
+            config = {};
+          }
+
+          config.targets = Array.isArray(config.targets) && config.targets.length > 0
+            ? config.targets
+            : ['黄金9999', '白银'];
+          config.source = 'jijinhao';
+          config.history_days = Number.isFinite(Number(config.history_days ?? config.historyDays))
+            ? Number(config.history_days ?? config.historyDays)
+            : 30;
+          delete config.historyDays;
+
+          await dbRun(
+            db,
+            `UPDATE task_center_tasks
+             SET config_json = ?,
+                 last_message = ?,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?`,
+            [
+              JSON.stringify(config),
+              '每天抓取金投网贵金属回收黄金/白银价格，并写入商品价格工作台；黄金按整数，白银保留两位小数',
+              task.id
+            ]
+          );
+        }
+      }
+
+      if (!(await migrationTableExists(db, 'source_mappings'))) return;
+
+      const rows = [
+        {
+          source_key: 'jijinhao_recycle_metals',
+          source_name: '金投网贵金属回收',
+          external_key: 'JO_321453',
+          external_name: '黄金回收价格',
+          category_name: '贵金属',
+          object_name: '黄金',
+          external_meta_json: { code: 'JO_321453', digits: 0 }
+        },
+        {
+          source_key: 'jijinhao_recycle_metals',
+          source_name: '金投网贵金属回收',
+          external_key: 'JO_321465',
+          external_name: '足银回收价格',
+          category_name: '贵金属',
+          object_name: '白银',
+          external_meta_json: { code: 'JO_321465', digits: 2 }
+        }
+      ];
+
+      for (const row of rows) {
+        const category = await dbGet<any>(
+          db,
+          "SELECT id, name FROM categories WHERE name = ? AND COALESCE(is_archived, 0) = 0",
+          [row.category_name]
+        );
+        const object = category
+          ? await dbGet<any>(
+            db,
+            "SELECT id, name FROM objects WHERE category_id = ? AND name = ? AND COALESCE(is_archived, 0) = 0",
+            [category.id, row.object_name]
+          )
+          : null;
+        const status = category && object ? 'enabled' : 'unmapped';
+
+        await dbRun(
+          db,
+          `INSERT OR IGNORE INTO source_mappings
+             (source_key, source_name, external_key, external_name, external_meta_json,
+              category_id, object_id, variant_id, category_name, object_name, variant_name,
+              status, note)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, '', ?, ?)`,
+          [
+            row.source_key,
+            row.source_name,
+            row.external_key,
+            row.external_name,
+            JSON.stringify(row.external_meta_json),
+            category?.id || null,
+            object?.id || null,
+            category?.name || row.category_name,
+            object?.name || row.object_name,
+            status,
+            status === 'enabled'
+              ? '主用源；金投网贵金属回收历史接口'
+              : '初始化时未找到对应主数据，请在数据源映射页面确认'
+          ]
+        );
+
+        await dbRun(
+          db,
+          `UPDATE source_mappings
+           SET source_name = ?,
+               external_name = ?,
+               external_meta_json = ?,
+               category_id = ?,
+               object_id = ?,
+               variant_id = 0,
+               category_name = ?,
+               object_name = ?,
+               variant_name = '',
+               status = ?,
+               note = ?,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE source_key = ?
+             AND external_key = ?`,
+          [
+            row.source_name,
+            row.external_name,
+            JSON.stringify(row.external_meta_json),
+            category?.id || null,
+            object?.id || null,
+            category?.name || row.category_name,
+            object?.name || row.object_name,
+            status,
+            status === 'enabled'
+              ? '主用源；金投网贵金属回收历史接口'
+              : '初始化时未找到对应主数据，请在数据源映射页面确认',
+            row.source_key,
+            row.external_key
+          ]
+        );
+      }
+    }
   }
 
 ];

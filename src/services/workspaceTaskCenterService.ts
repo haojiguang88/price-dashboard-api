@@ -205,7 +205,7 @@ const toNumber = (value: unknown) => {
 };
 
 const TASK_SOURCE_MAPPINGS: Record<string, { source_key: string; source_name: string }> = {
-  commodity_metals_price_update: { source_key: "dehuang_metals", source_name: "德璜小程序贵金属" },
+  commodity_metals_price_update: { source_key: "jijinhao_recycle_metals", source_name: "金投网贵金属回收" },
   video_game_machine_price_update: { source_key: "dongxu_game_console", source_name: "东旭游戏机档口" },
   popmart_price_update: { source_key: "qiandao_popmart", source_name: "千岛泡泡玛特" },
   longyinbi_price_update: { source_key: "airmb_longyinbi_presale", source_name: "爱藏龙银币" }
