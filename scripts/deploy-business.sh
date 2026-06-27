@@ -88,6 +88,33 @@ append_known_secrets_from_old_env() {
   done
 }
 
+curl_retry() {
+  local url="$1"
+  local label="$2"
+  local attempts="${3:-15}"
+  local delay_seconds="${4:-2}"
+  local n=1
+
+  until curl -fsS "$url"; do
+    if [ "$n" -ge "$attempts" ]; then
+      echo
+      echo "=== ${label}验证失败 ==="
+      echo "地址：$url"
+      echo "已重试：$attempts 次"
+      echo "PM2 状态："
+      pm2 status price-dashboard-api || true
+      echo
+      echo "PM2 最近日志："
+      pm2 logs price-dashboard-api --lines 80 --nostream || true
+      return 1
+    fi
+    echo
+    log_info "${label}暂未就绪，${delay_seconds}s 后重试：第 $((n + 1))/$attempts 次"
+    n=$((n + 1))
+    sleep "$delay_seconds"
+  done
+}
+
 trap on_error ERR
 
 log_section "后端更新"
@@ -160,9 +187,9 @@ pm2 restart price-dashboard-api --update-env || pm2 start dist/index.js --name p
 pm2 save
 
 log_section "验证"
-curl -fsS http://127.0.0.1:3001/health
+curl_retry "http://127.0.0.1:3001/health" "本机 health"
 echo
-curl -fsS "$PUBLIC_API/categories" | head
+curl_retry "$PUBLIC_API/categories" "公网 API" | head
 echo
 echo "=== 后端部署成功 ==="
 echo "后端提交：$COMMIT"
