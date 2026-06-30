@@ -409,6 +409,11 @@ function buildBackupArgs(config: any, category: string) {
   return args;
 }
 
+function getTaskSourceName(config: any, fallback: string) {
+  const value = String(config.source_name ?? config.sourceName ?? '').trim();
+  return value || fallback;
+}
+
 async function runBackupPriceUpdate(
   config: any,
   category: string,
@@ -541,7 +546,9 @@ async function runIphonePriceUpdate(config: any, timeoutMs: number, taskName: st
     '--db',
     getDatabasePath(),
     '--category',
-    String(config.category || '苹果手机')
+    String(config.category || '苹果手机'),
+    '--source-name',
+    getTaskSourceName(config, '德璜小程序档口报价')
   ];
   if (config.dry_run) args.push('--dry-run');
 
@@ -577,7 +584,9 @@ async function runVideoGameMachinePriceUpdate(config: any, timeoutMs: number, ta
     '--db',
     getDatabasePath(),
     '--category',
-    String(config.category || '游戏机')
+    String(config.category || '游戏机'),
+    '--source-name',
+    getTaskSourceName(config, '东旭游戏机档口')
   ];
   if (config.dry_run) args.push('--dry-run');
 
@@ -618,7 +627,9 @@ async function runPopMartPriceUpdate(config: any, timeoutMs: number, taskName: s
     '--db',
     getDatabasePath(),
     '--category',
-    String(config.category || '泡泡玛特')
+    String(config.category || '泡泡玛特'),
+    '--source-name',
+    getTaskSourceName(config, '千岛泡泡玛特')
   ];
   if (config.dry_run) args.push('--dry-run');
 

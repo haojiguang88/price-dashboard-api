@@ -12,7 +12,7 @@ import requests
 
 API_URL = "https://www.dehuangshop.com/goods/data"
 CATEGORY_NAME = "苹果手机"
-SOURCE_NAME = "档口报价"
+SOURCE_NAME = "德璜小程序档口报价"
 DEFAULT_DB_PATH = (
     os.environ.get("BUSINESS_DB_PATH")
     or str(Path(__file__).resolve().parents[2] / "data" / "price_dashboard_business.db")
@@ -148,7 +148,7 @@ def iter_iphone_configs(payload):
                 yield model_name, config
 
 
-def extract_records(payload, whitelist, category):
+def extract_records(payload, whitelist, category, source_name=SOURCE_NAME):
     records_by_key = {}
     source_count = 0
     matched_count = 0
@@ -186,7 +186,7 @@ def extract_records(payload, whitelist, category):
                 "raw_price": raw_price,
                 "price_date": price_date,
                 "source_time": source_time,
-                "source": SOURCE_NAME,
+                "source": source_name,
                 "source_model": model_name,
                 "source_parameter": parameter,
             }
@@ -282,6 +282,7 @@ def main():
     parser = argparse.ArgumentParser(description="Fetch iPhone prices and write commodity price records")
     parser.add_argument("--db", default=DEFAULT_DB_PATH, help="SQLite database path")
     parser.add_argument("--category", default=CATEGORY_NAME, help="Commodity category name")
+    parser.add_argument("--source-name", default=SOURCE_NAME, help="Source name written to price records")
     parser.add_argument("--dry-run", action="store_true", help="Fetch and parse without writing database")
     args = parser.parse_args()
 
@@ -294,7 +295,12 @@ def main():
         raise RuntimeError(f"系统里没有启用的{args.category}型号/颜色")
 
     payload = fetch_payload()
-    records, source_count, matched_count, filtered_count = extract_records(payload, whitelist, args.category)
+    records, source_count, matched_count, filtered_count = extract_records(
+        payload,
+        whitelist,
+        args.category,
+        args.source_name,
+    )
     if not records:
         raise RuntimeError("苹果手机接口未返回可匹配系统型号/颜色的价格")
 
@@ -309,6 +315,7 @@ def main():
         "updated_count": updated,
         "skipped_count": skipped,
         "source_count": source_count,
+        "source": args.source_name,
         "matched_count": matched_count,
         "filtered_count": filtered_count,
         "records": results,

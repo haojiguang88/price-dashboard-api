@@ -4424,6 +4424,198 @@ const migrations: Migration[] = [
          WHERE rating_type = '普通'`
       );
     }
+  },
+  {
+    id: '20260629_001_normalize_auto_price_record_sources',
+    name: 'Normalize automatic price record sources',
+    run: async (db: any) => {
+      if (!(await migrationTableExists(db, 'price_records'))) return;
+      await dbRun(
+        db,
+        `UPDATE price_records
+         SET source = ?, updated_at = CURRENT_TIMESTAMP
+         WHERE category = ?
+           AND source = ?`,
+        ['德璜小程序档口报价', '苹果手机', '档口报价']
+      );
+      await dbRun(
+        db,
+        `UPDATE price_records
+         SET source = ?, updated_at = CURRENT_TIMESTAMP
+         WHERE category = ?
+           AND source = ?`,
+        ['东旭游戏机档口', '游戏机', '档口报价']
+      );
+      await dbRun(
+        db,
+        `UPDATE price_records
+         SET source = ?, updated_at = CURRENT_TIMESTAMP
+         WHERE category = ?
+           AND source = ?`,
+        ['千岛泡泡玛特', '泡泡玛特', '千岛']
+      );
+    }
+  },
+  {
+    id: '20260629_002_seed_ai_storage_cost_transmission_records',
+    name: 'Seed AI storage cost transmission cognition records',
+    run: async (db: any) => {
+      if (await migrationTableExists(db, 'event_records')) {
+        const eventTitle = 'AI需求推动存储价格上涨并向整机传导';
+        const existingEvent = await dbGet<any>(
+          db,
+          'SELECT id FROM event_records WHERE title = ? AND COALESCE(is_deleted, 0) = 0 LIMIT 1',
+          [eventTitle]
+        );
+        if (!existingEvent) {
+          await dbRun(
+            db,
+            `INSERT INTO event_records
+               (title, track, event_date, event_type, description, related_object, impact, source, note, is_deleted, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+            [
+              eventTitle,
+              '电子产品',
+              '2026-06-29',
+              '宏观/产业事件',
+              'AI算力需求持续增加，带动内存、硬盘、固态等上游资源紧张或涨价；价格先反映在单根内存条、SSD等零部件，再逐渐传导到笔记本、手机、游戏机等整机成本和二级价格。',
+              '内存、硬盘、SSD、笔记本、手机、游戏机',
+              '这是产业链成本传导事件，不是单品价格信号。它提示电子产品不能只按新款迭代导致旧款自然贬值来理解；关键零部件结构性涨价时，旧款、现货、高配版本可能短期获得支撑。',
+              '用户观察/系统整理',
+              '反证：电子产品仍受新品迭代、官方调价、平台补贴、库存释放影响。上游涨价只能作为背景证据，不能直接推出整机必涨。已有“内存条硬盘错过复盘”可作为第一阶段案例。'
+            ]
+          );
+        }
+      }
+
+      if (await migrationTableExists(db, 'rule_experiences')) {
+        const ruleTitle = '电子产品上游成本冲击不能只按迭代贬值看';
+        const existingRule = await dbGet<any>(
+          db,
+          'SELECT id FROM rule_experiences WHERE title = ? AND COALESCE(is_deleted, 0) = 0 LIMIT 1',
+          [ruleTitle]
+        );
+        if (!existingRule) {
+          await dbRun(
+            db,
+            `INSERT INTO rule_experiences
+               (title, type, track, source_case, core_content, summary_conclusion, note, is_deleted, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+            [
+              ruleTitle,
+              '产业传导/反证规则',
+              '电子产品',
+              '内存条硬盘错过复盘；AI需求推动存储价格上涨并向整机传导',
+              '电子产品不能只按“新款出来旧款自然跌价”看。当上游关键零部件出现结构性涨价时，旧款、现货、高配版本可能短期获得价格支撑，甚至出现反常上涨。判断时要先拆链路：上游涨价是否真实、涨价是否传导到零部件现货、整机端是否缺货或成本抬升、二级回收/成交是否跟随。',
+              '上游成本冲击可以作为背景证据和观察线索，但不能直接变成整机价格结论。',
+              '反证必须同时记录：新品迭代、官方调价、平台补贴、渠道库存释放、需求不足，都可能抵消上游涨价。该规则服务风控和认知，不构成操作指令。'
+            ]
+          );
+        }
+      }
+
+      if (await migrationTableExists(db, 'speculation_cycle_records')) {
+        const cyclePattern = '上游成本冲击 - 零部件涨价 - 整机价格传导型';
+        const existingCycle = await dbGet<any>(
+          db,
+          `SELECT id
+           FROM speculation_cycle_records
+           WHERE category_name = ?
+             AND object_name = ?
+             AND cycle_pattern = ?
+           LIMIT 1`,
+          ['电子产品', '存储/整机传导', cyclePattern]
+        );
+        let cycleId = existingCycle?.id;
+        if (!cycleId) {
+          await dbRun(
+            db,
+            `INSERT INTO speculation_cycle_records
+               (category_name, object_name, variant_name, open_level, market_background, cycle_stage,
+                cycle_pattern, rise_nature, main_participants, supply_release_type, high_level_real_demand,
+                final_result, future_action_rule, summary, lesson, note, created_at, updated_at)
+             VALUES (?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+            [
+              '电子产品',
+              '存储/整机传导',
+              '不适用',
+              'AI算力需求增加，存储资源和关键零部件出现涨价预期或现货涨价，电子产品二级市场可能从零部件先涨逐步传导到整机。',
+              '产业传导观察期',
+              cyclePattern,
+              'AI需求推高上游资源成本，零部件涨价先行，整机价格可能滞后传导',
+              'AI算力需求、存储厂商、渠道商、整机厂商、二级市场参与者',
+              '上游资源紧张/渠道库存变化',
+              '需要看真实成交和回收端是否跟随，不能只看新闻或单点报价',
+              '观察中：已有内存条/硬盘先涨的错过复盘，后续需要继续观察笔记本、手机、游戏机等整机端是否真实传导。',
+              '先确认传导链路，再判断单品；上游涨价不能直接推出整机必涨。电子产品仍要防新品迭代、补贴和库存释放反杀。',
+              'AI需求增加后，存储类零部件先出现价格支撑或上涨，再可能向高配整机、现货整机和二级回收价格传导。这个模式可复用到“银价带动银币”“原材料带动成品”“核心零件带动整机”等场景。',
+              '产业链传导要分阶段看：上游事实、零部件现货、整机端承接、二级成交四层都要确认。只有一层成立时，最多作为背景证据。',
+              '第一阶段案例关联：内存条硬盘错过复盘。该记录是周期模式，不是单品买卖结论。'
+            ]
+          );
+          const insertedCycle = await dbGet<any>(
+            db,
+            `SELECT id
+             FROM speculation_cycle_records
+             WHERE category_name = ?
+               AND object_name = ?
+               AND cycle_pattern = ?
+             ORDER BY id DESC
+             LIMIT 1`,
+            ['电子产品', '存储/整机传导', cyclePattern]
+          );
+          cycleId = insertedCycle?.id;
+        }
+
+        if (cycleId && await migrationTableExists(db, 'speculation_cycle_events')) {
+          const events = [
+            {
+              stage: '第一阶段：零部件先涨',
+              trigger: 'AI算力需求推高存储资源预期',
+              note: '内存条/硬盘/SSD 先出现涨价或价格支撑；已有“内存条硬盘错过复盘”作为第一阶段案例。'
+            },
+            {
+              stage: '第二阶段：向整机传导观察',
+              trigger: '零部件成本向整机端扩散',
+              note: '观察笔记本、手机、游戏机等整机是否出现成本抬升、现货支撑或二级回收跟涨；必须防新品迭代、官方补贴、库存释放导致传导失败。'
+            }
+          ];
+
+          for (const item of events) {
+            const existingNode = await dbGet<any>(
+              db,
+              `SELECT id
+               FROM speculation_cycle_events
+               WHERE cycle_id = ?
+                 AND stage = ?
+                 AND trigger_event = ?
+               LIMIT 1`,
+              [cycleId, item.stage, item.trigger]
+            );
+            if (existingNode) continue;
+            await dbRun(
+              db,
+              `INSERT INTO speculation_cycle_events
+                 (cycle_id, record_time, stage, market_action, sentiment_level, participation_level,
+                  trigger_event, risk_signal, source, note, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+              [
+                cycleId,
+                '2026-06-29',
+                item.stage,
+                '观察传导链路，不直接下结论',
+                '观察',
+                '低',
+                item.trigger,
+                '上游涨价不等于整机必涨，需要真实成交和库存验证',
+                '用户观察/系统整理',
+                item.note
+              ]
+            );
+          }
+        }
+      }
+    }
   }
 
 ];

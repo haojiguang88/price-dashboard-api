@@ -20,7 +20,7 @@ LIST_URL = "https://xcx1406.ycdongxu.com/index.php/Api/user/newphone"
 DETAIL_URL = "https://xcx1406.ycdongxu.com/index.php/Api/user/getprices"
 CATEGORY_NAME = "游戏机"
 SOURCE_KEY = "dongxu_game_console"
-SOURCE_NAME = "档口报价"
+SOURCE_NAME = "东旭游戏机档口"
 DEFAULT_DB_PATH = (
     os.environ.get("BUSINESS_DB_PATH")
     or str(Path(__file__).resolve().parents[2] / "data" / "price_dashboard_business.db")
@@ -208,7 +208,7 @@ def match_target(source_item, enabled_objects, source_targets):
     return None
 
 
-def extract_records(source_items, enabled_objects, category, source_targets):
+def extract_records(source_items, enabled_objects, category, source_targets, source_name=SOURCE_NAME):
     records_by_key = {}
     source_count = 0
     matched_count = 0
@@ -249,7 +249,7 @@ def extract_records(source_items, enabled_objects, category, source_targets):
             "raw_price": raw_price,
             "price_date": price_date,
             "source_time": source_time,
-            "source": SOURCE_NAME,
+            "source": source_name,
             "source_id": item.get("id"),
             "source_mobile_name": item.get("mobile_name"),
             "source_key": item.get("key"),
@@ -358,6 +358,7 @@ def main():
     parser = argparse.ArgumentParser(description="Fetch video game console prices and write commodity price records")
     parser.add_argument("--db", default=DEFAULT_DB_PATH, help="SQLite database path")
     parser.add_argument("--category", default=CATEGORY_NAME, help="Commodity category name")
+    parser.add_argument("--source-name", default=SOURCE_NAME, help="Source name written to price records")
     parser.add_argument("--dry-run", action="store_true", help="Fetch and parse without writing database")
     args = parser.parse_args()
 
@@ -406,6 +407,7 @@ def main():
             enabled_objects,
             args.category,
             source_targets,
+            args.source_name,
         )
     except Exception as exc:
         if not args.dry_run:
@@ -440,6 +442,7 @@ def main():
         "updated_count": updated,
         "skipped_count": skipped,
         "source_count": source_count,
+        "source": args.source_name,
         "matched_count": matched_count,
         "filtered_count": filtered_count,
         "invalid_price_keys": invalid_price_keys,

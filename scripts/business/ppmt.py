@@ -21,7 +21,7 @@ from source_mappings import (
 
 CATEGORY_NAME = "泡泡玛特"
 SOURCE_KEY = "qiandao_popmart"
-SOURCE_NAME = "千岛"
+SOURCE_NAME = "千岛泡泡玛特"
 SEARCH_URL = "https://oia.qiandao.com/search"
 SPU_URL = "https://oia.qiandao.com/spu"
 DEFAULT_DB_PATH = (
@@ -218,7 +218,7 @@ def load_enabled_objects(db_path, category):
     return {row[0] for row in rows}
 
 
-def extract_records(source_items, enabled_objects, category, source_targets):
+def extract_records(source_items, enabled_objects, category, source_targets, source_name=SOURCE_NAME):
     records = []
     missing_source_objects = []
     missing_errors = {}
@@ -242,7 +242,7 @@ def extract_records(source_items, enabled_objects, category, source_targets):
             "price": matched["price"],
             "raw_price": matched["price"],
             "price_date": today(),
-            "source": SOURCE_NAME,
+            "source": source_name,
             "source_id": matched["spu_id"],
             "source_name": matched["name"],
             "query": item["query"],
@@ -344,6 +344,7 @@ def build_parser():
         help="SQLite 数据库路径",
     )
     parser.add_argument("--category", default=CATEGORY_NAME)
+    parser.add_argument("--source-name", default=SOURCE_NAME)
     parser.add_argument("--dry-run", action="store_true")
     return parser
 
@@ -361,7 +362,7 @@ def main():
                 "skipped": True,
                 "message": "泡泡玛特价格更新已跳过：当前没有启用的数据源映射",
                 "category": args.category,
-                "source": SOURCE_NAME,
+                "source": args.source_name,
                 "dry_run": args.dry_run,
                 "source_count": 0,
                 "matched_count": 0,
@@ -382,6 +383,7 @@ def main():
             enabled_objects,
             args.category,
             source_targets,
+            args.source_name,
         )
         inserted, updated, skipped, results = upsert_price_records(
             args.db,
@@ -403,7 +405,7 @@ def main():
                 f"匹配 {len(records)} 条，新增 {inserted}，更新 {updated}，跳过 {skipped}"
             ),
             "category": args.category,
-            "source": SOURCE_NAME,
+            "source": args.source_name,
             "dry_run": args.dry_run,
             "source_count": len(source_items),
             "matched_count": len(records),
