@@ -28,6 +28,9 @@ const MAIN_PRICE_SYMBOLS = [
   }
 ];
 
+const MARKET_CYCLE_PREF_KEY = "precious_metal_macro_cycle";
+const VALID_MARKET_CYCLE_STATES = new Set(["unknown", "bull", "bear"]);
+
 const parseRangeDays = (value: unknown) => {
   const text = String(value ?? "365").trim();
   if (text === "all") return null;
@@ -95,6 +98,59 @@ const serializePhysicalObservation = (row: any) => ({
   updated_at: row.updated_at || ""
 });
 
+const normalizeMarketCycleState = (value: unknown) => {
+  const state = normalizeText(value);
+  return VALID_MARKET_CYCLE_STATES.has(state) ? state : "unknown";
+};
+
+const serializeMarketCyclePreference = (preferenceValue: unknown) => {
+  const parsed = parseJsonValue(preferenceValue) || {};
+  return {
+    cycle_state: normalizeMarketCycleState(parsed.cycle_state),
+    note: normalizeText(parsed.note),
+    confirmed_at: normalizeText(parsed.confirmed_at),
+    confirmed_by: normalizeText(parsed.confirmed_by) || "manual",
+    updated_at: normalizeText(parsed.updated_at)
+  };
+};
+
+const loadMarketCyclePreference = async (db: any) => {
+  const row = await db.get(
+    `SELECT preference_value, updated_at
+     FROM user_preferences
+     WHERE user_key = 'default'
+       AND preference_key = ?
+     LIMIT 1`,
+    [MARKET_CYCLE_PREF_KEY]
+  );
+  const preference = serializeMarketCyclePreference(row?.preference_value);
+  return {
+    ...preference,
+    updated_at: preference.updated_at || row?.updated_at || ""
+  };
+};
+
+const saveMarketCyclePreference = async (db: any, input: { cycle_state: string; note: string }) => {
+  const now = new Date().toISOString();
+  const payload = {
+    cycle_state: normalizeMarketCycleState(input.cycle_state),
+    note: normalizeText(input.note),
+    confirmed_at: now,
+    confirmed_by: "manual",
+    updated_at: now
+  };
+  await db.run(
+    `INSERT INTO user_preferences
+       (user_key, preference_key, preference_value, created_at, updated_at)
+     VALUES ('default', ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+     ON CONFLICT(user_key, preference_key) DO UPDATE SET
+       preference_value = excluded.preference_value,
+       updated_at = CURRENT_TIMESTAMP`,
+    [MARKET_CYCLE_PREF_KEY, JSON.stringify(payload)]
+  );
+  return payload;
+};
+
 const buildPhysicalGuidance = (observation: ReturnType<typeof serializePhysicalObservation> | null) => {
   if (!observation) {
     return {
@@ -161,6 +217,31 @@ const writePhysicalObservationAuditLog = async (db: any, record: any) => {
       "success",
       record.note || record.source_note || "手动记录实物端辅助信息",
       String(record.id),
+      "/market/precious-metals",
+      "business",
+      "business",
+      now,
+      now
+    ]
+  ).catch(() => undefined);
+};
+
+const writeMarketCycleAuditLog = async (db: any, record: { cycle_state: string; note: string }) => {
+  const now = new Date().toISOString();
+  const stateLabel = record.cycle_state === "bull" ? "牛市" : record.cycle_state === "bear" ? "熊市" : "未确认";
+  await db.run(
+    `INSERT INTO audit_logs
+      (id, timestamp, module, action, target, status, detail, entity_id, path, domain, workspace, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      `precious_metal_market_cycle_${Date.now()}`,
+      now,
+      "贵金属大周期",
+      "update",
+      stateLabel,
+      "success",
+      record.note || "手动确认贵金属大周期状态",
+      MARKET_CYCLE_PREF_KEY,
       "/market/precious-metals",
       "business",
       "business",
@@ -809,7 +890,7 @@ const buildCurrentSignalPayload = (
 router.get("/precious-metal-market/overview", async (_req, res) => {
   try {
     const db = await getDb();
-    const [mainQuotes, coverageRows, latestTask] = await Promise.all([
+    const [mainQuotes, coverageRows, latestTask, marketCycle] = await Promise.all([
       loadMainQuoteSummaries(db),
       db.all(
         `SELECT symbol,
@@ -829,7 +910,8 @@ router.get("/precious-metal-market/overview", async (_req, res) => {
          FROM task_center_tasks
          WHERE task_key = 'precious_metal_market_update'
          LIMIT 1`
-      )
+      ),
+      loadMarketCyclePreference(db)
     ]);
 
     const layerCoverages = coverageRows.map((row: any) => ({
@@ -851,6 +933,7 @@ router.get("/precious-metal-market/overview", async (_req, res) => {
         latest_actions: [],
         model_scores: [],
         training_gates: [],
+        market_cycle: marketCycle,
         task_status: latestTask || null
       }
     });
@@ -865,8 +948,31 @@ router.get("/precious-metal-market/overview", async (_req, res) => {
         latest_actions: [],
         model_scores: [],
         training_gates: [],
+        market_cycle: serializeMarketCyclePreference(null),
         task_status: null
       }
+    });
+  }
+});
+
+router.post("/precious-metal-market/market-cycle", async (req, res) => {
+  try {
+    const db = await getDb();
+    const body = req.body || {};
+    const cycleState = normalizeMarketCycleState(body.cycle_state);
+    const note = normalizeText(body.note);
+    const item = await saveMarketCyclePreference(db, { cycle_state: cycleState, note });
+    await writeMarketCycleAuditLog(db, item);
+    res.json({
+      success: true,
+      message: "贵金属大周期状态已保存",
+      data: item
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: (error as Error).message || "保存贵金属大周期状态失败",
+      data: null
     });
   }
 });
