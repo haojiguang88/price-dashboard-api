@@ -4616,6 +4616,162 @@ const migrations: Migration[] = [
         }
       }
     }
+  },
+  {
+    id: '20260701_001_refine_longchao_dragon_profile',
+    name: 'Refine Longchao dragon note profile',
+    run: async (db: any) => {
+      if (!(await migrationTableExists(db, 'product_archives'))) return;
+
+      const archive = await dbGet<any>(
+        db,
+        `SELECT id, raw_description, theme_design, risk_basis, experience_note, pending_questions
+         FROM product_archives
+         WHERE category_name = ?
+           AND object_name = ?
+           AND COALESCE(variant_name, '') = ?
+           AND COALESCE(is_deleted, 0) = 0
+         LIMIT 1`,
+        ['纪念钞', '龙钞', '散张']
+      );
+      if (!archive) return;
+
+      const appendOnce = (current: unknown, marker: string, addition: string) => {
+        const text = String(current || '').trim();
+        if (text.includes(marker)) return text;
+        return [text, addition].filter(Boolean).join('\n\n');
+      };
+
+      await dbRun(
+        db,
+        `UPDATE product_archives
+         SET raw_description = ?,
+             theme_design = ?,
+             risk_basis = ?,
+             experience_note = ?,
+             pending_questions = ?,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`,
+        [
+          appendOnce(
+            archive.raw_description,
+            '生肖纪念钞系列龙头',
+            '补充：龙钞是生肖纪念钞系列龙头，第一轮定锚意义强。龙题材、颜值、设计和首发身份叠加，不能和后续蛇、马、羊等跟随品种简单等同。'
+          ),
+          appendOnce(
+            archive.theme_design,
+            '龙头属性强于后续跟随品',
+            '龙头属性强于后续跟随品：后续生肖钞会提前发行并吃预期情绪，但龙钞的系列起点、题材辨识度和市场记忆更强。'
+          ),
+          appendOnce(
+            archive.risk_basis,
+            '大学生/新人集中冲入',
+            '筹码风险：龙钞大量筹码在币商手里时更容易形成控盘和价格维护，也有真实承接；但大学生/新人集中冲入后，筹码会分散，且容易不计成本向市场抛货，可能快速破坏盘口和价格秩序。'
+          ),
+          appendOnce(
+            archive.experience_note,
+            '新人冲入不是强承接',
+            '经验口径：新人冲入不是强承接信号，弱市里反而可能是筹码失控和无纪律抛压的前兆。龙钞可以等低位和专业信号，其它生肖钞主要作为市场温度参照。'
+          ),
+          appendOnce(
+            archive.pending_questions,
+            '币商持仓集中度',
+            '待确认：币商持仓集中度、真实承接是否仍在、新人筹码是否开始分散、低价抛货是否放大。'
+          ),
+          archive.id
+        ]
+      );
+
+      if (!(await migrationTableExists(db, 'product_archive_stages'))) return;
+      const existingStage = await dbGet<any>(
+        db,
+        `SELECT id
+         FROM product_archive_stages
+         WHERE archive_id = ?
+           AND stage_name = ?
+           AND COALESCE(is_deleted, 0) = 0
+         LIMIT 1`,
+        [archive.id, '筹码集中与新人冲击']
+      );
+      if (existingStage) return;
+
+      await dbRun(
+        db,
+        `INSERT INTO product_archive_stages
+          (archive_id, stage_name, time_text, stage_type, stage_summary, action_rule,
+           evidence_note, confidence, sort_order, note, is_deleted, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'rough', 2, '', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+        [
+          archive.id,
+          '筹码集中与新人冲击',
+          '弱市和后续生肖钞发行阶段',
+          '筹码结构 / 真实承接 / 新人抛压',
+          '龙钞的龙头属性和真实承接仍然是核心优势；但当筹码从币商集中持有转向大学生/新人分散持有时，市场容易出现无纪律抛压，价格秩序会被快速打散。',
+          '不要把新人热度直接当作强承接。重点观察币商是否继续护盘、真实成交是否稳定、低价抛货是否放大；其它生肖钞只做横向温度参照。',
+          '来源：用户口述补充，龙钞画像/品种档案口径。'
+        ]
+      );
+    }
+  },
+  {
+    id: '20260703_001_seed_longchao_price_task',
+    name: 'Seed Longchao price update task',
+    run: async (db: any) => {
+      if (!(await migrationTableExists(db, 'task_center_tasks'))) return;
+
+      const configJson = JSON.stringify({ page_size: 100, max_pages: 3 });
+      await dbRun(
+        db,
+        `INSERT OR IGNORE INTO task_center_tasks
+           (task_key, name, domain, workspace, task_type, enabled, schedule_time, schedule_days, priority, config_json, last_status, last_message)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          'longchao_price_update',
+          '龙钞价格更新',
+          'price',
+          'business',
+          'longchao_price_update',
+          1,
+          '18:10',
+          'every_day',
+          34,
+          configJson,
+          'pending',
+          '每天抓取爱藏龙钞散张、标10带4、标10不带4价格，并写入商品价格工作台'
+        ]
+      );
+      await dbRun(
+        db,
+        `UPDATE task_center_tasks
+         SET name = ?,
+             task_type = ?,
+             domain = ?,
+             workspace = ?,
+             enabled = 1,
+             schedule_time = CASE WHEN schedule_time IS NULL OR schedule_time = '' THEN ? ELSE schedule_time END,
+             schedule_days = ?,
+             priority = ?,
+             config_json = CASE
+               WHEN config_json IS NULL OR config_json = '{}' OR config_json = '' THEN ?
+               ELSE config_json
+             END,
+             last_message = ?,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE task_key = ?`,
+        [
+          '龙钞价格更新',
+          'longchao_price_update',
+          'price',
+          'business',
+          '18:10',
+          'every_day',
+          34,
+          configJson,
+          '每天抓取爱藏龙钞散张、标10带4、标10不带4价格，并写入商品价格工作台',
+          'longchao_price_update'
+        ]
+      );
+    }
   }
 
 ];

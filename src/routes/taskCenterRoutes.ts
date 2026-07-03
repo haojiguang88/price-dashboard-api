@@ -661,6 +661,27 @@ async function runLongyinbiPriceUpdate(config: any, timeoutMs: number, taskName:
   };
 }
 
+async function runLongchaoPriceUpdate(config: any, timeoutMs: number, taskName: string): Promise<BusinessTaskRunResult> {
+  const args = [
+    '--db',
+    getDatabasePath()
+  ];
+  const pageSize = Number(config.page_size || config.pageSize || 0);
+  const maxPages = Number(config.max_pages || config.maxPages || 0);
+  if (Number.isFinite(pageSize) && pageSize > 0) args.push('--page-size', String(Math.floor(pageSize)));
+  if (Number.isFinite(maxPages) && maxPages > 0) args.push('--max-pages', String(Math.floor(maxPages)));
+  if (config.since) args.push('--since', String(config.since));
+  if (config.until) args.push('--until', String(config.until));
+  if (config.dry_run) args.push('--dry-run');
+
+  const parsed = await runPythonJsonScript(config, 'longchao.py', args, '龙钞价格更新失败', timeoutMs, taskName);
+  return {
+    message: parsed.message || '龙钞价格更新完成',
+    data: parsed,
+    status: getTaskCompletionStatus(parsed)
+  };
+}
+
 async function runBusinessTask(task: TaskRow, config: any, timeoutMs: number): Promise<BusinessTaskRunResult> {
   const taskName = task.name || task.task_key;
   if (task.task_type === 'commodity_metals_price_update' || task.task_key === 'commodity_metals_price_update') {
@@ -680,6 +701,9 @@ async function runBusinessTask(task: TaskRow, config: any, timeoutMs: number): P
   }
   if (task.task_type === 'longyinbi_price_update' || task.task_key === 'longyinbi_price_update') {
     return runLongyinbiPriceUpdate(config, timeoutMs, taskName);
+  }
+  if (task.task_type === 'longchao_price_update' || task.task_key === 'longchao_price_update') {
+    return runLongchaoPriceUpdate(config, timeoutMs, taskName);
   }
   throw new Error(`生意任务执行器未接入：${task.task_key} / ${task.task_type}`);
 }
