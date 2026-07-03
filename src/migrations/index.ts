@@ -2147,6 +2147,169 @@ const migrations: Migration[] = [
     }
   },
   {
+    id: '20260703_001_seed_longyinbi_2026_xintai_source_mapping',
+    name: 'Seed Longyinbi 2026 Xintai source mapping',
+    run: async (db: any) => {
+      if (!(await migrationTableExists(db, 'categories'))) return;
+      if (!(await migrationTableExists(db, 'objects'))) return;
+      if (!(await migrationTableExists(db, 'variants'))) return;
+      if (!(await migrationTableExists(db, 'source_mappings'))) return;
+
+      let category = await dbGet<any>(
+        db,
+        "SELECT id, name FROM categories WHERE name = ? AND COALESCE(is_archived, 0) = 0",
+        ['纪念币']
+      );
+      if (!category) {
+        await dbRun(
+          db,
+          "INSERT INTO categories (name, created_at, updated_at) VALUES (?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+          ['纪念币']
+        );
+        category = await dbGet<any>(
+          db,
+          "SELECT id, name FROM categories WHERE name = ?",
+          ['纪念币']
+        );
+      }
+
+      let object = category
+        ? await dbGet<any>(
+          db,
+          "SELECT id, name FROM objects WHERE category_id = ? AND name = ? AND COALESCE(is_archived, 0) = 0",
+          [category.id, '龙银币']
+        )
+        : null;
+      if (category && !object) {
+        await dbRun(
+          db,
+          "INSERT OR IGNORE INTO objects (category_id, name, created_at, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+          [category.id, '龙银币']
+        );
+        object = await dbGet<any>(
+          db,
+          "SELECT id, name FROM objects WHERE category_id = ? AND name = ?",
+          [category.id, '龙银币']
+        );
+      }
+
+      let variant = object
+        ? await dbGet<any>(
+          db,
+          "SELECT id, name FROM variants WHERE object_id = ? AND name = ? AND COALESCE(is_archived, 0) = 0",
+          [object.id, '2026年信泰评级']
+        )
+        : null;
+      if (object && !variant) {
+        await dbRun(
+          db,
+          "INSERT OR IGNORE INTO variants (object_id, name, created_at, updated_at, note) VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?)",
+          [object.id, '2026年信泰评级', '源头为龙银币裸币，入库按 2026 信泰评级参考价=裸币-70']
+        );
+        variant = await dbGet<any>(
+          db,
+          "SELECT id, name FROM variants WHERE object_id = ? AND name = ?",
+          [object.id, '2026年信泰评级']
+        );
+      }
+
+      const status = category && object && variant ? 'enabled' : 'unmapped';
+      const externalKey = '7|1369|2025龙银币裸币|2026信泰-70';
+      const metaJson = JSON.stringify({
+        goods_id: '7',
+        cat_id: '1369',
+        page_size: 100,
+        price_offset: -70,
+        price_offset_reason: '2026 信泰评级参考价=裸币源头价-70'
+      });
+      const mappingNote = status === 'enabled'
+        ? '源头为裸币；入库为 2026 年信泰评级参考价，价格=裸币-70'
+        : '初始化时未找到纪念币/龙银币/2026年信泰评级主数据，请在数据源映射页面确认';
+
+      await dbRun(
+        db,
+        `INSERT OR IGNORE INTO source_mappings
+           (source_key, source_name, external_key, external_name, external_meta_json,
+            category_id, object_id, variant_id, category_name, object_name, variant_name,
+            status, note)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          'airmb_longyinbi_presale',
+          '爱藏龙银币',
+          externalKey,
+          '2025龙银币裸币',
+          metaJson,
+          category?.id || null,
+          object?.id || null,
+          variant?.id || 0,
+          category?.name || '纪念币',
+          object?.name || '龙银币',
+          variant?.name || '2026年信泰评级',
+          status,
+          mappingNote
+        ]
+      );
+      await dbRun(
+        db,
+        `UPDATE source_mappings
+         SET source_name = ?,
+             external_name = ?,
+             external_meta_json = ?,
+             category_id = ?,
+             object_id = ?,
+             variant_id = ?,
+             category_name = ?,
+             object_name = ?,
+             variant_name = ?,
+             status = ?,
+             note = ?,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE source_key = ?
+           AND external_key = ?`,
+        [
+          '爱藏龙银币',
+          '2025龙银币裸币',
+          metaJson,
+          category?.id || null,
+          object?.id || null,
+          variant?.id || 0,
+          category?.name || '纪念币',
+          object?.name || '龙银币',
+          variant?.name || '2026年信泰评级',
+          status,
+          mappingNote,
+          'airmb_longyinbi_presale',
+          externalKey
+        ]
+      );
+
+      if (await migrationTableExists(db, 'task_center_tasks')) {
+        const taskMessage = '每天抓取爱藏 2025 龙银币裸币价，并同步写入 2025年信泰评级=裸币+100、2026年信泰评级=裸币-70';
+        await dbRun(
+          db,
+          `UPDATE task_center_tasks
+           SET config_json = ?,
+               last_message = CASE
+                 WHEN last_status = 'pending' OR last_message LIKE '每天抓取爱藏%' THEN ?
+                 ELSE last_message
+               END,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE task_key = ?`,
+          [
+            JSON.stringify({
+              target_offsets: {
+                '2025年信泰评级': 100,
+                '2026年信泰评级': -70
+              }
+            }),
+            taskMessage,
+            'longyinbi_price_update'
+          ]
+        );
+      }
+    }
+  },
+  {
     id: '20260531_009_refresh_longchao_profile_historical_validation',
     name: 'Refresh Longchao profile historical validation',
     run: async (db: any) => {

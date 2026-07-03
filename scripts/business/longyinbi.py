@@ -71,8 +71,13 @@ def normalize_output_price(value):
     return round(price) if price.is_integer() else price
 
 
+def format_signed_price_offset(offset):
+    normalized = normalize_output_price(offset)
+    return f"+{normalized}" if float(normalized) >= 0 else str(normalized)
+
+
 def build_price_offset_note(source_price, offset):
-    return f"裸币价 {normalize_output_price(source_price)}；信泰+{normalize_output_price(offset)}"
+    return f"裸币价 {normalize_output_price(source_price)}；信泰{format_signed_price_offset(offset)}"
 
 
 def select_price_note_indexes(records, max_notes=MAX_PRICE_RECORD_NOTES):
@@ -284,7 +289,7 @@ def delete_target_records(db_path, targets):
 
 
 def build_parser():
-    parser = argparse.ArgumentParser(description="同步爱藏 2025 龙银币裸币价格，并按信泰评级口径加价入库")
+    parser = argparse.ArgumentParser(description="同步爱藏龙银币裸币价格，并按信泰评级映射口径入库")
     parser.add_argument("--db", default=DEFAULT_DB_PATH, help="SQLite 数据库路径")
     parser.add_argument("--page-size", type=int, default=100, help="每页拉取数量")
     parser.add_argument("--max-pages", type=int, default=0, help="最多拉取页数；0 表示一直拉到空页")
