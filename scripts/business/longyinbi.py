@@ -66,6 +66,11 @@ def to_float(value, fallback=0):
         return fallback
 
 
+def latest_date_filter(*values):
+    dates = [normalize_text(value) for value in values if normalize_text(value)]
+    return max(dates) if dates else ""
+
+
 def normalize_output_price(value):
     price = round(float(value), 2)
     return round(price) if price.is_integer() else price
@@ -151,6 +156,7 @@ def load_target_definitions(db_path):
             "cat_id": normalize_text(meta.get("cat_id")) or parsed_key["cat_id"] or DEFAULT_CAT_ID,
             "page_size": to_positive_int(meta.get("page_size"), 0),
             "price_offset": to_float(meta.get("price_offset"), DEFAULT_PRICE_OFFSET),
+            "start_date": normalize_text(meta.get("start_date") or meta.get("since")),
             "source_name": normalize_text(mapping.get("source_name")) or SOURCE_NAME,
         })
     return targets, True
@@ -339,10 +345,11 @@ def main():
         source_rows = airmb.fetch_source_rows(target, args.page_size, args.max_pages)
         seen_keys.append(target["external_key"])
         total_source_count += len(source_rows)
+        effective_since = latest_date_filter(args.since, target.get("start_date"))
         records, skipped_source_rows, target_parse_errors = airmb.extract_records(
             source_rows,
             target,
-            since=args.since,
+            since=effective_since,
             until=args.until,
         )
         records = apply_price_offset(records, target)
@@ -362,6 +369,8 @@ def main():
             "object": target["object"],
             "variant": target["variant"],
             "price_offset": target.get("price_offset", 0),
+            "start_date": target.get("start_date") or "",
+            "effective_since": effective_since,
             "source_count": len(source_rows),
             "matched_count": len(records),
             "filtered_count": skipped_source_rows,

@@ -2220,7 +2220,9 @@ const migrations: Migration[] = [
         cat_id: '1369',
         page_size: 100,
         price_offset: -70,
-        price_offset_reason: '2026 信泰评级参考价=裸币源头价-70'
+        price_offset_reason: '2026 信泰评级参考价=裸币源头价-70',
+        start_date: '2026-07-05',
+        start_date_reason: '2026 信泰评级旧历史来源不准，从 2026-07-05 起自动采集；旧历史由用户手工补'
       });
       const mappingNote = status === 'enabled'
         ? '源头为裸币；入库为 2026 年信泰评级参考价，价格=裸币-70'
@@ -2300,6 +2302,9 @@ const migrations: Migration[] = [
               target_offsets: {
                 '2025年信泰评级': 100,
                 '2026年信泰评级': -70
+              },
+              target_start_dates: {
+                '2026年信泰评级': '2026-07-05'
               }
             }),
             taskMessage,
@@ -4934,6 +4939,160 @@ const migrations: Migration[] = [
           'longchao_price_update'
         ]
       );
+    }
+  },
+  {
+    id: '20260704_001_add_longchao_summer_lull_profile',
+    name: 'Add Longchao summer lull profile note',
+    run: async (db: any) => {
+      if (!(await migrationTableExists(db, 'category_profiles'))) return;
+
+      const profile = await dbGet<any>(
+        db,
+        `SELECT id, experience_notes, decision_notes, extra_json
+         FROM category_profiles
+         WHERE category_name = ?
+           AND COALESCE(is_deleted, 0) = 0
+         ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END, id
+         LIMIT 1`,
+        ['纪念钞']
+      );
+      if (!profile) return;
+
+      const appendOnce = (current: string | null | undefined, marker: string, addition: string) => {
+        const text = String(current || '').trim();
+        if (text.includes(marker)) return text;
+        return text ? `${text}\n\n${addition}` : addition;
+      };
+
+      let extra: Record<string, any> = {};
+      try {
+        extra = profile.extra_json ? JSON.parse(profile.extra_json) : {};
+      } catch {
+        extra = {};
+      }
+
+      const uncertainFactors = Array.isArray(extra.uncertain_factors) ? extra.uncertain_factors : [];
+      extra.uncertain_factors = Array.from(
+        new Set([
+          ...uncertainFactors.filter((item: any) => item !== 'summer_lull_possible_needs_validation'),
+          'summer_lull_may_to_early_sep'
+        ])
+      );
+      extra.seasonality = {
+        ...(extra.seasonality || {}),
+        summer_lull: {
+          label: '歇夏期',
+          months: [5, 6, 7, 8],
+          extension: '9月初',
+          time_text: '5月、6月、7月、8月到9月初',
+          caliber: '用户经验口径，先作为龙钞画像季节性观察，不直接生成操作结论',
+          note: '这几个月份是歇夏期，市场活跃度和承接可能阶段性变弱；执行前仍看实际盘口、币商信号和价格弹性。'
+        }
+      };
+
+      const experienceNotes = appendOnce(
+        profile.experience_notes,
+        '歇夏期',
+        '季节性补充：龙钞存在歇夏期，5月、6月、7月、8月到9月初属于歇夏观察窗口；这属于用户经验口径，主要用于解释阶段性活跃度和承接变弱，不直接替代价格、币商信号和真实盘口。'
+      );
+      const decisionNotes = appendOnce(
+        profile.decision_notes,
+        '歇夏窗口',
+        '计划辅助口径：歇夏窗口内更重视价格是否压出安全边际、币商是否护盘、真实成交是否恢复；不单独用季节性判断替代龙钞主线。'
+      );
+
+      await dbRun(
+        db,
+        `UPDATE category_profiles
+         SET experience_notes = ?,
+             decision_notes = ?,
+             extra_json = ?,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`,
+        [experienceNotes, decisionNotes, JSON.stringify(extra), profile.id]
+      );
+    }
+  },
+  {
+    id: '20260705_001_set_longyinbi_2026_xintai_start_date',
+    name: 'Set Longyinbi 2026 Xintai source mapping start date',
+    run: async (db: any) => {
+      if (!(await migrationTableExists(db, 'source_mappings'))) return;
+
+      const row = await dbGet<any>(
+        db,
+        `SELECT id, external_meta_json, note
+         FROM source_mappings
+         WHERE source_key = ?
+           AND category_name = ?
+           AND object_name = ?
+           AND variant_name = ?
+         ORDER BY id DESC
+         LIMIT 1`,
+        ['airmb_longyinbi_presale', '纪念币', '龙银币', '2026年信泰评级']
+      );
+      if (!row) return;
+
+      let meta: Record<string, any> = {};
+      try {
+        meta = row.external_meta_json ? JSON.parse(row.external_meta_json) : {};
+      } catch {
+        meta = {};
+      }
+      meta.start_date = '2026-07-05';
+      meta.start_date_reason = '2026 信泰评级旧历史来源不准，从 2026-07-05 起自动采集；旧历史由用户手工补';
+
+      const noteText = String(row.note || '').trim();
+      const noteAddition = '自动采集从 2026-07-05 开始；此前历史由用户手工补。';
+      const nextNote = noteText.includes('2026-07-05')
+        ? noteText
+        : noteText
+          ? `${noteText}\n${noteAddition}`
+          : noteAddition;
+
+      await dbRun(
+        db,
+        `UPDATE source_mappings
+         SET external_meta_json = ?,
+             note = ?,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`,
+        [JSON.stringify(meta), nextNote, row.id]
+      );
+
+      if (await migrationTableExists(db, 'task_center_tasks')) {
+        const task = await dbGet<any>(
+          db,
+          "SELECT id, config_json FROM task_center_tasks WHERE task_key = ?",
+          ['longyinbi_price_update']
+        );
+        if (task) {
+          let config: Record<string, any> = {};
+          try {
+            config = task.config_json ? JSON.parse(task.config_json) : {};
+          } catch {
+            config = {};
+          }
+          config.target_offsets = {
+            ...(config.target_offsets || {}),
+            '2025年信泰评级': 100,
+            '2026年信泰评级': -70
+          };
+          config.target_start_dates = {
+            ...(config.target_start_dates || {}),
+            '2026年信泰评级': '2026-07-05'
+          };
+          await dbRun(
+            db,
+            `UPDATE task_center_tasks
+             SET config_json = ?,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?`,
+            [JSON.stringify(config), task.id]
+          );
+        }
+      }
     }
   }
 
