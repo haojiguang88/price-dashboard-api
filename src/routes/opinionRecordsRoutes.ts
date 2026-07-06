@@ -16,6 +16,30 @@ const ensureOpinionPersonTables = async (db: any) => {
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     )
   `);
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS opinion_person_profiles (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      person_name TEXT NOT NULL UNIQUE,
+      profile_intro TEXT,
+      credibility_rating INTEGER NOT NULL DEFAULT 0 CHECK (credibility_rating >= 0 AND credibility_rating <= 5),
+      display_order INTEGER,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  const columns = await db.all('PRAGMA table_info(opinion_person_profiles)');
+  const hasDisplayOrder = columns.some((column: any) => column.name === 'display_order');
+  if (!hasDisplayOrder) {
+    await db.exec('ALTER TABLE opinion_person_profiles ADD COLUMN display_order INTEGER');
+  }
+  await db.exec('CREATE INDEX IF NOT EXISTS idx_opinion_person_profiles_order ON opinion_person_profiles(display_order, person_name)');
+};
+
+const normalizeCredibilityRating = (value: unknown) => {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return 0;
+  return Math.max(0, Math.min(5, Math.trunc(parsed)));
 };
 
 router.use(async (_req, _res, next) => {
@@ -111,6 +135,84 @@ router.put('/opinions/:id', async (req, res) => {
   }
 });
 
+// 编辑人物档案
+router.put('/opinions/persons/:personName/profile', async (req, res) => {
+  try {
+    const db = await getDb();
+    const personName = decodeURIComponent(req.params.personName || '').trim();
+    if (!personName) {
+      return res.status(400).json({ success: false, message: '人物名称不能为空' });
+    }
+
+    const existingProfile = await db.get(
+      'SELECT profile_intro, credibility_rating, display_order FROM opinion_person_profiles WHERE person_name = ?',
+      [personName]
+    );
+    const profileIntro = req.body?.profile_intro !== undefined
+      ? String(req.body.profile_intro || '').trim()
+      : existingProfile?.profile_intro || '';
+    const credibilityRating = req.body?.credibility_rating !== undefined
+      ? normalizeCredibilityRating(req.body.credibility_rating)
+      : normalizeCredibilityRating(existingProfile?.credibility_rating);
+    const now = new Date().toISOString();
+
+    await db.run(
+      `INSERT INTO opinion_person_profiles (person_name, profile_intro, credibility_rating, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(person_name) DO UPDATE SET
+         profile_intro = excluded.profile_intro,
+         credibility_rating = excluded.credibility_rating,
+         updated_at = excluded.updated_at`,
+      [personName, profileIntro, credibilityRating, now, now]
+    );
+
+    const savedProfile = await db.get(
+      'SELECT person_name, profile_intro, credibility_rating, display_order, created_at, updated_at FROM opinion_person_profiles WHERE person_name = ?',
+      [personName]
+    );
+    res.json({ success: true, data: savedProfile });
+  } catch (error) {
+    console.error('Error updating opinion person profile:', error);
+    res.status(500).json({ success: false, message: '编辑人物档案失败' });
+  }
+});
+
+// 保存人物卡片排序
+router.put('/opinions/persons/order', async (req, res) => {
+  const db = await getDb();
+  const rawPersonNames = Array.isArray(req.body?.person_names) ? req.body.person_names : [];
+  const personNames = rawPersonNames
+    .map((name: unknown) => String(name || '').trim())
+    .filter(Boolean);
+
+  if (personNames.length === 0) {
+    return res.status(400).json({ success: false, message: '人物排序不能为空' });
+  }
+
+  const uniquePersonNames = Array.from(new Set(personNames));
+  const now = new Date().toISOString();
+
+  try {
+    await db.exec('BEGIN');
+    for (const [index, personName] of uniquePersonNames.entries()) {
+      await db.run(
+        `INSERT INTO opinion_person_profiles (person_name, display_order, created_at, updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(person_name) DO UPDATE SET
+           display_order = excluded.display_order,
+           updated_at = excluded.updated_at`,
+        [personName, index + 1, now, now]
+      );
+    }
+    await db.exec('COMMIT');
+    res.json({ success: true, data: { person_names: uniquePersonNames } });
+  } catch (error) {
+    await db.exec('ROLLBACK');
+    console.error('Error updating opinion person order:', error);
+    res.status(500).json({ success: false, message: '保存人物排序失败' });
+  }
+});
+
 // 删除观点记录
 router.delete('/opinions/:id', async (req, res) => {
   try {
@@ -189,6 +291,7 @@ router.delete('/opinions/persons/:personName', async (req, res) => {
       [now, personName]
     );
     await db.run('DELETE FROM opinion_blocked_persons WHERE person_name = ?', [personName]);
+    await db.run('DELETE FROM opinion_person_profiles WHERE person_name = ?', [personName]);
     res.json({ success: true, data: { changes: result.changes } });
   } catch (error) {
     console.error('Error deleting opinion person:', error);
@@ -207,14 +310,14 @@ router.get('/opinions', async (req, res) => {
     const pagination = parsePagination(page, pageSize);
     
     // 构建查询条件
-    let whereClause = 'is_deleted = 0';
+    let whereClause = 'opinion_records.is_deleted = 0';
     const params: any[] = [];
     
     // 搜索条件
     if (keyword) {
-      whereClause += ' AND (opinion_records.person_name LIKE ? OR title LIKE ? OR original_opinion LIKE ? OR my_interpretation LIKE ? OR validation_result LIKE ? OR person_observation LIKE ? OR note LIKE ? OR source_platform LIKE ? OR track LIKE ?)';
+      whereClause += ' AND (opinion_records.person_name LIKE ? OR title LIKE ? OR original_opinion LIKE ? OR my_interpretation LIKE ? OR validation_result LIKE ? OR person_observation LIKE ? OR opinion_person_profiles.profile_intro LIKE ? OR note LIKE ? OR source_platform LIKE ? OR track LIKE ?)';
       const searchTerm = toLikePattern(keyword);
-      params.push(searchTerm, searchTerm, searchTerm, searchTerm, searchTerm, searchTerm, searchTerm, searchTerm, searchTerm);
+      params.push(searchTerm, searchTerm, searchTerm, searchTerm, searchTerm, searchTerm, searchTerm, searchTerm, searchTerm, searchTerm);
     }
     
     // 精确筛选条件
@@ -233,16 +336,23 @@ router.get('/opinions', async (req, res) => {
     }
     
     // 获取总数
-    const countQuery = `SELECT COUNT(*) as total FROM opinion_records WHERE ${whereClause}`;
+    const countQuery = `
+      SELECT COUNT(*) as total
+      FROM opinion_records
+      LEFT JOIN opinion_person_profiles ON opinion_person_profiles.person_name = opinion_records.person_name
+      WHERE ${whereClause}
+    `;
     const countResult = await db.get(countQuery, params);
     const total = countResult.total || 0;
     
     // 获取分页数据
     const dataQuery = `
       SELECT opinion_records.id, title, track, opinion_records.person_name, source_platform, opinion_date, validation_status, summary_result, original_opinion, my_interpretation, validation_result, validation_date, person_observation, note, opinion_records.created_at, opinion_records.updated_at,
+             opinion_person_profiles.profile_intro, opinion_person_profiles.credibility_rating, opinion_person_profiles.display_order,
              CASE WHEN opinion_blocked_persons.id IS NULL THEN 0 ELSE 1 END AS is_person_blocked
       FROM opinion_records
       LEFT JOIN opinion_blocked_persons ON opinion_blocked_persons.person_name = opinion_records.person_name
+      LEFT JOIN opinion_person_profiles ON opinion_person_profiles.person_name = opinion_records.person_name
       WHERE ${whereClause} 
       ORDER BY opinion_records.opinion_date DESC, opinion_records.created_at DESC, opinion_records.id DESC 
       LIMIT ? OFFSET ?
@@ -274,7 +384,15 @@ router.get('/opinions/:id', async (req, res) => {
     const { id } = req.params;
     
     // 获取记录详情
-    const record = await db.get('SELECT id, title, track, person_name, source_platform, opinion_date, validation_status, summary_result, original_opinion, my_interpretation, validation_result, validation_date, person_observation, note, created_at, updated_at FROM opinion_records WHERE id = ? AND is_deleted = 0', [id]);
+    const record = await db.get(`
+      SELECT opinion_records.id, title, track, opinion_records.person_name, source_platform, opinion_date, validation_status, summary_result, original_opinion, my_interpretation, validation_result, validation_date, person_observation, note, opinion_records.created_at, opinion_records.updated_at,
+             opinion_person_profiles.profile_intro, opinion_person_profiles.credibility_rating, opinion_person_profiles.display_order,
+             CASE WHEN opinion_blocked_persons.id IS NULL THEN 0 ELSE 1 END AS is_person_blocked
+      FROM opinion_records
+      LEFT JOIN opinion_person_profiles ON opinion_person_profiles.person_name = opinion_records.person_name
+      LEFT JOIN opinion_blocked_persons ON opinion_blocked_persons.person_name = opinion_records.person_name
+      WHERE opinion_records.id = ? AND opinion_records.is_deleted = 0
+    `, [id]);
     
     if (!record) {
       return res.status(404).json({ success: false, message: '观点记录不存在' });
