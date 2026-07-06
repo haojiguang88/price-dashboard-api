@@ -185,6 +185,14 @@ def apply_price_offset(records, target):
     return adjusted_records
 
 
+def should_mark_missing_error(source_count, matched_count, filtered_count, effective_since):
+    if matched_count > 0:
+        return False
+    if source_count > 0 and filtered_count >= source_count and effective_since:
+        return False
+    return True
+
+
 def upsert_price_records(db_path, records, dry_run=False):
     inserted = 0
     updated = 0
@@ -360,7 +368,7 @@ def main():
         ])
         if records:
             all_records.extend(records)
-        else:
+        elif should_mark_missing_error(len(source_rows), len(records), skipped_source_rows, effective_since):
             missing_errors[target["external_key"]] = "本次来源未返回可入库价格"
         target_summaries.append({
             "external_key": target["external_key"],
