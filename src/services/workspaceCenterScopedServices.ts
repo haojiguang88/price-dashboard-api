@@ -58,6 +58,8 @@ export interface ScopedWorkspaceTagService {
   createWorkspaceTag(body: Record<string, any>): Promise<any>;
   updateWorkspaceTag(id: string, body: Record<string, any>): Promise<any>;
   deleteWorkspaceTag(id: string): Promise<any>;
+  listEntityTags(options: Record<string, any>): Promise<any[]>;
+  setEntityTags(entityType: string, entityId: string, body: Record<string, any>): Promise<any>;
 }
 
 export interface ScopedWorkspaceTaskCenterService {
@@ -93,7 +95,15 @@ export const businessWorkspaceCenterServices: ScopedWorkspaceCenterServices = {
     listWorkspaceTags: () => listWorkspaceTagsBase(CURRENT_WORKSPACE),
     createWorkspaceTag: (body) => createWorkspaceTagBase(withCurrentWorkspaceBody(body)),
     updateWorkspaceTag: (id, body) => updateWorkspaceTagBase(id, withCurrentWorkspaceBody(body)),
-    deleteWorkspaceTag: (id) => deleteWorkspaceTagBase(id, CURRENT_WORKSPACE)
+    deleteWorkspaceTag: (id) => deleteWorkspaceTagBase(id, CURRENT_WORKSPACE),
+    listEntityTags: async (options) => {
+      const { listEntityTags } = await import("./workspaceTagService");
+      return listEntityTags({ ...options, workspace: CURRENT_WORKSPACE });
+    },
+    setEntityTags: async (entityType, entityId, body) => {
+      const { setEntityTags } = await import("./workspaceTagService");
+      return setEntityTags(entityType, entityId, withCurrentWorkspaceBody(body));
+    }
   },
   taskCenter: {
     getTaskCenterSnapshot: (compactInput) => getTaskCenterSnapshotBase(CURRENT_WORKSPACE, compactInput),

@@ -153,8 +153,16 @@ const initDatabase = async (db: Database) => {
   await db.exec("CREATE INDEX IF NOT EXISTS idx_audit_logs_timestamp ON audit_logs(timestamp DESC)");
   await db.exec("CREATE INDEX IF NOT EXISTS idx_audit_logs_module ON audit_logs(module, action, status)");
   await db.exec("CREATE INDEX IF NOT EXISTS idx_audit_logs_workspace_timestamp ON audit_logs(workspace, timestamp DESC, created_at DESC)");
-  await db.exec("CREATE TABLE IF NOT EXISTS workspace_tags (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, domain TEXT NOT NULL DEFAULT 'business', workspace TEXT NOT NULL DEFAULT 'business', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(workspace, name))");
+  await db.exec("CREATE TABLE IF NOT EXISTS workspace_tags (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, domain TEXT NOT NULL DEFAULT 'business', workspace TEXT NOT NULL DEFAULT 'business', tag_group TEXT NOT NULL DEFAULT '交易', color TEXT NOT NULL DEFAULT 'indigo', description TEXT NOT NULL DEFAULT '', applicable_scopes TEXT NOT NULL DEFAULT '[\"category\",\"object\",\"variant\"]', status TEXT NOT NULL DEFAULT 'active', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(workspace, name))");
+  await ensureColumn("workspace_tags", "tag_group", "TEXT NOT NULL DEFAULT '交易'");
+  await ensureColumn("workspace_tags", "color", "TEXT NOT NULL DEFAULT 'indigo'");
+  await ensureColumn("workspace_tags", "description", "TEXT NOT NULL DEFAULT ''");
+  await ensureColumn("workspace_tags", "applicable_scopes", "TEXT NOT NULL DEFAULT '[\"category\",\"object\",\"variant\"]'");
+  await ensureColumn("workspace_tags", "status", "TEXT NOT NULL DEFAULT 'active'");
   await db.exec("CREATE INDEX IF NOT EXISTS idx_workspace_tags_workspace_name ON workspace_tags(workspace, name)");
+  await db.exec("CREATE TABLE IF NOT EXISTS entity_tags (id INTEGER PRIMARY KEY AUTOINCREMENT, workspace TEXT NOT NULL DEFAULT 'business', entity_type TEXT NOT NULL, entity_id INTEGER NOT NULL, tag_id INTEGER NOT NULL, note TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(workspace, entity_type, entity_id, tag_id), FOREIGN KEY (tag_id) REFERENCES workspace_tags(id) ON DELETE CASCADE)");
+  await db.exec("CREATE INDEX IF NOT EXISTS idx_entity_tags_lookup ON entity_tags(workspace, entity_type, entity_id)");
+  await db.exec("CREATE INDEX IF NOT EXISTS idx_entity_tags_tag ON entity_tags(workspace, tag_id)");
   await db.exec("CREATE TABLE IF NOT EXISTS user_preferences (id INTEGER PRIMARY KEY AUTOINCREMENT, user_key TEXT NOT NULL DEFAULT 'default', preference_key TEXT NOT NULL, preference_value TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(user_key, preference_key))");
   await db.exec("CREATE INDEX IF NOT EXISTS idx_user_preferences_user_key ON user_preferences(user_key, preference_key)");
   await db.exec("CREATE TABLE IF NOT EXISTS dashboard_action_statuses (id INTEGER PRIMARY KEY AUTOINCREMENT, workspace TEXT NOT NULL DEFAULT 'business', action_key TEXT NOT NULL, action_title TEXT NOT NULL DEFAULT '', action_source TEXT NOT NULL DEFAULT '', status TEXT NOT NULL CHECK(status IN ('handled', 'ignored')), note TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(workspace, action_key))");

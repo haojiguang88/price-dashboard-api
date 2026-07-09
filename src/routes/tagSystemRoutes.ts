@@ -22,6 +22,30 @@ router.get("/tags", async (req, res) => {
   }
 });
 
+router.get("/tags/entities", async (req, res) => {
+  try {
+    const data = await tagService.listEntityTags(req.query || {});
+    res.json({ success: true, data, message: "获取实体标签成功" });
+  } catch (error) {
+    res.status(getWorkspaceCenterStatusCode(error)).json({
+      success: false,
+      message: (error as Error).message || "获取实体标签失败"
+    });
+  }
+});
+
+router.put("/tags/entities/:entityType/:entityId", async (req, res) => {
+  try {
+    const data = await tagService.setEntityTags(String(req.params.entityType), String(req.params.entityId), req.body || {});
+    res.json({ success: true, data, message: "保存实体标签成功" });
+  } catch (error) {
+    res.status(getWorkspaceCenterStatusCode(error)).json({
+      success: false,
+      message: (error as Error).message || "保存实体标签失败"
+    });
+  }
+});
+
 router.post("/tags", async (req, res) => {
   try {
     const data = await tagService.createWorkspaceTag(req.body || {});

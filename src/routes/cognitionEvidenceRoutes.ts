@@ -76,8 +76,8 @@ const evidenceQueries: EvidenceQuery[] = [
     group: "opinions",
     module: "观点记录",
     dateColumn: "opinion_date",
-    columns: ["title", "track", "person_name", "source_platform", "validation_status", "summary_result", "original_opinion", "my_interpretation", "validation_result", "person_observation", "note"],
-    summaryColumns: ["summary_result", "my_interpretation", "validation_result", "original_opinion", "note"],
+    columns: ["title", "track", "person_name", "source_platform", "validation_status", "summary_result", "original_opinion", "judgment_basis", "my_interpretation", "validation_result", "validation_note", "person_observation", "note"],
+    summaryColumns: ["summary_result", "judgment_basis", "my_interpretation", "validation_result", "validation_note", "original_opinion", "note"],
     sourceColumn: "person_name",
     orderBy: "opinion_date DESC, updated_at DESC, id DESC",
     pathPrefix: "/opinion"

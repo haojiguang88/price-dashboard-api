@@ -21,6 +21,41 @@ def _parse_meta(value):
         return {}
 
 
+ACTIVE_MAPPING_JOINS = """
+FROM source_mappings sm
+LEFT JOIN categories c_id ON sm.category_id = c_id.id
+LEFT JOIN categories c_name
+  ON (sm.category_id IS NULL OR sm.category_id = 0)
+ AND TRIM(COALESCE(sm.category_name, '')) != ''
+ AND c_name.name = sm.category_name
+LEFT JOIN objects o_id ON sm.object_id = o_id.id
+LEFT JOIN objects o_name
+  ON (sm.object_id IS NULL OR sm.object_id = 0)
+ AND TRIM(COALESCE(sm.object_name, '')) != ''
+ AND o_name.name = sm.object_name
+ AND (
+      COALESCE(c_id.id, c_name.id) IS NULL
+      OR o_name.category_id = COALESCE(c_id.id, c_name.id)
+ )
+LEFT JOIN variants v_id ON sm.variant_id = v_id.id
+LEFT JOIN variants v_name
+  ON (sm.variant_id IS NULL OR sm.variant_id = 0)
+ AND TRIM(COALESCE(sm.variant_name, '')) != ''
+ AND v_name.name = sm.variant_name
+ AND (
+      COALESCE(o_id.id, o_name.id) IS NULL
+      OR v_name.object_id = COALESCE(o_id.id, o_name.id)
+ )
+"""
+
+
+ACTIVE_MAPPING_FILTER = """
+  AND COALESCE(c_id.is_archived, c_name.is_archived, 0) = 0
+  AND COALESCE(o_id.is_archived, o_name.is_archived, 0) = 0
+  AND COALESCE(v_id.is_archived, v_name.is_archived, 0) = 0
+"""
+
+
 def load_enabled_source_mappings(db_path, source_key):
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -34,11 +69,12 @@ def load_enabled_source_mappings(db_path, source_key):
         ).fetchone()[0]
         rows = conn.execute(
             """
-            SELECT *
-            FROM source_mappings
-            WHERE source_key = ?
-              AND status = 'enabled'
-            ORDER BY object_name ASC, external_name ASC, id ASC
+            SELECT sm.*
+            """ + ACTIVE_MAPPING_JOINS + """
+            WHERE sm.source_key = ?
+              AND sm.status = 'enabled'
+            """ + ACTIVE_MAPPING_FILTER + """
+            ORDER BY sm.object_name ASC, sm.external_name ASC, sm.id ASC
             """,
             (source_key,),
         ).fetchall()
@@ -147,8 +183,13 @@ def mark_source_run_error(db_path, source_key, message):
             UPDATE source_mappings
             SET last_error = ?,
                 updated_at = ?
-            WHERE source_key = ?
-              AND status = 'enabled'
+            WHERE id IN (
+                SELECT sm.id
+                """ + ACTIVE_MAPPING_JOINS + """
+                WHERE sm.source_key = ?
+                  AND sm.status = 'enabled'
+                """ + ACTIVE_MAPPING_FILTER + """
+            )
             """,
             (str(message or "来源任务执行失败"), now, source_key),
         )

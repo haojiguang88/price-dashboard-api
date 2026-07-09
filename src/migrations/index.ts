@@ -41,8 +41,10 @@ const migrations: Migration[] = [
         validation_status TEXT,
         summary_result TEXT,
         original_opinion TEXT,
+        judgment_basis TEXT,
         my_interpretation TEXT,
         validation_result TEXT,
+        validation_note TEXT,
         validation_date TEXT,
         person_observation TEXT,
         note TEXT,
@@ -5093,6 +5095,69 @@ const migrations: Migration[] = [
           );
         }
       }
+    }
+  },
+  {
+    id: '20260709_001_extend_opinion_cognition_profiles',
+    name: 'Extend opinion cognition sample fields',
+    run: async (db: any) => {
+      await ensureMigrationColumn(db, 'opinion_records', 'judgment_basis', 'TEXT');
+      await ensureMigrationColumn(db, 'opinion_records', 'validation_note', 'TEXT');
+
+      await dbExec(db, `
+        CREATE TABLE IF NOT EXISTS opinion_person_profiles (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          person_name TEXT NOT NULL UNIQUE,
+          profile_intro TEXT,
+          credibility_rating INTEGER NOT NULL DEFAULT 0 CHECK (credibility_rating >= 0 AND credibility_rating <= 5),
+          display_order INTEGER,
+          skill_tags TEXT,
+          weak_tags TEXT,
+          credibility_basis TEXT,
+          ability_scores TEXT,
+          behavior_strengths TEXT,
+          behavior_biases TEXT,
+          error_handling TEXT,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+      `);
+      await ensureMigrationColumn(db, 'opinion_person_profiles', 'display_order', 'INTEGER');
+      await ensureMigrationColumn(db, 'opinion_person_profiles', 'skill_tags', 'TEXT');
+      await ensureMigrationColumn(db, 'opinion_person_profiles', 'weak_tags', 'TEXT');
+      await ensureMigrationColumn(db, 'opinion_person_profiles', 'credibility_basis', 'TEXT');
+      await ensureMigrationColumn(db, 'opinion_person_profiles', 'ability_scores', 'TEXT');
+      await ensureMigrationColumn(db, 'opinion_person_profiles', 'behavior_strengths', 'TEXT');
+      await ensureMigrationColumn(db, 'opinion_person_profiles', 'behavior_biases', 'TEXT');
+      await ensureMigrationColumn(db, 'opinion_person_profiles', 'error_handling', 'TEXT');
+      await dbExec(db, 'CREATE INDEX IF NOT EXISTS idx_opinion_person_profiles_order ON opinion_person_profiles(display_order, person_name)');
+    }
+  },
+  {
+    id: '20260709_002_extend_workspace_tags_for_master_data',
+    name: 'Extend workspace tags for category object variant tagging',
+    run: async (db: any) => {
+      await ensureMigrationColumn(db, 'workspace_tags', 'tag_group', "TEXT NOT NULL DEFAULT '交易'");
+      await ensureMigrationColumn(db, 'workspace_tags', 'color', "TEXT NOT NULL DEFAULT 'indigo'");
+      await ensureMigrationColumn(db, 'workspace_tags', 'description', "TEXT NOT NULL DEFAULT ''");
+      await ensureMigrationColumn(db, 'workspace_tags', 'applicable_scopes', "TEXT NOT NULL DEFAULT '[\"category\",\"object\",\"variant\"]'");
+      await ensureMigrationColumn(db, 'workspace_tags', 'status', "TEXT NOT NULL DEFAULT 'active'");
+      await dbExec(db, `
+        CREATE TABLE IF NOT EXISTS entity_tags (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          workspace TEXT NOT NULL DEFAULT 'business',
+          entity_type TEXT NOT NULL,
+          entity_id INTEGER NOT NULL,
+          tag_id INTEGER NOT NULL,
+          note TEXT,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(workspace, entity_type, entity_id, tag_id),
+          FOREIGN KEY (tag_id) REFERENCES workspace_tags(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_entity_tags_lookup ON entity_tags(workspace, entity_type, entity_id);
+        CREATE INDEX IF NOT EXISTS idx_entity_tags_tag ON entity_tags(workspace, tag_id);
+      `);
     }
   }
 

@@ -218,25 +218,59 @@ const tableExists = async (db: any, tableName: string) => {
   return Boolean(row);
 };
 
+const activeSourceMappingJoins = `
+  FROM source_mappings sm
+  LEFT JOIN categories c_id ON sm.category_id = c_id.id
+  LEFT JOIN categories c_name
+    ON (sm.category_id IS NULL OR sm.category_id = 0)
+   AND TRIM(COALESCE(sm.category_name, '')) != ''
+   AND c_name.name = sm.category_name
+  LEFT JOIN objects o_id ON sm.object_id = o_id.id
+  LEFT JOIN objects o_name
+    ON (sm.object_id IS NULL OR sm.object_id = 0)
+   AND TRIM(COALESCE(sm.object_name, '')) != ''
+   AND o_name.name = sm.object_name
+   AND (
+        COALESCE(c_id.id, c_name.id) IS NULL
+        OR o_name.category_id = COALESCE(c_id.id, c_name.id)
+   )
+  LEFT JOIN variants v_id ON sm.variant_id = v_id.id
+  LEFT JOIN variants v_name
+    ON (sm.variant_id IS NULL OR sm.variant_id = 0)
+   AND TRIM(COALESCE(sm.variant_name, '')) != ''
+   AND v_name.name = sm.variant_name
+   AND (
+        COALESCE(o_id.id, o_name.id) IS NULL
+        OR v_name.object_id = COALESCE(o_id.id, o_name.id)
+   )
+`;
+
+const activeSourceMappingFilter = `
+  WHERE COALESCE(c_id.is_archived, c_name.is_archived, 0) = 0
+    AND COALESCE(o_id.is_archived, o_name.is_archived, 0) = 0
+    AND COALESCE(v_id.is_archived, v_name.is_archived, 0) = 0
+`;
+
 const getSourceMappingSummaries = async (db: any) => {
   const summaries = new Map<string, any>();
   if (!(await tableExists(db, "source_mappings"))) return summaries;
 
   const rows = await db.all(`
     SELECT
-      source_key,
-      MAX(source_name) AS source_name,
+      sm.source_key,
+      MAX(sm.source_name) AS source_name,
       COUNT(1) AS total_count,
-      SUM(CASE WHEN status = 'enabled' THEN 1 ELSE 0 END) AS enabled_count,
-      SUM(CASE WHEN status = 'disabled' THEN 1 ELSE 0 END) AS disabled_count,
-      SUM(CASE WHEN status = 'unmapped' THEN 1 ELSE 0 END) AS unmapped_count,
-      SUM(CASE WHEN status = 'missing_source' THEN 1 ELSE 0 END) AS missing_source_count,
-      SUM(CASE WHEN last_error IS NOT NULL AND TRIM(last_error) != '' THEN 1 ELSE 0 END) AS last_error_count,
-      MAX(last_seen_at) AS last_seen_at,
-      MAX(last_matched_at) AS last_matched_at,
-      MAX(updated_at) AS updated_at
-    FROM source_mappings
-    GROUP BY source_key
+      SUM(CASE WHEN sm.status = 'enabled' THEN 1 ELSE 0 END) AS enabled_count,
+      SUM(CASE WHEN sm.status = 'disabled' THEN 1 ELSE 0 END) AS disabled_count,
+      SUM(CASE WHEN sm.status = 'unmapped' THEN 1 ELSE 0 END) AS unmapped_count,
+      SUM(CASE WHEN sm.status = 'missing_source' THEN 1 ELSE 0 END) AS missing_source_count,
+      SUM(CASE WHEN sm.last_error IS NOT NULL AND TRIM(sm.last_error) != '' THEN 1 ELSE 0 END) AS last_error_count,
+      MAX(sm.last_seen_at) AS last_seen_at,
+      MAX(sm.last_matched_at) AS last_matched_at,
+      MAX(sm.updated_at) AS updated_at
+    ${activeSourceMappingJoins}
+    ${activeSourceMappingFilter}
+    GROUP BY sm.source_key
   `);
 
   for (const row of rows) {
