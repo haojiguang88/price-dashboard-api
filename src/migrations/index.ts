@@ -5318,6 +5318,79 @@ const migrations: Migration[] = [
         }
       }
     }
+  },
+  {
+    id: '20260710_002_seed_emotional_pump_no_chase_rule',
+    name: 'Seed emotional pump no-chase hard rule',
+    run: async (db: any) => {
+      const appendOnce = (current: unknown, marker: string, addition: string) => {
+        const text = String(current || '').trim();
+        if (text.includes(marker)) return text;
+        return [text, addition].filter(Boolean).join('\n\n');
+      };
+
+      if (await migrationTableExists(db, 'rule_experiences')) {
+        const title = '弱市情绪拉盘后手直接放弃';
+        const existingRule = await dbGet<any>(
+          db,
+          `SELECT id
+           FROM rule_experiences
+           WHERE title = ?
+             AND COALESCE(is_deleted, 0) = 0
+           LIMIT 1`,
+          [title]
+        );
+
+        if (!existingRule) {
+          await dbRun(
+            db,
+            `INSERT INTO rule_experiences
+              (title, type, track, source_case, core_content, summary_conclusion, note, is_deleted, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+            [
+              title,
+              'hard_rule',
+              '情绪品 / 龙头错杀 / 资金拉盘',
+              '龙钞 2026-07-10 复盘：弱市淡季里标10/整刀快速拉升，低位底仓者兑现，后手追高大概率接盘。',
+              '凡是弱市里突然被资金情绪拉起来的品种，低位底仓可兑现，后手追高直接放弃。低位是错杀赔率，拉盘是情绪兑现，后手进去是接盘风险区。',
+              '情绪拉盘后手，不看，不追，不接。',
+              '人工摁死规则，不走复杂评分。适用于龙钞、纪念币、泡泡玛特及其它情绪资金推动品种；如果只有资金情绪推动、没有新的基本面变化，后手不把低吸逻辑拿来追高。'
+            ]
+          );
+        }
+      }
+
+      if (await migrationTableExists(db, 'category_profiles')) {
+        const profile = await dbGet<any>(
+          db,
+          `SELECT id, decision_notes
+           FROM category_profiles
+           WHERE category_name = ?
+             AND COALESCE(is_deleted, 0) = 0
+           ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END, id
+           LIMIT 1`,
+          ['纪念钞']
+        );
+
+        if (profile) {
+          await dbRun(
+            db,
+            `UPDATE category_profiles
+             SET decision_notes = ?,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?`,
+            [
+              appendOnce(
+                profile.decision_notes,
+                '情绪拉盘后手',
+                '人工红线：凡是弱市里突然被资金情绪拉起来的品种，低位底仓可兑现，后手追高直接放弃；情绪拉盘后手，不看，不追，不接。'
+              ),
+              profile.id
+            ]
+          );
+        }
+      }
+    }
   }
 
 ];
