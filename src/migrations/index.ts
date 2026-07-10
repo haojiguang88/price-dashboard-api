@@ -5159,6 +5159,165 @@ const migrations: Migration[] = [
         CREATE INDEX IF NOT EXISTS idx_entity_tags_tag ON entity_tags(workspace, tag_id);
       `);
     }
+  },
+  {
+    id: '20260710_001_seed_longchao_false_kill_rebound_case',
+    name: 'Seed Longchao false-kill rebound case',
+    run: async (db: any) => {
+      const appendOnce = (current: unknown, marker: string, addition: string) => {
+        const text = String(current || '').trim();
+        if (text.includes(marker)) return text;
+        return [text, addition].filter(Boolean).join('\n\n');
+      };
+
+      if (await migrationTableExists(db, 'product_archives')) {
+        const archive = await dbGet<any>(
+          db,
+          `SELECT id, experience_note, risk_basis, pending_questions
+           FROM product_archives
+           WHERE category_name = ?
+             AND object_name = ?
+             AND COALESCE(variant_name, '') = ?
+             AND COALESCE(is_deleted, 0) = 0
+           LIMIT 1`,
+          ['纪念钞', '龙钞', '散张']
+        );
+
+        if (archive) {
+          await dbRun(
+            db,
+            `UPDATE product_archives
+             SET experience_note = ?,
+                 risk_basis = ?,
+                 pending_questions = ?,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?`,
+            [
+              appendOnce(
+                archive.experience_note,
+                '50元底仓、75元兑现',
+                '实战案例：常关注主播看好龙钞，在弱市错杀区约50元建立几千张底仓，2026-07-10 左右约75元兑现，单张约+25元，收益约50%，周期不到两个月。这个案例验证：龙头品种弱市错杀时，如果仍有人持续惦记且有资金愿意推动，低位底仓的赔率很舒服；加速拉升后要考虑兑现，不把信仰当卖点。'
+              ),
+              appendOnce(
+                archive.risk_basis,
+                '整刀先拉不能直接倒推散张',
+                '风险补充：弱市淡季里龙钞突然拉升，更像有资金主动推动。标10/整刀先强不能直接倒推散张全面承接，后续仍要看散张是否站稳、回踩是否破位、真实成交是否跟上。'
+              ),
+              appendOnce(
+                archive.pending_questions,
+                '拉盘后散张是否补涨确认',
+                '待确认：拉盘后散张是否补涨确认，标10带4/不带4能否守住抬升后的价格区间，是否有真实成交而非单纯挂高报价。'
+              ),
+              archive.id
+            ]
+          );
+
+          if (await migrationTableExists(db, 'product_archive_stages')) {
+            const existingStage = await dbGet<any>(
+              db,
+              `SELECT id
+               FROM product_archive_stages
+               WHERE archive_id = ?
+                 AND stage_name = ?
+                 AND COALESCE(is_deleted, 0) = 0
+               LIMIT 1`,
+              [archive.id, '弱市错杀底仓到拉盘兑现']
+            );
+
+            if (!existingStage) {
+              await dbRun(
+                db,
+                `INSERT INTO product_archive_stages
+                  (archive_id, stage_name, time_text, stage_type, price_start, price_high, price_low, price_end,
+                   stage_summary, action_rule, evidence_note, confidence, sort_order, note, is_deleted, created_at, updated_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'case', 3, '', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+                [
+                  archive.id,
+                  '弱市错杀底仓到拉盘兑现',
+                  '2026年5月下旬至2026-07-10',
+                  '弱市错杀 / 龙头资金记忆 / 拉盘兑现',
+                  50,
+                  75,
+                  50,
+                  75,
+                  '弱市淡季中，龙钞仍有主播和资金持续惦记；50元附近错杀底仓，到75元附近兑现，不到两个月约50%收益。案例重点不是追涨，而是验证“有人愿意做的龙头”在错杀区的赔率。',
+                  '错杀只做仍有人惦记、资金愿意推动的龙头；低位用底仓试错，拉升到40%-60%收益区间先考虑兑现一部分；加速后不把低吸逻辑变成追高逻辑。',
+                  '来源：用户 2026-07-10 复盘口述，常关注主播实盘案例；75元为外部卖出案例，系统自动价格只作旁证。'
+                ]
+              );
+            }
+          }
+        }
+      }
+
+      if (await migrationTableExists(db, 'category_profiles')) {
+        const profile = await dbGet<any>(
+          db,
+          `SELECT id, experience_notes, decision_notes
+           FROM category_profiles
+           WHERE category_name = ?
+             AND COALESCE(is_deleted, 0) = 0
+           ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END, id
+           LIMIT 1`,
+          ['纪念钞']
+        );
+
+        if (profile) {
+          await dbRun(
+            db,
+            `UPDATE category_profiles
+             SET experience_notes = ?,
+                 decision_notes = ?,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?`,
+            [
+              appendOnce(
+                profile.experience_notes,
+                '弱市错杀底仓到拉盘兑现',
+                '错杀打法验证：2026-07-10 用户复盘提到，常关注主播看好龙钞，在约50元附近持有几千张底仓，约75元卖出，收益约50%，周期不到两个月。这个案例说明：弱市里不是买所有下跌，而是买仍有人惦记、资金愿意推动的龙头错杀。'
+              ),
+              appendOnce(
+                profile.decision_notes,
+                '弱市错杀买龙头',
+                '规则口径：弱市错杀优先看龙头、资金记忆、专业关注和真实承接；低位底仓舒服，加速拉盘后新仓不追或只等回踩。达到40%-60%收益区间时，先考虑兑现一部分，不把长期看好变成短线恋战。'
+              ),
+              profile.id
+            ]
+          );
+        }
+      }
+
+      if (await migrationTableExists(db, 'rule_experiences')) {
+        const title = '龙钞弱市错杀底仓到拉盘兑现案例';
+        const existingRule = await dbGet<any>(
+          db,
+          `SELECT id
+           FROM rule_experiences
+           WHERE title = ?
+             AND COALESCE(is_deleted, 0) = 0
+           LIMIT 1`,
+          [title]
+        );
+
+        if (!existingRule) {
+          await dbRun(
+            db,
+            `INSERT INTO rule_experiences
+              (title, type, track, source_case, core_content, summary_conclusion, note, is_deleted, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+            [
+              title,
+              'case_rule',
+              '纪念钞 / 龙钞 / 弱市错杀',
+              '常关注主播龙钞案例：约50元附近底仓几千张，2026-07-10 左右约75元兑现，不到两个月收益约50%。',
+              '错杀不是买所有下跌品，而是买仍有人惦记、资金愿意推动、市场记忆强的龙头。低位底仓是赔率点，拉盘加速后要从“低吸逻辑”切换到“兑现纪律”。',
+              '弱市错杀买龙头，拉盘兑现，不恋战；龙钞验证了“有人愿意做”的品种比单纯便宜的品种更有弹性。',
+              '用户 2026-07-10 复盘口述；用于认知中心和规则经验召回。75元为外部卖出案例，不等同于系统自动采集散张价格。'
+            ]
+          );
+        }
+      }
+    }
   }
 
 ];
