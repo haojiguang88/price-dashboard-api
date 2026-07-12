@@ -3,6 +3,145 @@ import getDb from '../config/database';
 
 const router = express.Router();
 
+const DUAL_SCORE_MODEL_VERSION = 'dual-score-v5';
+const ABSOLUTE_ELASTICITY_REFERENCE_RATE = 30;
+
+const CATEGORY_ELASTICITY_REFERENCE_RATE: Record<string, number> = {
+  '苹果手机': 3,
+  '游戏机': 10,
+  '泡泡玛特': 22,
+  '纪念币': 15,
+  '纪念钞': 30,
+  '贵金属': 15
+};
+
+const CATEGORY_MEANINGFUL_SWING_THRESHOLD_RATE: Record<string, number> = {
+  '苹果手机': 0.6,
+  '游戏机': 1,
+  '泡泡玛特': 1.2,
+  '纪念币': 1.5,
+  '纪念钞': 2,
+  '贵金属': 1
+};
+
+const CATEGORY_EFFECTIVE_SWING_TARGET_RATE: Record<string, number> = {
+  '苹果手机': 1.5,
+  '游戏机': 2.5,
+  '泡泡玛特': 3,
+  '纪念币': 3,
+  '纪念钞': 4,
+  '贵金属': 2.5
+};
+
+const CATEGORY_MINIMUM_TRADABLE_RANGE_AMOUNT: Record<string, number> = {
+  '苹果手机': 150,
+  '游戏机': 100,
+  '泡泡玛特': 30,
+  '纪念币': 30,
+  '纪念钞': 5,
+  '贵金属': 0
+};
+
+const CATEGORY_MINIMUM_TRADABLE_RANGE_RATE: Record<string, number> = {
+  '苹果手机': 2,
+  '游戏机': 3,
+  '泡泡玛特': 8,
+  '纪念币': 6,
+  '纪念钞': 8,
+  '贵金属': 3
+};
+
+const clampScore = (value: number) => Math.max(0, Math.min(100, value));
+
+const getCategoryElasticityReferenceRate = (categoryName: string) => (
+  CATEGORY_ELASTICITY_REFERENCE_RATE[categoryName] || 15
+);
+
+const getMeaningfulSwingThresholdRate = (categoryName: string) => (
+  CATEGORY_MEANINGFUL_SWING_THRESHOLD_RATE[categoryName] || 1.2
+);
+
+const getEffectiveSwingTargetRate = (categoryName: string) => (
+  CATEGORY_EFFECTIVE_SWING_TARGET_RATE[categoryName] || 5
+);
+
+const getMinimumTradableRangeAmount = (categoryName: string) => (
+  CATEGORY_MINIMUM_TRADABLE_RANGE_AMOUNT[categoryName] ?? 30
+);
+
+const getMinimumTradableRangeRate = (categoryName: string) => (
+  CATEGORY_MINIMUM_TRADABLE_RANGE_RATE[categoryName] ?? 5
+);
+
+const scoreRateByCategory = (rate: number, categoryName: string) => {
+  const categoryReference = getCategoryElasticityReferenceRate(categoryName);
+  const categoryRelativeScore = clampScore((rate / categoryReference) * 100);
+  const absoluteScore = clampScore((rate / ABSOLUTE_ELASTICITY_REFERENCE_RATE) * 100);
+  return clampScore(categoryRelativeScore * 0.4 + absoluteScore * 0.6);
+};
+
+const scoreEffectiveSwingRate = (rate: number, categoryName: string) => (
+  clampScore((rate / getEffectiveSwingTargetRate(categoryName)) * 100)
+);
+
+const median = (values: number[]) => {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((left, right) => left - right);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0
+    ? (sorted[middle - 1] + sorted[middle]) / 2
+    : sorted[middle];
+};
+
+const subtractIsoDays = (isoDate: string, days: number) => {
+  const date = new Date(`${isoDate}T00:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() - days);
+  return date.toISOString().slice(0, 10);
+};
+
+const calculateStrengthStructureMetrics = (prices: number[]) => {
+  if (prices.length < 2) {
+    return {
+      high_zone_occupancy_rate: 0,
+      drawdown_resistance_score: 0
+    };
+  }
+
+  const lowestPrice = Math.min(...prices);
+  const highestPrice = Math.max(...prices);
+  const priceRange = highestPrice - lowestPrice;
+
+  // 完全横盘只能证明稳定，不能证明处于高位，按中性证据处理。
+  if (priceRange <= 0) {
+    return {
+      high_zone_occupancy_rate: 50,
+      drawdown_resistance_score: 50
+    };
+  }
+
+  const highZoneThreshold = lowestPrice + priceRange * 0.7;
+  const highZoneCount = prices.filter(price => price >= highZoneThreshold).length;
+  const highZoneOccupancyRate = highZoneCount / prices.length * 100;
+
+  const peakIndex = prices.indexOf(highestPrice);
+  const pricesAfterPeak = prices.slice(peakIndex);
+  const normalizedPostPeakPositions = pricesAfterPeak.map(price => (
+    (price - lowestPrice) / priceRange * 100
+  ));
+  const averagePostPeakPosition = normalizedPostPeakPositions.reduce((sum, value) => sum + value, 0)
+    / normalizedPostPeakPositions.length;
+  const postPeakHighZoneRate = pricesAfterPeak.filter(price => price >= highZoneThreshold).length
+    / pricesAfterPeak.length * 100;
+  const drawdownResistanceScore = clampScore(
+    averagePostPeakPosition * 0.6 + postPeakHighZoneRate * 0.4
+  );
+
+  return {
+    high_zone_occupancy_rate: highZoneOccupancyRate,
+    drawdown_resistance_score: drawdownResistanceScore
+  };
+};
+
 // 获取价格记录
 const getPriceRecords = async (db: any, period: number | 'all', filters: {
   category_name?: string;
@@ -95,6 +234,176 @@ const calculatePriceChanges = (prices: number[]) => {
     changes.push(change);
   }
   return changes;
+};
+
+const calculateSwingMetrics = (prices: number[], categoryName: string) => {
+  const meaningfulThresholdRate = getMeaningfulSwingThresholdRate(categoryName);
+  const effectiveSwingTargetRate = getEffectiveSwingTargetRate(categoryName);
+  const minimumTradableRangeAmount = getMinimumTradableRangeAmount(categoryName);
+  const minimumTradableRangeRate = getMinimumTradableRangeRate(categoryName);
+  const emptyResult = {
+    swing_run_count: 0,
+    completed_swing_count: 0,
+    direction_change_count: 0,
+    median_up_swing_rate: 0,
+    median_down_swing_rate: 0,
+    effective_swing_amount: 0,
+    effective_swing_rate: 0,
+    two_way_balance_rate: 0,
+    meaningful_swing_threshold_rate: meaningfulThresholdRate,
+    effective_swing_target_rate: effectiveSwingTargetRate,
+    minimum_tradable_range_amount: minimumTradableRangeAmount,
+    minimum_tradable_range_rate: minimumTradableRangeRate,
+    tradable_space_passed: false,
+    tradable_space_hint: '暂无完整跌后反弹，不能形成可做空间。',
+    elasticity_pattern: '无有效跌后反弹'
+  };
+
+  if (prices.length < 2 || prices.some(price => price <= 0)) return emptyResult;
+
+  type Pivot = { index: number; price: number };
+  type Direction = 'up' | 'down';
+  const pivots: Pivot[] = [];
+  let trend: Direction | null = null;
+  let candidateHigh: Pivot = { index: 0, price: prices[0] };
+  let candidateLow: Pivot = { index: 0, price: prices[0] };
+  let extreme: Pivot = { index: 0, price: prices[0] };
+
+  for (let index = 1; index < prices.length; index++) {
+    const current: Pivot = { index, price: prices[index] };
+
+    if (trend === null) {
+      if (current.price > candidateHigh.price) candidateHigh = current;
+      if (current.price < candidateLow.price) candidateLow = current;
+
+      const riseRate = candidateLow.index < candidateHigh.index
+        ? (candidateHigh.price - candidateLow.price) / candidateLow.price * 100
+        : 0;
+      const dropRate = candidateHigh.index < candidateLow.index
+        ? (candidateHigh.price - candidateLow.price) / candidateHigh.price * 100
+        : 0;
+
+      if (riseRate >= meaningfulThresholdRate) {
+        pivots.push(candidateLow);
+        trend = 'up';
+        extreme = candidateHigh;
+      } else if (dropRate >= meaningfulThresholdRate) {
+        pivots.push(candidateHigh);
+        trend = 'down';
+        extreme = candidateLow;
+      }
+      continue;
+    }
+
+    if (trend === 'up') {
+      if (current.price >= extreme.price) {
+        extreme = current;
+        continue;
+      }
+
+      const reversalRate = (extreme.price - current.price) / extreme.price * 100;
+      if (reversalRate >= meaningfulThresholdRate) {
+        pivots.push(extreme);
+        trend = 'down';
+        extreme = current;
+      }
+      continue;
+    }
+
+    if (current.price <= extreme.price) {
+      extreme = current;
+      continue;
+    }
+
+    const reversalRate = (current.price - extreme.price) / extreme.price * 100;
+    if (reversalRate >= meaningfulThresholdRate) {
+      pivots.push(extreme);
+      trend = 'up';
+      extreme = current;
+    }
+  }
+
+  if (trend !== null && pivots[pivots.length - 1]?.index !== extreme.index) {
+    pivots.push(extreme);
+  }
+
+  const legs: Array<{ direction: Direction; amount: number; rate: number }> = [];
+  for (let index = 1; index < pivots.length; index++) {
+    const start = pivots[index - 1];
+    const end = pivots[index];
+    const direction: Direction = end.price > start.price ? 'up' : 'down';
+    const amount = Math.abs(end.price - start.price);
+    const rate = direction === 'up'
+      ? (end.price - start.price) / start.price * 100
+      : (start.price - end.price) / start.price * 100;
+    legs.push({ direction, amount, rate });
+  }
+
+  const cycles: Array<{
+    dropRate: number;
+    reboundRate: number;
+    effectiveAmount: number;
+    effectiveRate: number;
+    balanceRate: number;
+  }> = [];
+  for (let index = 0; index < legs.length - 1; index++) {
+    const dropLeg = legs[index];
+    const reboundLeg = legs[index + 1];
+    if (dropLeg.direction !== 'down' || reboundLeg.direction !== 'up') continue;
+
+    const effectiveAmount = Math.min(dropLeg.amount, reboundLeg.amount);
+    const effectiveRate = Math.min(dropLeg.rate, reboundLeg.rate);
+    const balanceRate = Math.max(dropLeg.rate, reboundLeg.rate) > 0
+      ? effectiveRate / Math.max(dropLeg.rate, reboundLeg.rate) * 100
+      : 0;
+    cycles.push({
+      dropRate: dropLeg.rate,
+      reboundRate: reboundLeg.rate,
+      effectiveAmount,
+      effectiveRate,
+      balanceRate
+    });
+  }
+
+  const completedSwingCount = cycles.length;
+  const effectiveSwingAmount = median(cycles.map(cycle => cycle.effectiveAmount));
+  const effectiveSwingRate = median(cycles.map(cycle => cycle.effectiveRate));
+  const highestPrice = Math.max(...prices);
+  const lowestPrice = Math.min(...prices);
+  const observedRangeAmount = highestPrice - lowestPrice;
+  const observedRangeRate = lowestPrice > 0 ? observedRangeAmount / lowestPrice * 100 : 0;
+  const tradableSpacePassed = completedSwingCount > 0
+    && observedRangeAmount >= minimumTradableRangeAmount
+    && observedRangeRate >= minimumTradableRangeRate;
+  const rangeThresholdText = minimumTradableRangeAmount > 0
+    ? `金额 ¥${minimumTradableRangeAmount.toFixed(2)}、比例 ${minimumTradableRangeRate.toFixed(2)}%`
+    : `金额不限、比例 ${minimumTradableRangeRate.toFixed(2)}%`;
+  const tradableSpaceHint = completedSwingCount === 0
+    ? '暂无完整跌后反弹，不能形成可做空间。'
+    : tradableSpacePassed
+      ? `观察窗口上下限 ¥${observedRangeAmount.toFixed(2)} / ${observedRangeRate.toFixed(2)}%，已达到${categoryName}门槛：${rangeThresholdText}。`
+      : `有往返但上下限空间不足：当前 ¥${observedRangeAmount.toFixed(2)} / ${observedRangeRate.toFixed(2)}%，未同时达到${categoryName}门槛：${rangeThresholdText}。`;
+  return {
+    swing_run_count: legs.length,
+    completed_swing_count: completedSwingCount,
+    direction_change_count: Math.max(0, legs.length - 1),
+    median_up_swing_rate: median(cycles.map(cycle => cycle.reboundRate)),
+    median_down_swing_rate: median(cycles.map(cycle => cycle.dropRate)),
+    effective_swing_amount: effectiveSwingAmount,
+    effective_swing_rate: effectiveSwingRate,
+    two_way_balance_rate: median(cycles.map(cycle => cycle.balanceRate)),
+    meaningful_swing_threshold_rate: meaningfulThresholdRate,
+    effective_swing_target_rate: effectiveSwingTargetRate,
+    minimum_tradable_range_amount: minimumTradableRangeAmount,
+    minimum_tradable_range_rate: minimumTradableRangeRate,
+    tradable_space_passed: tradableSpacePassed,
+    tradable_space_hint: tradableSpaceHint,
+    elasticity_pattern: completedSwingCount === 0
+      ? '无有效跌后反弹'
+      : !tradableSpacePassed
+        ? '有往返但空间不足'
+        : completedSwingCount >= 2 ? '可重复弹性' : '单次跌后反弹'
+  };
 };
 
 // 计算弹性指标（业务定义）
@@ -548,6 +857,197 @@ const calculateHighLowTrends = (prices: number[]) => {
   };
 };
 
+const calculateTrendStrengthScore = (lowTrend: string, highTrend: string) => {
+  const lowUp = lowTrend.includes('抬升');
+  const lowDown = lowTrend.includes('下移');
+  const highUp = highTrend.includes('抬升');
+  const highDown = highTrend.includes('下移');
+
+  if (lowUp && highUp) return 100;
+  if ((lowUp && !highDown) || (highUp && !lowDown)) return 88;
+  if (lowDown && highDown) return 20;
+  if (lowDown || highDown) return 45;
+  return 75;
+};
+
+const calculateDualScores = ({
+  categoryName,
+  recordCount,
+  elasticityRate,
+  elasticityAmount,
+  effectiveSwingRate,
+  completedSwingCount,
+  tradableSpacePassed,
+  twoWayBalanceRate,
+  maxAdjacentChangeAmount,
+  highZoneOccupancyRate,
+  drawdownResistanceScore,
+  hardness,
+  lowTrend,
+  highTrend
+}: {
+  categoryName: string;
+  recordCount: number;
+  elasticityRate: number;
+  elasticityAmount: number;
+  effectiveSwingRate: number;
+  completedSwingCount: number;
+  tradableSpacePassed: boolean;
+  twoWayBalanceRate: number;
+  maxAdjacentChangeAmount: number;
+  highZoneOccupancyRate: number;
+  drawdownResistanceScore: number;
+  hardness: number;
+  lowTrend: string;
+  highTrend: string;
+}) => {
+  const sampleConfidence = clampScore(((recordCount - 1) / 9) * 100);
+  const stabilityScore = clampScore((hardness - 80) * 5);
+  const trendStrengthScore = calculateTrendStrengthScore(lowTrend, highTrend);
+  const strengthScore = clampScore(
+    highZoneOccupancyRate * 0.35
+    + drawdownResistanceScore * 0.25
+    + trendStrengthScore * 0.25
+    + stabilityScore * 0.15
+  );
+
+  const rangeElasticityScore = scoreRateByCategory(elasticityRate, categoryName);
+  const effectiveSwingScore = scoreEffectiveSwingRate(effectiveSwingRate, categoryName);
+  const repeatabilityScore = clampScore((completedSwingCount / 3) * 100);
+  const jumpConcentrationRate = elasticityAmount > 0
+    ? clampScore((maxAdjacentChangeAmount / elasticityAmount) * 100)
+    : 0;
+  const singleJumpPenalty = jumpConcentrationRate > 65
+    ? clampScore(((jumpConcentrationRate - 65) / 35) * 15)
+    : 0;
+  // 重心下移属于风险和动作层，不抹掉真实存在的可重复跌后反弹。
+  const downTrendPenalty = 0;
+  const elasticityCycleCap = completedSwingCount === 0 ? 20 : completedSwingCount === 1 ? 59 : 100;
+  const tradableSpaceCap = completedSwingCount > 0 && !tradableSpacePassed ? 39 : 100;
+  const rawElasticityScore = clampScore(
+    rangeElasticityScore * 0.1
+    + effectiveSwingScore * 0.4
+    + repeatabilityScore * 0.35
+    + twoWayBalanceRate * 0.15
+    - singleJumpPenalty
+  );
+  const elasticityScore = Math.min(rawElasticityScore, elasticityCycleCap, tradableSpaceCap);
+
+  return {
+    strength_score: strengthScore,
+    elasticity_score: elasticityScore,
+    sample_confidence: sampleConfidence,
+    high_zone_occupancy_rate: highZoneOccupancyRate,
+    drawdown_resistance_score: drawdownResistanceScore,
+    stability_score: stabilityScore,
+    trend_strength_score: trendStrengthScore,
+    range_elasticity_score: rangeElasticityScore,
+    effective_swing_score: effectiveSwingScore,
+    repeatability_score: repeatabilityScore,
+    jump_concentration_rate: jumpConcentrationRate,
+    single_jump_penalty: singleJumpPenalty,
+    down_trend_penalty: downTrendPenalty,
+    elasticity_cycle_cap: elasticityCycleCap,
+    tradable_space_cap: tradableSpaceCap,
+    category_elasticity_reference_rate: getCategoryElasticityReferenceRate(categoryName)
+  };
+};
+
+const getStrengthLevel = (score: number, recordCount: number) => {
+  if (recordCount < 4) return '样本不足';
+  return score >= 75 ? '高强度' : score >= 50 ? '中强度' : '低强度';
+};
+
+const getElasticityLevel = (score: number) => (
+  score >= 60 ? '高弹性' : score >= 40 ? '中弹性' : '低弹性'
+);
+
+const buildStrategyAssessment = ({
+  recordCount,
+  strengthScore,
+  elasticityScore,
+  completedSwingCount,
+  tradableSpacePassed,
+  tradableSpaceHint,
+  positionRate,
+  lowTrend,
+  highTrend
+}: {
+  recordCount: number;
+  strengthScore: number;
+  elasticityScore: number;
+  completedSwingCount: number;
+  tradableSpacePassed: boolean;
+  tradableSpaceHint: string;
+  positionRate: number;
+  lowTrend: string;
+  highTrend: string;
+}) => {
+  if (recordCount < 4) {
+    return {
+      strategy_tag: '样本待积累',
+      strategy_hint: '价格记录太少，暂不按强度或弹性安排批量动作。'
+    };
+  }
+
+  if (completedSwingCount > 0 && !tradableSpacePassed) {
+    return {
+      strategy_tag: '低优先级',
+      strategy_hint: `${tradableSpaceHint} 暂不占用批量资金。`
+    };
+  }
+
+  const isDownTrend = lowTrend.includes('下移') && highTrend.includes('下移');
+  if (isDownTrend && positionRate < 40) {
+    return {
+      strategy_tag: elasticityScore >= 60 ? '高弹性阴跌观察' : '单边阴跌排后',
+      strategy_hint: '弹性不能覆盖高低点同步下移，先等止跌和低点不再下移，不接飞刀。'
+    };
+  }
+
+  if (elasticityScore >= 60) {
+    if (positionRate < 40) {
+      return {
+        strategy_tag: '高弹性低位候选',
+        strategy_hint: '具备重复波段空间且当前偏低，可进入批量拿货观察，仍需核对成交和供给。'
+      };
+    }
+    if (positionRate >= 70) {
+      return {
+        strategy_tag: '高弹性高位兑现',
+        strategy_hint: '弹性仍在但当前位置偏高，已有货优先分批兑现，新货不追。'
+      };
+    }
+    return {
+      strategy_tag: '高弹性中位等待',
+      strategy_hint: '波段空间成立，但当前位置不够舒服，等回到低位区再考虑批量拿货。'
+    };
+  }
+
+  if (strengthScore >= 75 && elasticityScore < 40) {
+    return {
+      strategy_tag: '高强度平台差价',
+      strategy_hint: '价格结构稳定、风险相对低，只适合平台活动或渠道价差，利润和规模预期要压低。'
+    };
+  }
+
+  if (elasticityScore >= 40) {
+    return {
+      strategy_tag: positionRate < 40 ? '中弹性低位观察' : '中弹性继续观察',
+      strategy_hint: positionRate < 40
+        ? '位置开始接近低位，但弹性证据还不够强，先小样本观察。'
+        : '有一定波动空间，等待更低位置或更多完整波段样本。'
+    };
+  }
+
+  return {
+    strategy_tag: strengthScore >= 75 ? '高强度低弹性' : '低优先级',
+    strategy_hint: strengthScore >= 75
+      ? '结构稳定但波段空间不足，除平台差价外不作为批量拿货重点。'
+      : '强度和弹性都不足，暂不进入重点观察。'
+  };
+};
+
 // 弹性/硬度分析接口
 router.get('/', async (req, res) => {
   try {
@@ -579,12 +1079,26 @@ router.get('/', async (req, res) => {
       variant_name: variant_name as string
     });
 
+    const allRecords = Object.values(groupedRecords).flat();
+    const analysisEndDate = allRecords.reduce((latest: string, record: any) => (
+      !latest || record.date > latest ? record.date : latest
+    ), '');
+    const elasticityScoringWindowDays = periodValue === 'all'
+      ? 30
+      : Math.max(1, Math.min(periodValue, 30));
+    const elasticityScoringStartDate = analysisEndDate
+      ? subtractIsoDays(analysisEndDate, elasticityScoringWindowDays - 1)
+      : '';
+
     // 计算分析数据
     const results: any[] = [];
     
     for (const key of Object.keys(groupedRecords)) {
       const records = groupedRecords[key];
       const target = records[0];
+      const elasticityWindowRecords = elasticityScoringStartDate
+        ? records.filter((record: any) => record.date >= elasticityScoringStartDate && record.date <= analysisEndDate)
+        : [];
       
       if (records.length < 2) {
         // 记录不足的情况
@@ -602,6 +1116,10 @@ router.get('/', async (req, res) => {
           highest_date: target.date,
           lowest_date: target.date,
           record_count: records.length,
+          elasticity_window_days: elasticityScoringWindowDays,
+          elasticity_window_record_count: elasticityWindowRecords.length,
+          elasticity_window_start_date: elasticityScoringStartDate || null,
+          elasticity_window_end_date: analysisEndDate || null,
           
           // 区间涨跌
           range_change_amount: 0,
@@ -667,9 +1185,45 @@ router.get('/', async (req, res) => {
           // 系统标签
           analysis_tag: '数据不足',
           action_hint: '历史价格记录不足，暂无法判断弹性',
+          strategy_tag: '样本待积累',
+          strategy_hint: '价格记录太少，暂不按强度或弹性安排批量动作。',
           
-          // 综合得分
+          // 双层评分
           score: 0,
+          strength_score: 0,
+          elasticity_score: 0,
+          strength_level: '未评分',
+          elasticity_level: '未评分',
+          effective_swing_amount: 0,
+          effective_swing_rate: 0,
+          swing_run_count: 0,
+          completed_swing_count: 0,
+          direction_change_count: 0,
+          median_up_swing_rate: 0,
+          median_down_swing_rate: 0,
+          two_way_balance_rate: 0,
+          meaningful_swing_threshold_rate: getMeaningfulSwingThresholdRate(target.category_name),
+          effective_swing_target_rate: getEffectiveSwingTargetRate(target.category_name),
+          minimum_tradable_range_amount: getMinimumTradableRangeAmount(target.category_name),
+          minimum_tradable_range_rate: getMinimumTradableRangeRate(target.category_name),
+          tradable_space_passed: false,
+          tradable_space_hint: '暂无完整跌后反弹，不能形成可做空间。',
+          elasticity_pattern: '样本不足',
+          sample_confidence: 0,
+          high_zone_occupancy_rate: 0,
+          drawdown_resistance_score: 0,
+          stability_score: 0,
+          trend_strength_score: 0,
+          range_elasticity_score: 0,
+          effective_swing_score: 0,
+          repeatability_score: 0,
+          jump_concentration_rate: 0,
+          single_jump_penalty: 0,
+          down_trend_penalty: 0,
+          elasticity_cycle_cap: 0,
+          tradable_space_cap: 0,
+          category_elasticity_reference_rate: getCategoryElasticityReferenceRate(target.category_name),
+          score_model_version: DUAL_SCORE_MODEL_VERSION,
           rank_in_group: 1,
           
           // 硬度指标
@@ -681,6 +1235,8 @@ router.get('/', async (req, res) => {
       const prices = records.map(record => record.price);
       const dates = records.map(record => record.date);
       const changes = calculatePriceChanges(prices);
+      const elasticityWindowPrices = elasticityWindowRecords.map((record: any) => record.price);
+      const elasticityWindowDates = elasticityWindowRecords.map((record: any) => record.date);
 
       // 计算各种指标
       const currentPrice = prices[prices.length - 1];
@@ -697,7 +1253,11 @@ router.get('/', async (req, res) => {
       const rangeChangeRate = startPrice > 0 ? (rangeChangeAmount / startPrice) * 100 : 0;
       
       // 弹性指标
-      const elasticity = calculateElasticity(prices);
+      const elasticity = calculateElasticity(elasticityWindowPrices);
+      const swingMetrics = calculateSwingMetrics(elasticityWindowPrices, target.category_name);
+      const elasticityPriceDifferences = calculatePriceDifferences(elasticityWindowPrices, elasticityWindowDates);
+      const strengthStructureMetrics = calculateStrengthStructureMetrics(prices);
+      const hardness = calculateHardness(prices);
       
       // 位置率
       const positionRate = calculatePositionRate(prices);
@@ -726,6 +1286,34 @@ router.get('/', async (req, res) => {
       
       // 高点低点趋势
       const highLowTrends = calculateHighLowTrends(prices);
+
+      const dualScores = calculateDualScores({
+        categoryName: target.category_name,
+        recordCount: elasticityWindowRecords.length,
+        elasticityRate: elasticity.elasticity_rate,
+        elasticityAmount: elasticity.elasticity_amount,
+        effectiveSwingRate: swingMetrics.effective_swing_rate,
+        completedSwingCount: swingMetrics.completed_swing_count,
+        tradableSpacePassed: swingMetrics.tradable_space_passed,
+        twoWayBalanceRate: swingMetrics.two_way_balance_rate,
+        maxAdjacentChangeAmount: elasticityPriceDifferences.max_adjacent_change_amount,
+        highZoneOccupancyRate: strengthStructureMetrics.high_zone_occupancy_rate,
+        drawdownResistanceScore: strengthStructureMetrics.drawdown_resistance_score,
+        hardness,
+        lowTrend: highLowTrends.low_trend,
+        highTrend: highLowTrends.high_trend
+      });
+      const strategyAssessment = buildStrategyAssessment({
+        recordCount: elasticityWindowRecords.length,
+        strengthScore: dualScores.strength_score,
+        elasticityScore: dualScores.elasticity_score,
+        completedSwingCount: swingMetrics.completed_swing_count,
+        tradableSpacePassed: swingMetrics.tradable_space_passed,
+        tradableSpaceHint: swingMetrics.tradable_space_hint,
+        positionRate,
+        lowTrend: highLowTrends.low_trend,
+        highTrend: highLowTrends.high_trend
+      });
       
       // 价格位置分档
       let positionLevel = '中位';
@@ -772,15 +1360,6 @@ router.get('/', async (req, res) => {
         actionHint = '价格波动空间较小，弹性不足，暂不适合作为波段重点。';
       }
       
-      // 计算综合得分
-      const score = (
-        highHoldRate * 0.35 +
-        repairRate * 0.25 +
-        positionRate * 0.2 +
-        elasticity.elasticity_rate * 0.1 -
-        postPeakDrawdownRate * 0.2
-      );
-      
       results.push({
         // 基础字段
         category_name: target.category_name,
@@ -795,6 +1374,10 @@ router.get('/', async (req, res) => {
         highest_date: highestDate,
         lowest_date: lowestDate,
         record_count: records.length,
+        elasticity_window_days: elasticityScoringWindowDays,
+        elasticity_window_record_count: elasticityWindowRecords.length,
+        elasticity_window_start_date: elasticityScoringStartDate || null,
+        elasticity_window_end_date: analysisEndDate || null,
         
         // 区间涨跌
         range_change_amount: rangeChangeAmount,
@@ -859,14 +1442,51 @@ router.get('/', async (req, res) => {
         
         // 系统标签
         analysis_tag: analysisTag,
-        action_hint: actionHint,
+        action_hint: strategyAssessment.strategy_hint,
+        structure_action_hint: actionHint,
+        strategy_tag: strategyAssessment.strategy_tag,
+        strategy_hint: strategyAssessment.strategy_hint,
         
-        // 综合得分
-        score: parseFloat(score.toFixed(2)),
+        // 双层评分；score 保留为弹性分别名，兼容旧调用方
+        score: parseFloat(dualScores.elasticity_score.toFixed(2)),
+        strength_score: parseFloat(dualScores.strength_score.toFixed(2)),
+        elasticity_score: parseFloat(dualScores.elasticity_score.toFixed(2)),
+        strength_level: getStrengthLevel(dualScores.strength_score, records.length),
+        elasticity_level: getElasticityLevel(dualScores.elasticity_score),
+        effective_swing_amount: parseFloat(swingMetrics.effective_swing_amount.toFixed(2)),
+        effective_swing_rate: parseFloat(swingMetrics.effective_swing_rate.toFixed(2)),
+        swing_run_count: swingMetrics.swing_run_count,
+        completed_swing_count: swingMetrics.completed_swing_count,
+        direction_change_count: swingMetrics.direction_change_count,
+        median_up_swing_rate: parseFloat(swingMetrics.median_up_swing_rate.toFixed(2)),
+        median_down_swing_rate: parseFloat(swingMetrics.median_down_swing_rate.toFixed(2)),
+        two_way_balance_rate: parseFloat(swingMetrics.two_way_balance_rate.toFixed(2)),
+        meaningful_swing_threshold_rate: swingMetrics.meaningful_swing_threshold_rate,
+        effective_swing_target_rate: swingMetrics.effective_swing_target_rate,
+        minimum_tradable_range_amount: swingMetrics.minimum_tradable_range_amount,
+        minimum_tradable_range_rate: swingMetrics.minimum_tradable_range_rate,
+        tradable_space_passed: swingMetrics.tradable_space_passed,
+        tradable_space_hint: swingMetrics.tradable_space_hint,
+        elasticity_pattern: swingMetrics.elasticity_pattern,
+        sample_confidence: parseFloat(dualScores.sample_confidence.toFixed(2)),
+        high_zone_occupancy_rate: parseFloat(dualScores.high_zone_occupancy_rate.toFixed(2)),
+        drawdown_resistance_score: parseFloat(dualScores.drawdown_resistance_score.toFixed(2)),
+        stability_score: parseFloat(dualScores.stability_score.toFixed(2)),
+        trend_strength_score: parseFloat(dualScores.trend_strength_score.toFixed(2)),
+        range_elasticity_score: parseFloat(dualScores.range_elasticity_score.toFixed(2)),
+        effective_swing_score: parseFloat(dualScores.effective_swing_score.toFixed(2)),
+        repeatability_score: parseFloat(dualScores.repeatability_score.toFixed(2)),
+        jump_concentration_rate: parseFloat(dualScores.jump_concentration_rate.toFixed(2)),
+        single_jump_penalty: parseFloat(dualScores.single_jump_penalty.toFixed(2)),
+        down_trend_penalty: parseFloat(dualScores.down_trend_penalty.toFixed(2)),
+        elasticity_cycle_cap: dualScores.elasticity_cycle_cap,
+        tradable_space_cap: dualScores.tradable_space_cap,
+        category_elasticity_reference_rate: dualScores.category_elasticity_reference_rate,
+        score_model_version: DUAL_SCORE_MODEL_VERSION,
         rank_in_group: 1,
         
         // 硬度指标
-        hardness: parseFloat(calculateHardness(prices).toFixed(2))
+        hardness: parseFloat(hardness.toFixed(2))
       });
     }
 
@@ -880,11 +1500,10 @@ router.get('/', async (req, res) => {
       objectGroups[objectKey].push(item);
     });
     
-    // 对每个组内的变体按 score 排序并计算排名
+    // 对每个组内的变体按弹性分排序并计算排名
     let finalResults: any[] = [];
     Object.values(objectGroups).forEach(group => {
-      // 按 score 降序排序
-      group.sort((a, b) => b.score - a.score);
+      group.sort((a, b) => b.elasticity_score - a.elasticity_score);
       // 设置排名
       group.forEach((item, index) => {
         item.rank_in_group = index + 1;
@@ -894,17 +1513,25 @@ router.get('/', async (req, res) => {
     
     // 如果是变体对比模式，保持按对象分组的顺序
     if (compare_mode !== 'variant') {
-      // 非变体对比模式，按 score 全局排序
-      finalResults.sort((a, b) => b.score - a.score);
+      finalResults.sort((a, b) => b.elasticity_score - a.elasticity_score);
     }
 
     res.json({
       status: "success",
-      data: finalResults
+      data: finalResults,
+      meta: {
+        score_model_version: DUAL_SCORE_MODEL_VERSION,
+        strength_judges: '周期内高位停留、冲高后回撤抵抗、高低点结构和稳定性；样本量只决定可信度，不参与加分。',
+        elasticity_judges: '先识别跌下来后又弹上去的完整波段，再按品类同时核对观察窗口上下限金额和比例；可做空间不足时弹性分封顶 39。零次不能算高弹性，一次最多中弹性。',
+        position_affects_action: '低位用于拿货观察，中位等待，高位兑现或不追。',
+        elasticity_scoring_window_days: elasticityScoringWindowDays,
+        elasticity_scoring_start_date: elasticityScoringStartDate || null,
+        elasticity_scoring_end_date: analysisEndDate || null
+      }
     });
   } catch (error) {
     console.error('elasticity-analysis error:', error);
-    const errorMessage = error instanceof Error ? error.message : '弹性/硬度分析失败';
+    const errorMessage = error instanceof Error ? error.message : '强度/弹性分析失败';
     res.status(500).json({ 
       status: "error", 
       message: errorMessage 
