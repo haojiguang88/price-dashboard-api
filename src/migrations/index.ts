@@ -5391,6 +5391,19 @@ const migrations: Migration[] = [
         }
       }
     }
+  },
+  {
+    id: '20260714_001_add_variant_xianyu_heat',
+    name: 'Add manual Xianyu heat level to variants',
+    run: async (db: any) => {
+      await ensureMigrationColumn(
+        db,
+        'variants',
+        'xianyu_heat_level',
+        "TEXT NOT NULL DEFAULT 'none' CHECK (xianyu_heat_level IN ('none', 'low', 'medium', 'high', 'very_high'))"
+      );
+      await ensureMigrationColumn(db, 'variants', 'xianyu_heat_updated_at', 'TEXT');
+    }
   }
 
 ];
@@ -5474,6 +5487,10 @@ async function ensureMigrationColumn(db: any, tableName: string, column: string,
     await dbExec(db, `ALTER TABLE ${quoteMigrationIdentifier(tableName)} ADD COLUMN ${quoteMigrationIdentifier(column)} ${definition}`);
   }
 }
+
+export const getMigrationManifest = () => migrations.map(({ id, name }) => ({ id, name }));
+
+export const getExpectedMigrationIds = () => migrations.map(migration => migration.id);
 
 // 执行迁移
 export async function runMigrations(dbPath: string): Promise<void> {

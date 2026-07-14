@@ -5,6 +5,7 @@ import {
   countMasterDataReferences,
   formatReferenceBlockMessage
 } from "../utils/masterData";
+import { parseVariantXianyuHeatLevel } from "../utils/variantHeat";
 
 const router = express.Router();
 
@@ -313,6 +314,8 @@ router.get("/variants", async (req, res) => {
       : `WHERE ${archiveField("v")} = 0 AND ${archiveField("o")} = 0 AND ${archiveField("c")} = 0`;
     const variants = await db.all(`
       SELECT v.id, v.object_id, v.name, COALESCE(v.note, '') AS note,
+        COALESCE(v.xianyu_heat_level, 'none') AS xianyu_heat_level,
+        v.xianyu_heat_updated_at,
         o.name AS object_name, o.category_id, c.name AS category_name,
         COALESCE(v.is_archived, 0) AS is_archived, v.archived_at,
         COALESCE(o.is_archived, 0) AS object_is_archived,
@@ -382,6 +385,54 @@ router.patch("/variants/:id/note", async (req, res) => {
     res.json({ success: true, data: { message: "保存备注成功", updated_at: now } });
   } catch (error) {
     res.status(500).json({ success: false, message: "保存变体备注失败" });
+  }
+});
+
+router.patch("/variants/:id/xianyu-heat", async (req, res) => {
+  try {
+    const db = await getDb();
+    const { id } = req.params;
+    const heatLevel = parseVariantXianyuHeatLevel(req.body?.level);
+    if (!heatLevel) {
+      return res.status(400).json({ success: false, message: "闲鱼热度等级无效" });
+    }
+
+    const existingVariant = await db.get(`
+      SELECT v.id
+      FROM variants v
+      JOIN objects o ON v.object_id = o.id
+      JOIN categories c ON o.category_id = c.id
+      WHERE v.id = ?
+        AND COALESCE(v.is_archived, 0) = 0
+        AND COALESCE(o.is_archived, 0) = 0
+        AND COALESCE(c.is_archived, 0) = 0
+    `, [id]);
+    if (!existingVariant) {
+      return res.status(404).json({ success: false, message: "变体不存在或已归档" });
+    }
+
+    const now = new Date().toISOString();
+    const result = await db.run(
+      `UPDATE variants
+       SET xianyu_heat_level = ?, xianyu_heat_updated_at = ?, updated_at = ?
+       WHERE id = ?`,
+      [heatLevel, now, now, id]
+    );
+    if (result.changes === 0) {
+      return res.status(404).json({ success: false, message: "变体不存在" });
+    }
+
+    res.json({
+      success: true,
+      data: {
+        xianyu_heat_level: heatLevel,
+        xianyu_heat_updated_at: now,
+        updated_at: now,
+        message: heatLevel === "none" ? "闲鱼热度已清空" : "闲鱼热度已更新"
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: "保存闲鱼热度失败" });
   }
 });
 

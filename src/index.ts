@@ -3,121 +3,170 @@ dotenv.config();
 
 import express from "express";
 import cors from "cors";
-import getDb, { getDatabasePath } from "./config/database";
-import { runMigrations } from "./migrations";
+import getDb, { getDatabasePath, getDatabasePolicy } from "./config/database";
+import { verifyBusinessDatabaseReadiness, type DatabaseReadinessReport } from "./config/databaseValidation";
+import {
+  applyServerSecurity,
+  createRemoteAuthenticationMiddleware,
+  isLoopbackHost,
+  resolveAllowedCorsOrigins,
+  resolveServerSecurityConfig
+} from "./config/serverSecurity";
+import { getExpectedMigrationIds, runMigrations } from "./migrations";
 import { cleanupTaskCenterStartupState, startTaskCenterScheduler } from "./services/taskCenterScheduler";
 import { registerApiRoutes } from "./routes/apiRouteRegistry";
+import { requestDatabaseContextMiddleware } from "./middleware/databaseContext";
+import {
+  createProductionJsonSanitizer,
+  jsonErrorHandler,
+  jsonNotFoundHandler,
+  requestIdMiddleware
+} from "./middleware/errorHandling";
+
+const appWorkspace = "business";
+const securityConfig = resolveServerSecurityConfig();
+const isProduction = securityConfig.nodeEnv === "production";
+
+if (process.env.APP_WORKSPACE && process.env.APP_WORKSPACE !== appWorkspace) {
+  throw new Error("APP_WORKSPACE must be business for the business API");
+}
 
 const app = express();
-const appWorkspace = "business";
-const port = process.env.PORT || 3001;
+app.disable("x-powered-by");
+applyServerSecurity(app, securityConfig);
+
 let databaseReady = false;
+let databaseReadiness: DatabaseReadinessReport | null = null;
 
 const getStorageLocation = (dbPath: string) => (
   dbPath.startsWith(process.cwd()) ? "project_data" : "custom_path"
 );
 
-// 配置 CORS
 const configuredCorsOrigins = String(process.env.CORS_ORIGINS || "")
   .split(",")
   .map(origin => origin.trim())
   .filter(Boolean);
 
-const allowedCorsOrigins = new Set([
-  "http://localhost:5173",
-  "http://127.0.0.1:5173",
-  "http://[::1]:5173",
-  ...configuredCorsOrigins
-]);
+const allowedCorsOrigins = resolveAllowedCorsOrigins(securityConfig, configuredCorsOrigins);
 
 const isLoopbackOrigin = (origin: string) => {
   try {
     const { hostname, protocol } = new URL(origin);
-    const normalizedHost = hostname.replace(/^\[|\]$/g, "");
-    return ["http:", "https:"].includes(protocol)
-      && ["localhost", "127.0.0.1", "::1"].includes(normalizedHost);
+    return ["http:", "https:"].includes(protocol) && isLoopbackHost(hostname);
   } catch {
     return false;
   }
 };
 
-const allowLoopbackCors = process.env.NODE_ENV !== "production";
+const allowLoopbackCors = !isProduction;
 
+app.use(requestIdMiddleware);
+app.use(createProductionJsonSanitizer(isProduction));
 app.use(cors({
   origin(origin, callback) {
     if (!origin || allowedCorsOrigins.has(origin) || (allowLoopbackCors && isLoopbackOrigin(origin))) {
       callback(null, true);
       return;
     }
-    callback(new Error(`CORS origin not allowed: ${origin}`));
+    const error = new Error("CORS origin not allowed");
+    (error as Error & { status?: number }).status = 403;
+    callback(error);
   }
 }));
-
 app.use(express.json({ limit: "20mb" }));
-registerApiRoutes(app);
+app.use(requestDatabaseContextMiddleware);
+app.use(createRemoteAuthenticationMiddleware(securityConfig));
 
-app.get("/db-test", async (req, res) => {
-  try {
-    const db = await getDb();
-    const result = await db.get("SELECT 1 + 1 as result");
-    res.json({ status: "success", message: "Database connection established", result: result });
-  } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    res.status(500).json({ status: "error", message: "Database connection failed", error: errorMessage });
-  }
+if (!isProduction) {
+  app.get("/db-test", async (_req, res, next) => {
+    try {
+      const db = await getDb();
+      const result = await db.get("SELECT 1 + 1 as result");
+      res.json({ status: "success", message: "Database connection established", result });
+    } catch (error) {
+      next(error);
+    }
+  });
+}
+
+app.get("/", (_req, res) => {
+  res.json({
+    message: "Price Dashboard API",
+    status: "running",
+    version: "1.0.0",
+    app_workspace: appWorkspace,
+    deployment_mode: securityConfig.deploymentMode
+  });
 });
 
-app.get("/", (req, res) => {
-  res.json({ message: "Price Dashboard API", status: "running", version: "1.0.0", app_workspace: appWorkspace });
-});
-
-app.get("/health", async (req, res) => {
-  const dbPath = getDatabasePath();
+app.get("/health", async (_req, res) => {
   try {
     const db = await getDb();
     await db.get("SELECT 1 as ok");
-    res.json({
+    const response: Record<string, unknown> = {
       status: databaseReady ? "healthy" : "starting",
       app_workspace: appWorkspace,
-      db_path: dbPath,
-      storage_location: getStorageLocation(dbPath),
-      database_ready: databaseReady
-    });
-  } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    res.status(500).json({
+      database_ready: databaseReady,
+      database_identity: databaseReadiness?.identity || null,
+      migration_count: databaseReadiness?.migrationCount || 0,
+      latest_migration_id: databaseReadiness?.latestMigrationId || null,
+      required_tables_ready: Boolean(databaseReadiness)
+    };
+    if (!isProduction) {
+      const dbPath = getDatabasePath();
+      response.db_path = dbPath;
+      response.storage_location = getStorageLocation(dbPath);
+    }
+    res.status(databaseReady ? 200 : 503).json(response);
+  } catch {
+    res.status(503).json({
       status: "unhealthy",
+      code: "database_unavailable",
       app_workspace: appWorkspace,
-      db_path: dbPath,
-      storage_location: getStorageLocation(dbPath),
-      database_ready: false,
-      error: errorMessage
+      database_ready: false
     });
   }
 });
 
-// 初始化数据库连接
+registerApiRoutes(app);
+app.use(jsonNotFoundHandler);
+app.use(jsonErrorHandler);
+
 const initDatabase = async () => {
   databaseReady = false;
+  const databasePolicy = getDatabasePolicy();
   await getDb();
-  console.log("Database initialized successfully");
+  console.log("Database initialized successfully", {
+    storageLocation: getStorageLocation(databasePolicy.filename),
+    allowCreate: databasePolicy.allowCreate
+  });
 
-  // 执行迁移
-  const dbPath = getDatabasePath();
-  await runMigrations(dbPath);
-  console.log("Migrations executed successfully");
+  await runMigrations(databasePolicy.filename);
+  databaseReadiness = await verifyBusinessDatabaseReadiness(
+    databasePolicy.filename,
+    getExpectedMigrationIds()
+  );
+  console.log("Database readiness verified", databaseReadiness);
+
   await cleanupTaskCenterStartupState();
   databaseReady = true;
 };
 
-// 启动服务器
 initDatabase().then(() => {
-  app.listen(port, () => {
-    console.log(`Server running on port ${port}`);
+  app.listen(securityConfig.port, securityConfig.host, () => {
+    console.log("Server started", {
+      host: securityConfig.host,
+      port: securityConfig.port,
+      deploymentMode: securityConfig.deploymentMode,
+      authMode: securityConfig.authMode
+    });
+    if (!isProduction && !isLoopbackHost(securityConfig.host)) {
+      console.warn("Development API is explicitly bound to a non-loopback HOST");
+    }
     startTaskCenterScheduler();
   });
 }).catch((error) => {
-  const errorMessage = error instanceof Error ? error.message : String(error);
-  console.error("Failed to initialize database:", errorMessage);
+  const errorMessage = error instanceof Error ? error.message : "Unknown startup error";
+  console.error("Failed to initialize business API:", errorMessage);
   process.exit(1);
 });

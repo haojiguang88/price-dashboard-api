@@ -1,33 +1,20 @@
 import sqlite3 from "sqlite3";
 import { open, Database } from "sqlite";
-import fs from "fs";
-import path from "path";
-
-const DEFAULT_BUSINESS_DATABASE_PATH = path.resolve(process.cwd(), "data", "price_dashboard_business.db");
-
-const resolveDatabasePath = (value?: string) => {
-  const configuredPath = value?.trim() || DEFAULT_BUSINESS_DATABASE_PATH;
-  return path.isAbsolute(configuredPath)
-    ? configuredPath
-    : path.resolve(process.cwd(), configuredPath);
-};
-
-export const getDatabasePath = () => resolveDatabasePath(process.env.BUSINESS_DB_PATH);
-
-const dbPath = getDatabasePath();
-
-console.log(`Database path: ${dbPath}`);
-
-const ensureDatabaseDirectory = (filename: string) => {
-  const directory = path.dirname(filename);
-  if (!fs.existsSync(directory)) {
-    fs.mkdirSync(directory, { recursive: true });
-  }
-};
+import { AsyncLocalStorage } from "async_hooks";
+import {
+  resolveDatabaseFilePolicy,
+  validateDatabaseFilePolicy,
+  type DatabaseFilePolicy
+} from "./databasePolicy";
+import {
+  ensureBusinessDatabaseMetadata,
+  validateExistingBusinessDatabase
+} from "./databaseValidation";
 
 // 初始化数据库表结构
 const initDatabase = async (db: Database) => {
   await db.exec("PRAGMA foreign_keys = ON;");
+  await ensureBusinessDatabaseMetadata(db);
 
   const ensureColumn = async (tableName: string, columnName: string, definition: string) => {
     const columns = await db.all(`PRAGMA table_info(${tableName})`);
@@ -58,7 +45,13 @@ const initDatabase = async (db: Database) => {
   await ensureColumn("objects", "archived_at", "TEXT");
   await ensureColumn("variants", "is_archived", "INTEGER NOT NULL DEFAULT 0");
   await ensureColumn("variants", "archived_at", "TEXT");
-  await ensureColumn("variants", "note", "TEXT");
+	  await ensureColumn("variants", "note", "TEXT");
+	  await ensureColumn(
+	    "variants",
+	    "xianyu_heat_level",
+	    "TEXT NOT NULL DEFAULT 'none' CHECK (xianyu_heat_level IN ('none', 'low', 'medium', 'high', 'very_high'))"
+	  );
+	  await ensureColumn("variants", "xianyu_heat_updated_at", "TEXT");
   await ensureColumn("category_profiles", "object_name", "TEXT");
   await ensureColumn("category_profiles", "variant_name", "TEXT");
   await ensureColumn("buying_plans", "batches", "TEXT");
@@ -172,36 +165,206 @@ const initDatabase = async (db: Database) => {
   console.log("Record tables will be created via migrations");
 };
 
-// 首次初始化
-let initialized = false;
-let dbPromise: Promise<Database> | null = null;
+export const initializeBusinessBaseSchema = initDatabase;
 
-const getDb = async () => {
-  if (dbPromise) {
-    return dbPromise;
+export interface RequestDatabaseContext {
+  connectionPromise: Promise<Database> | null;
+  closed: boolean;
+}
+
+export interface DatabaseManagerOptions {
+  filename: string;
+  allowCreate: boolean;
+  initialize?: (db: Database) => Promise<void>;
+}
+
+export class DatabaseManager {
+  private readonly filename: string;
+  private readonly allowCreate: boolean;
+  private readonly initialize?: (db: Database) => Promise<void>;
+  private readonly requestStorage = new AsyncLocalStorage<RequestDatabaseContext>();
+  private baseConnectionPromise: Promise<Database> | null = null;
+  private initialized = false;
+
+  constructor(options: DatabaseManagerOptions) {
+    this.filename = options.filename;
+    this.allowCreate = options.allowCreate;
+    this.initialize = options.initialize;
   }
 
-  dbPromise = (async () => {
-    ensureDatabaseDirectory(dbPath);
-    const db = await open({ filename: dbPath, driver: sqlite3.Database, mode: sqlite3.OPEN_READWRITE | sqlite3.OPEN_CREATE });
+  private async openConnection(allowCreate: boolean) {
+    const mode = sqlite3.OPEN_READWRITE | (allowCreate ? sqlite3.OPEN_CREATE : 0);
+    const db = await open({ filename: this.filename, driver: sqlite3.Database, mode });
     await db.exec("PRAGMA busy_timeout = 60000;");
-    await db.exec("PRAGMA journal_mode = WAL;");
+    await db.exec("PRAGMA foreign_keys = ON;");
     await db.exec("PRAGMA synchronous = NORMAL;");
-  
-    if (!initialized) {
-      await initDatabase(db);
-      initialized = true;
-    } else {
-      await db.exec("PRAGMA foreign_keys = ON;");
-    }
-  
     return db;
+  }
+
+  private async getBaseConnection() {
+    if (this.baseConnectionPromise) return this.baseConnectionPromise;
+
+    this.baseConnectionPromise = (async () => {
+      const db = await this.openConnection(this.allowCreate);
+      try {
+        await db.exec("PRAGMA journal_mode = WAL;");
+        if (!this.initialized && this.initialize) {
+          await this.initialize(db);
+          this.initialized = true;
+        }
+        return db;
+      } catch (error) {
+        await db.close().catch(() => undefined);
+        throw error;
+      }
+    })().catch((error) => {
+      this.baseConnectionPromise = null;
+      throw error;
+    });
+
+    return this.baseConnectionPromise;
+  }
+
+  async getDb() {
+    const requestContext = this.requestStorage.getStore();
+    if (!requestContext) return this.getBaseConnection();
+    if (requestContext.closed) throw new Error("Request database context is already closed");
+
+    await this.getBaseConnection();
+    if (!requestContext.connectionPromise) {
+      requestContext.connectionPromise = this.openConnection(false);
+    }
+    return requestContext.connectionPromise;
+  }
+
+  createRequestContext(): RequestDatabaseContext {
+    return { connectionPromise: null, closed: false };
+  }
+
+  runWithRequestContext<T>(context: RequestDatabaseContext, callback: () => T): T {
+    return this.requestStorage.run(context, callback);
+  }
+
+  async closeRequestContext(context: RequestDatabaseContext) {
+    if (context.closed) return;
+    context.closed = true;
+    if (!context.connectionPromise) return;
+    const db = await context.connectionPromise;
+    await db.close();
+  }
+
+  async runInRequestContext<T>(callback: () => Promise<T>): Promise<T> {
+    const context = this.createRequestContext();
+    return this.runWithRequestContext(context, async () => {
+      try {
+        return await callback();
+      } finally {
+        await this.closeRequestContext(context);
+      }
+    });
+  }
+
+  async withTransaction<T>(
+    callback: (db: Database) => Promise<T>,
+    mode: "DEFERRED" | "IMMEDIATE" | "EXCLUSIVE" = "IMMEDIATE"
+  ): Promise<T> {
+    await this.getBaseConnection();
+    const db = await this.openConnection(false);
+    let transactionStarted = false;
+    try {
+      await db.exec(`BEGIN ${mode} TRANSACTION`);
+      transactionStarted = true;
+      const result = await callback(db);
+      await db.exec("COMMIT");
+      transactionStarted = false;
+      return result;
+    } catch (error) {
+      if (transactionStarted) {
+        await db.exec("ROLLBACK").catch(() => undefined);
+      }
+      throw error;
+    } finally {
+      await db.close();
+    }
+  }
+
+  async close() {
+    if (!this.baseConnectionPromise) return;
+    const db = await this.baseConnectionPromise;
+    this.baseConnectionPromise = null;
+    this.initialized = false;
+    await db.close();
+  }
+}
+
+let defaultPolicy: DatabaseFilePolicy | null = null;
+let defaultManager: DatabaseManager | null = null;
+let defaultPreflightPromise: Promise<void> | null = null;
+
+const getDefaultPolicy = () => {
+  if (!defaultPolicy) defaultPolicy = resolveDatabaseFilePolicy();
+  return defaultPolicy;
+};
+
+const getDefaultManager = () => {
+  if (!defaultManager) {
+    const policy = getDefaultPolicy();
+    defaultManager = new DatabaseManager({
+      filename: policy.filename,
+      allowCreate: policy.allowCreate,
+      initialize: initDatabase
+    });
+  }
+  return defaultManager;
+};
+
+const ensureDefaultDatabasePreflight = async () => {
+  if (defaultPreflightPromise) return defaultPreflightPromise;
+  defaultPreflightPromise = (async () => {
+    const policy = getDefaultPolicy();
+    const fileState = validateDatabaseFilePolicy(policy);
+    if (fileState.exists) {
+      await validateExistingBusinessDatabase(policy.filename, {
+        allowEmpty: policy.allowCreate && fileState.isEmpty
+      });
+    }
   })().catch((error) => {
-    dbPromise = null;
+    defaultPreflightPromise = null;
     throw error;
   });
+  return defaultPreflightPromise;
+};
 
-  return dbPromise;
+export const getDatabasePath = () => getDefaultPolicy().filename;
+
+export const getDatabasePolicy = () => ({ ...getDefaultPolicy() });
+
+const getDb = async () => {
+  await ensureDefaultDatabasePreflight();
+  return getDefaultManager().getDb();
+};
+
+export const createRequestDatabaseContext = () => getDefaultManager().createRequestContext();
+
+export const runWithRequestDatabaseContext = <T>(context: RequestDatabaseContext, callback: () => T) => (
+  getDefaultManager().runWithRequestContext(context, callback)
+);
+
+export const closeRequestDatabaseContext = (context: RequestDatabaseContext) => (
+  getDefaultManager().closeRequestContext(context)
+);
+
+export const withTransaction = async <T>(
+  callback: (db: Database) => Promise<T>,
+  mode: "DEFERRED" | "IMMEDIATE" | "EXCLUSIVE" = "IMMEDIATE"
+) => {
+  await ensureDefaultDatabasePreflight();
+  return getDefaultManager().withTransaction(callback, mode);
+};
+
+export const closeDatabase = async () => {
+  if (!defaultManager) return;
+  await defaultManager.close();
 };
 
 export default getDb;

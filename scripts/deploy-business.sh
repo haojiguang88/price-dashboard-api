@@ -6,8 +6,10 @@ API="${API:-/www/wwwroot/price-dashboard-api}"
 DB="${DB:-$API/db/price_dashboard_prod.db}"
 BACKUP_DIR="${BACKUP_DIR:-$API/backups}"
 PY="${PY:-$API/.venv/bin/python}"
-PUBLIC_API="${PUBLIC_API:-http://192.144.167.124/api}"
-CORS_ORIGINS="${CORS_ORIGINS:-http://192.144.167.124}"
+PUBLIC_BASE_URL="${PUBLIC_BASE_URL:-}"
+PUBLIC_API="${PUBLIC_API:-${PUBLIC_BASE_URL:+$PUBLIC_BASE_URL/api}}"
+CORS_ORIGINS="${CORS_ORIGINS:-$PUBLIC_BASE_URL}"
+AUTH_IDENTITY_HEADER="${AUTH_IDENTITY_HEADER:-X-Authenticated-User}"
 SECRETS_FILE="${SECRETS_FILE:-$API/.env.secrets}"
 
 CURRENT_STEP="初始化"
@@ -115,7 +117,43 @@ curl_retry() {
   done
 }
 
+verify_public_auth_boundary() {
+  local status
+  status="$(curl -sS -o /dev/null -w '%{http_code}' "$PUBLIC_API/categories")"
+  case "$status" in
+    301|302|303|307|308|401|403)
+      log_info "公网 API 未认证访问已被拦截：HTTP $status"
+      ;;
+    200)
+      echo "公网 API 在未认证状态返回 HTTP 200，拒绝继续：$PUBLIC_API/categories"
+      return 1
+      ;;
+    *)
+      echo "公网 API 安全边界状态异常：HTTP $status"
+      return 1
+      ;;
+  esac
+}
+
 trap on_error ERR
+
+log_section "远程安全配置检查"
+if [[ "$PUBLIC_BASE_URL" != https://* ]]; then
+  echo "必须显式设置 HTTPS PUBLIC_BASE_URL，当前值无效。"
+  exit 1
+fi
+if [ -z "$PUBLIC_API" ]; then
+  echo "PUBLIC_API 不能为空。"
+  exit 1
+fi
+if [ -z "$CORS_ORIGINS" ] || printf '%s' "$CORS_ORIGINS" | tr ',' '\n' | grep -Ev '^https://' >/dev/null; then
+  echo "远程 CORS_ORIGINS 必须全部使用 HTTPS。"
+  exit 1
+fi
+if [ ! -f "$DB" ]; then
+  echo "生产数据库不存在，部署脚本不会自动创建：$DB"
+  exit 1
+fi
 
 log_section "后端更新"
 cd "$API"
@@ -162,11 +200,19 @@ if [ -f "$API/.env" ]; then
 fi
 
 cat > "$API/.env" <<EOF
+NODE_ENV=production
+DEPLOYMENT_MODE=remote
+HOST=127.0.0.1
 PORT=3001
 APP_WORKSPACE=business
 BUSINESS_DB_PATH=$DB
+ALLOW_DB_CREATE=false
 TASK_CENTER_PYTHON=$PY
 CORS_ORIGINS=$CORS_ORIGINS
+PUBLIC_BASE_URL=$PUBLIC_BASE_URL
+TRUST_PROXY=loopback
+SERVER_AUTH_MODE=trusted_reverse_proxy
+AUTH_IDENTITY_HEADER=$AUTH_IDENTITY_HEADER
 EOF
 
 append_env_file_entries "$SECRETS_FILE"
@@ -189,7 +235,8 @@ pm2 save
 log_section "验证"
 curl_retry "http://127.0.0.1:3001/health" "本机 health"
 echo
-curl_retry "$PUBLIC_API/categories" "公网 API" | head
+npm run verify:business-db
+verify_public_auth_boundary
 echo
 echo "=== 后端部署成功 ==="
 echo "后端提交：$COMMIT"
