@@ -33,6 +33,7 @@ import productArchivesRoutes from "./productArchivesRoutes";
 import luckyNumberRecordsRoutes from "./luckyNumberRecordsRoutes";
 import preciousMetalMarketRoutes from "./preciousMetalMarketRoutes";
 import cognitionEvidenceRoutes from "./cognitionEvidenceRoutes";
+import globalSearchRoutes from "./globalSearchRoutes";
 
 export const registerBusinessRoutes = (app: Express) => {
   app.use("/api", priceRoutes);
@@ -69,4 +70,5 @@ export const registerBusinessRoutes = (app: Express) => {
   app.use("/api", luckyNumberRecordsRoutes);
   app.use("/api", preciousMetalMarketRoutes);
   app.use("/api", cognitionEvidenceRoutes);
+  app.use("/api", globalSearchRoutes);
 };

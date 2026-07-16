@@ -5404,6 +5404,74 @@ const migrations: Migration[] = [
       );
       await ensureMigrationColumn(db, 'variants', 'xianyu_heat_updated_at', 'TEXT');
     }
+  },
+  {
+    id: '20260715_001_add_record_source_context',
+    name: 'Preserve source context for derived business records',
+    run: async (db: any) => {
+      const tables = ['watchlist_items', 'business_reviews', 'rule_experiences', 'manual_todos'];
+      for (const table of tables) {
+        await ensureMigrationColumn(db, table, 'source_type', 'TEXT');
+        await ensureMigrationColumn(db, table, 'source_id', 'TEXT');
+        await ensureMigrationColumn(db, table, 'source_context_json', 'TEXT');
+      }
+
+      for (const table of tables) {
+        if (await migrationTableExists(db, table)) {
+          await dbExec(
+            db,
+            `CREATE INDEX IF NOT EXISTS ${quoteMigrationIdentifier(`idx_${table}_source`)} ON ${quoteMigrationIdentifier(table)}(source_type, source_id)`
+          );
+        }
+      }
+    }
+  },
+  {
+    id: '20260715_002_extend_price_quality_alert_reviews',
+    name: 'Bind quality alerts to corrections and immutable snapshots',
+    run: async (db: any) => {
+      const columns: Array<[string, string]> = [
+        ['record_id', 'INTEGER'],
+        ['alert_type', 'TEXT'],
+        ['action', 'TEXT'],
+        ['reviewed_by', 'TEXT'],
+        ['correction_record_id', 'INTEGER'],
+        ['basis_json', 'TEXT'],
+        ['alert_snapshot_json', 'TEXT'],
+        ['last_checked_at', 'TEXT']
+      ];
+      for (const [column, definition] of columns) {
+        await ensureMigrationColumn(db, 'price_quality_alert_reviews', column, definition);
+      }
+      if (await migrationTableExists(db, 'price_quality_alert_reviews')) {
+        await dbExec(db, 'CREATE INDEX IF NOT EXISTS idx_price_quality_alert_reviews_record ON price_quality_alert_reviews(record_id, alert_type, status)');
+      }
+    }
+  },
+  {
+    id: '20260715_003_add_price_import_batches',
+    name: 'Add idempotent price import batches',
+    run: async (db: any) => {
+      await dbExec(
+        db,
+        `CREATE TABLE IF NOT EXISTS price_import_batches (
+          batch_id TEXT PRIMARY KEY,
+          payload_hash TEXT NOT NULL,
+          status TEXT NOT NULL CHECK(status IN ('processing', 'completed')),
+          result_json TEXT,
+          created_at TEXT NOT NULL,
+          completed_at TEXT
+        )`
+      );
+      await dbExec(db, 'CREATE INDEX IF NOT EXISTS idx_price_import_batches_created_at ON price_import_batches(created_at DESC)');
+    }
+  },
+  {
+    id: '20260716_001_add_manual_todo_completion_result',
+    name: 'Add completion result to manual todos',
+    run: async (db: any) => {
+      await ensureMigrationColumn(db, 'manual_todos', 'completion_result', 'TEXT');
+    }
   }
 
 ];

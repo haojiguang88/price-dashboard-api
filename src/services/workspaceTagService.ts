@@ -1,4 +1,4 @@
-import getDb from "../config/database";
+import getDb, { withTransaction } from "../config/database";
 import { normalizeWorkspace, resolveDomainForWorkspace, type WorkspaceKey } from "../utils/workspace";
 import { isUniqueConstraintError, WorkspaceCenterError } from "./workspaceCenterErrors";
 
@@ -137,9 +137,11 @@ export const listWorkspaceTags = async (workspaceInput: unknown) => {
   await ensureTagSchema(db);
   await ensureDefaultTags(db, workspace);
   return db.all(
-    `SELECT id, name, domain, workspace, tag_group, color, description, applicable_scopes, status, created_at, updated_at
-     FROM workspace_tags
-     WHERE workspace = ?
+    `SELECT wt.id, wt.name, wt.domain, wt.workspace, wt.tag_group, wt.color, wt.description,
+            wt.applicable_scopes, wt.status, wt.created_at, wt.updated_at,
+            (SELECT COUNT(*) FROM entity_tags et WHERE et.workspace = wt.workspace AND et.tag_id = wt.id) AS usage_count
+     FROM workspace_tags wt
+     WHERE wt.workspace = ?
      ORDER BY tag_group ASC, id ASC`,
     [workspace]
   );
@@ -200,13 +202,24 @@ export const deleteWorkspaceTag = async (id: string, workspaceInput: unknown) =>
   const db = await getDb();
   await ensureTagSchema(db);
   const workspace = normalizeTagWorkspace(workspaceInput);
-  await db.run("DELETE FROM entity_tags WHERE tag_id = ? AND workspace = ?", [id, workspace]);
-  const result = await db.run(
-    "DELETE FROM workspace_tags WHERE id = ? AND workspace = ?",
-    [id, workspace]
-  );
-  if (!result.changes) throw new WorkspaceCenterError(404, "标签不存在");
-  return { id, changes: result.changes };
+  return withTransaction(async transactionDb => {
+    const existing = await transactionDb.get(
+      "SELECT id FROM workspace_tags WHERE id = ? AND workspace = ?",
+      [id, workspace]
+    );
+    if (!existing) throw new WorkspaceCenterError(404, "标签不存在");
+
+    await transactionDb.run(
+      "DELETE FROM entity_tags WHERE tag_id = ? AND workspace = ?",
+      [id, workspace]
+    );
+    const result = await transactionDb.run(
+      "DELETE FROM workspace_tags WHERE id = ? AND workspace = ?",
+      [id, workspace]
+    );
+    if (!result.changes) throw new WorkspaceCenterError(404, "标签不存在");
+    return { id, changes: result.changes };
+  });
 };
 
 export const listEntityTags = async (input: { workspace?: unknown; entity_type?: unknown; entity_id?: unknown }) => {

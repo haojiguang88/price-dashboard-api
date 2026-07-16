@@ -7,6 +7,7 @@ import {
   validateOptionalAnnualPlanItemLink
 } from "../utils/annualPlanLinks";
 import { validateActiveMasterTargetByIds } from "../utils/masterData";
+import { normalizeSourceContext, serializeSourceContext } from "../utils/sourceContext";
 
 const router = express.Router();
 
@@ -15,7 +16,7 @@ const validStatuses = ["watching", "waiting_price", "waiting_signal", "archived"
 // 验证优先级枚举
 const validPriorities = ["high", "medium", "low"];
 
-const serializeWatchItem = (item: any) => ({
+const serializeWatchItem = (item: any) => serializeSourceContext({
   ...item,
   annual_plan_item_id: item.annual_plan_item_id ? String(item.annual_plan_item_id) : "",
   annual_plan_item: serializeAnnualPlanLink(item)
@@ -38,6 +39,9 @@ router.get("/watchlist", async (req, res) => {
         w.status, 
         w.priority, 
         w.reason, 
+        w.source_type,
+        w.source_id,
+        w.source_context_json,
         w.updated_at,
         ${annualPlanLinkSelectFields}
       FROM watchlist_items w
@@ -78,6 +82,9 @@ router.get("/watchlist/:id", async (req, res) => {
         w.watch_points, 
         w.risks, 
         w.note, 
+        w.source_type,
+        w.source_id,
+        w.source_context_json,
         w.created_at, 
         w.updated_at,
         ${annualPlanLinkSelectFields}
@@ -113,7 +120,10 @@ router.post("/watchlist", async (req, res) => {
       watch_points,
       risks,
       note,
-      annual_plan_item_id
+      annual_plan_item_id,
+      source_type,
+      source_id,
+      source_context
     } = req.body;
     
     // 基础校验
@@ -141,6 +151,7 @@ router.post("/watchlist", async (req, res) => {
     if (!annualPlanLink.ok) {
       return res.status(400).json({ success: false, message: annualPlanLink.message });
     }
+    const source = normalizeSourceContext({ source_type, source_id, source_context });
 
     const duplicateItem = await db.get(
       `SELECT id FROM watchlist_items
@@ -154,8 +165,8 @@ router.post("/watchlist", async (req, res) => {
     
     const result = await db.run(
       `INSERT INTO watchlist_items 
-       (category_id, object_id, variant_id, annual_plan_item_id, status, priority, reason, watch_points, risks, note, created_at, updated_at) 
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (category_id, object_id, variant_id, annual_plan_item_id, status, priority, reason, watch_points, risks, note, source_type, source_id, source_context_json, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         masterTarget.target.category_id,
         masterTarget.target.object_id,
@@ -167,6 +178,9 @@ router.post("/watchlist", async (req, res) => {
         watch_points,
         risks,
         note,
+        source.sourceType,
+        source.sourceId,
+        source.sourceContextJson,
         now,
         now
       ]
@@ -193,7 +207,10 @@ router.put("/watchlist/:id", async (req, res) => {
       watch_points,
       risks,
       note,
-      annual_plan_item_id
+      annual_plan_item_id,
+      source_type,
+      source_id,
+      source_context
     } = req.body;
     
     // 基础校验
@@ -214,7 +231,7 @@ router.put("/watchlist/:id", async (req, res) => {
     const db = await getDb();
     
     // 检查项目是否存在
-    const existingItem = await db.get("SELECT id, annual_plan_item_id FROM watchlist_items WHERE id = ?", [id]);
+    const existingItem = await db.get("SELECT id, annual_plan_item_id, source_type, source_id, source_context_json FROM watchlist_items WHERE id = ?", [id]);
     if (!existingItem) {
       return res.status(404).json({ success: false, message: "观察池项目不存在" });
     }
@@ -231,6 +248,15 @@ router.put("/watchlist/:id", async (req, res) => {
     if (!annualPlanLink.ok) {
       return res.status(400).json({ success: false, message: annualPlanLink.message });
     }
+    const hasSourceInput = ['source_type', 'source_id', 'source_context']
+      .some(key => Object.prototype.hasOwnProperty.call(req.body, key));
+    const source = hasSourceInput
+      ? normalizeSourceContext({ source_type, source_id, source_context })
+      : {
+          sourceType: existingItem.source_type || null,
+          sourceId: existingItem.source_id || null,
+          sourceContextJson: existingItem.source_context_json || null
+        };
 
     const duplicateItem = await db.get(
       `SELECT id FROM watchlist_items
@@ -244,7 +270,7 @@ router.put("/watchlist/:id", async (req, res) => {
     
     const result = await db.run(
       `UPDATE watchlist_items 
-       SET category_id = ?, object_id = ?, variant_id = ?, annual_plan_item_id = ?, status = ?, priority = ?, reason = ?, watch_points = ?, risks = ?, note = ?, updated_at = ? 
+       SET category_id = ?, object_id = ?, variant_id = ?, annual_plan_item_id = ?, status = ?, priority = ?, reason = ?, watch_points = ?, risks = ?, note = ?, source_type = ?, source_id = ?, source_context_json = ?, updated_at = ?
        WHERE id = ?`,
       [
         masterTarget.target.category_id,
@@ -257,6 +283,9 @@ router.put("/watchlist/:id", async (req, res) => {
         watch_points,
         risks,
         note,
+        source.sourceType,
+        source.sourceId,
+        source.sourceContextJson,
         now,
         id
       ]

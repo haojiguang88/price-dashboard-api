@@ -1,5 +1,5 @@
 import express from "express";
-import getDb from "../config/database";
+import getDb, { withTransaction } from "../config/database";
 
 const router = express.Router();
 
@@ -66,9 +66,15 @@ const loadRecord = async (db: any, id: string) => db.get(
   [id]
 );
 
-const writeLuckyAuditLog = async (db: any, action: string, record: any, detail = "") => {
+const writeLuckyAuditLog = async (
+  db: any,
+  action: string,
+  record: any,
+  detail = "",
+  required = false
+) => {
   const now = new Date().toISOString();
-  await db.run(
+  const write = db.run(
     `INSERT INTO audit_logs
       (id, timestamp, module, action, target, status, detail, entity_id, path, domain, workspace, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -87,7 +93,12 @@ const writeLuckyAuditLog = async (db: any, action: string, record: any, detail =
       now,
       now
     ]
-  ).catch(() => undefined);
+  );
+  if (required) {
+    await write;
+  } else {
+    await write.catch(() => undefined);
+  }
 };
 
 const listRecords = async (db: any, query: Record<string, any> = {}) => {
@@ -317,20 +328,28 @@ router.post("/lucky-number-records/:id/sell", async (req, res) => {
 
 router.delete("/lucky-number-records/:id", async (req, res) => {
   try {
-    const db = await getDb();
-    const existing = await loadRecord(db, String(req.params.id));
-    if (!existing) {
-      return res.status(404).json({ success: false, message: "靓号记录不存在" });
-    }
+    const existing = await withTransaction(async db => {
+      const record = await loadRecord(db, String(req.params.id));
+      if (!record) {
+        const error = new Error("靓号记录不存在");
+        (error as any).statusCode = 404;
+        throw error;
+      }
 
-    await db.run(
-      "UPDATE lucky_number_records SET is_deleted = 1, updated_at = ? WHERE id = ?",
-      [new Date().toISOString(), existing.id]
-    );
-    await writeLuckyAuditLog(db, "delete", existing);
+      await db.run(
+        "UPDATE lucky_number_records SET is_deleted = 1, updated_at = ? WHERE id = ?",
+        [new Date().toISOString(), record.id]
+      );
+      await writeLuckyAuditLog(db, "delete", record, "软删除靓号记录，可由维护流程恢复", true);
+      return record;
+    });
     res.json({ success: true, data: { id: String(existing.id) }, message: "删除靓号记录成功" });
   } catch (error) {
-    res.status(500).json({ success: false, message: `删除靓号记录失败: ${(error as Error).message}` });
+    const statusCode = Number((error as any)?.statusCode) || 500;
+    res.status(statusCode).json({
+      success: false,
+      message: statusCode === 404 ? "靓号记录不存在" : "删除靓号记录失败，请稍后重试"
+    });
   }
 });
 

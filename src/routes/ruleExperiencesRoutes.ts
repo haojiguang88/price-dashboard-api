@@ -1,8 +1,12 @@
 import express from 'express';
 import getDb from '../config/database';
 import { normalizeQueryText, parsePagination, toLikePattern } from '../utils/listQuery';
+import { normalizeSourceContext, serializeSourceContext } from '../utils/sourceContext';
 
 const router = express.Router();
+
+const ruleExperienceSelectFields = 'id, title, type, track, source_case, core_content, summary_conclusion, note, source_type, source_id, source_context_json, created_at, updated_at';
+const serializeRuleExperience = (record: any) => serializeSourceContext(record);
 
 // 规则经验相关接口
 
@@ -10,7 +14,7 @@ const router = express.Router();
 router.post('/rule-experiences', async (req, res) => {
   try {
     const db = await getDb();
-    const { type, track, source_case, core_content, summary_conclusion, note } = req.body;
+    const { type, track, source_case, core_content, summary_conclusion, note, source_type, source_id, source_context } = req.body;
     const title = normalizeQueryText(req.body?.title);
     
     // 校验字段
@@ -20,15 +24,16 @@ router.post('/rule-experiences', async (req, res) => {
     
     // 插入记录
     const now = new Date().toISOString();
+    const source = normalizeSourceContext({ source_type, source_id, source_context });
     const result = await db.run(
-      'INSERT INTO rule_experiences (title, type, track, source_case, core_content, summary_conclusion, note, is_deleted, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [title, type, track, source_case, core_content, summary_conclusion, note, 0, now, now]
+      'INSERT INTO rule_experiences (title, type, track, source_case, core_content, summary_conclusion, note, source_type, source_id, source_context_json, is_deleted, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [title, type, track, source_case, core_content, summary_conclusion, note, source.sourceType, source.sourceId, source.sourceContextJson, 0, now, now]
     );
     const createdRecord = await db.get(
-      'SELECT id, title, type, track, source_case, core_content, summary_conclusion, note, created_at, updated_at FROM rule_experiences WHERE id = ? AND is_deleted = 0',
+      `SELECT ${ruleExperienceSelectFields} FROM rule_experiences WHERE id = ? AND is_deleted = 0`,
       [result.lastID]
     );
-    res.json({ success: true, data: createdRecord || { id: result.lastID } });
+    res.json({ success: true, data: createdRecord ? serializeRuleExperience(createdRecord) : { id: result.lastID } });
   } catch (error) {
     console.error('Error creating rule experience:', error);
     res.status(500).json({ success: false, message: '新增规则经验失败' });
@@ -61,10 +66,10 @@ router.put('/rule-experiences/:id', async (req, res) => {
       [title, type, track, source_case, core_content, summary_conclusion, note, now, id]
     );
     const updatedRecord = await db.get(
-      'SELECT id, title, type, track, source_case, core_content, summary_conclusion, note, created_at, updated_at FROM rule_experiences WHERE id = ? AND is_deleted = 0',
+      `SELECT ${ruleExperienceSelectFields} FROM rule_experiences WHERE id = ? AND is_deleted = 0`,
       [id]
     );
-    res.json({ success: true, data: updatedRecord ? { ...updatedRecord, changes: result.changes } : { changes: result.changes } });
+    res.json({ success: true, data: updatedRecord ? { ...serializeRuleExperience(updatedRecord), changes: result.changes } : { changes: result.changes } });
   } catch (error) {
     console.error('Error updating rule experience:', error);
     res.status(500).json({ success: false, message: '编辑规则经验失败' });
@@ -132,7 +137,7 @@ router.get('/rule-experiences', async (req, res) => {
     
     // 获取分页数据
     const dataQuery = `
-      SELECT id, title, type, track, source_case, core_content, summary_conclusion, note, created_at, updated_at 
+      SELECT ${ruleExperienceSelectFields}
       FROM rule_experiences 
       WHERE ${whereClause} 
       ORDER BY created_at DESC, id DESC 
@@ -146,7 +151,7 @@ router.get('/rule-experiences', async (req, res) => {
     res.json({
       success: true,
       data: {
-        items,
+        items: items.map(serializeRuleExperience),
         total,
         page: pagination.page,
         pageSize: pagination.pageSize
@@ -165,13 +170,13 @@ router.get('/rule-experiences/:id', async (req, res) => {
     const { id } = req.params;
     
     // 获取记录详情
-    const record = await db.get('SELECT id, title, type, track, source_case, core_content, summary_conclusion, note, created_at, updated_at FROM rule_experiences WHERE id = ? AND is_deleted = 0', [id]);
+    const record = await db.get(`SELECT ${ruleExperienceSelectFields} FROM rule_experiences WHERE id = ? AND is_deleted = 0`, [id]);
     
     if (!record) {
       return res.status(404).json({ success: false, message: '规则经验不存在' });
     }
     
-    res.json({ success: true, data: record });
+    res.json({ success: true, data: serializeRuleExperience(record) });
   } catch (error) {
     console.error('Error fetching rule experience details:', error);
     res.status(500).json({ success: false, message: '获取规则经验详情失败' });

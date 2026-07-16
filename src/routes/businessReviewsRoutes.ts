@@ -8,6 +8,7 @@ import {
 } from '../utils/annualPlanLinks';
 import { validateOptionalDateOnly } from '../utils/dateValidation';
 import { normalizeQueryText, parsePagination, toLikePattern } from '../utils/listQuery';
+import { normalizeSourceContext, serializeSourceContext } from '../utils/sourceContext';
 
 const router = express.Router();
 
@@ -30,13 +31,16 @@ const businessReviewSelectFields = `
   br.extracted_lesson,
   br.short_lesson,
   br.annual_plan_item_id,
+  br.source_type,
+  br.source_id,
+  br.source_context_json,
   br.note,
   br.created_at,
   br.updated_at,
   ${annualPlanLinkSelectFields}
 `;
 
-const serializeBusinessReview = (record: any) => ({
+const serializeBusinessReview = (record: any) => serializeSourceContext({
   ...record,
   annual_plan_item_id: record.annual_plan_item_id ? String(record.annual_plan_item_id) : '',
   annual_plan_item: serializeAnnualPlanLink(record)
@@ -58,7 +62,7 @@ const getBusinessReviewById = async (db: any, id: string | number) => {
 router.post('/business-reviews', async (req, res) => {
   try {
     const db = await getDb();
-    const { project_name, review_date, result_type, summary_conclusion, background, judgment_at_that_time, action_at_that_time, later_outcome, root_cause_type, exposed_problem, extracted_lesson, short_lesson, note, annual_plan_item_id } = req.body;
+    const { project_name, review_date, result_type, summary_conclusion, background, judgment_at_that_time, action_at_that_time, later_outcome, root_cause_type, exposed_problem, extracted_lesson, short_lesson, note, annual_plan_item_id, source_type, source_id, source_context } = req.body;
     const title = normalizeQueryText(req.body?.title);
     const track = normalizeQueryText(req.body?.track);
     
@@ -74,12 +78,13 @@ router.post('/business-reviews', async (req, res) => {
     if (!annualPlanLink.ok) {
       return res.status(400).json({ success: false, message: annualPlanLink.message });
     }
+    const source = normalizeSourceContext({ source_type, source_id, source_context });
     
     // 插入记录
     const now = new Date().toISOString();
     const result = await db.run(
-      'INSERT INTO business_reviews (title, track, project_name, review_date, result_type, summary_conclusion, background, judgment_at_that_time, action_at_that_time, later_outcome, root_cause_type, exposed_problem, extracted_lesson, short_lesson, annual_plan_item_id, note, is_deleted, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [title, track, project_name, reviewDate.value, result_type, summary_conclusion, background, judgment_at_that_time, action_at_that_time, later_outcome, root_cause_type, exposed_problem, extracted_lesson, short_lesson, annualPlanLink.value, note, 0, now, now]
+      'INSERT INTO business_reviews (title, track, project_name, review_date, result_type, summary_conclusion, background, judgment_at_that_time, action_at_that_time, later_outcome, root_cause_type, exposed_problem, extracted_lesson, short_lesson, annual_plan_item_id, note, source_type, source_id, source_context_json, is_deleted, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [title, track, project_name, reviewDate.value, result_type, summary_conclusion, background, judgment_at_that_time, action_at_that_time, later_outcome, root_cause_type, exposed_problem, extracted_lesson, short_lesson, annualPlanLink.value, note, source.sourceType, source.sourceId, source.sourceContextJson, 0, now, now]
     );
     const createdRecord = result.lastID ? await getBusinessReviewById(db, result.lastID) : null;
     res.json({ success: true, data: createdRecord });

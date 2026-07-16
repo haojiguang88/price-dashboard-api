@@ -1,5 +1,5 @@
 import express from 'express';
-import getDb from '../config/database';
+import getDb, { withTransaction } from '../config/database';
 import { validateOptionalDateOnly, validateRequiredDateOnlyOrLocalDateTime } from '../utils/dateValidation';
 
 const router = express.Router();
@@ -271,17 +271,34 @@ router.put('/speculation-cycles/:id', async (req, res) => {
 });
 
 router.delete('/speculation-cycles/:id', async (req, res) => {
-  const db = await getDb();
   try {
-    await db.run('BEGIN TRANSACTION');
-    await db.run('DELETE FROM speculation_cycle_events WHERE cycle_id = ?', [req.params.id]);
-    const result = await db.run('DELETE FROM speculation_cycle_records WHERE id = ?', [req.params.id]);
-    await db.run('COMMIT');
-    res.json({ success: true, data: { changes: result.changes } });
+    const data = await withTransaction(async db => {
+      const existing = await db.get(
+        'SELECT id FROM speculation_cycle_records WHERE id = ?',
+        [req.params.id]
+      );
+      if (!existing) {
+        const error = new Error('周期模式记录不存在');
+        (error as any).statusCode = 404;
+        throw error;
+      }
+
+      const eventCount = await db.get(
+        'SELECT COUNT(*) AS count FROM speculation_cycle_events WHERE cycle_id = ?',
+        [req.params.id]
+      );
+      await db.run('DELETE FROM speculation_cycle_events WHERE cycle_id = ?', [req.params.id]);
+      const result = await db.run('DELETE FROM speculation_cycle_records WHERE id = ?', [req.params.id]);
+      return { changes: result.changes, deleted_event_count: Number(eventCount?.count || 0) };
+    });
+    res.json({ success: true, data });
   } catch (error) {
-    await db.run('ROLLBACK');
-    console.error('删除周期模式记录失败:', error);
-    res.status(500).json({ success: false, message: '删除周期模式记录失败' });
+    const statusCode = Number((error as any)?.statusCode) || 500;
+    if (statusCode === 500) console.error('删除周期模式记录失败:', error);
+    res.status(statusCode).json({
+      success: false,
+      message: statusCode === 404 ? '周期模式记录不存在' : '删除周期模式记录失败'
+    });
   }
 });
 
@@ -348,16 +365,35 @@ router.put('/speculation-cycles/:id/events/:eventId', async (req, res) => {
 
 router.delete('/speculation-cycles/:id/events/:eventId', async (req, res) => {
   try {
-    const db = await getDb();
-    const result = await db.run(
-      'DELETE FROM speculation_cycle_events WHERE id = ? AND cycle_id = ?',
-      [req.params.eventId, req.params.id]
-    );
-    await db.run('UPDATE speculation_cycle_records SET updated_at = CURRENT_TIMESTAMP WHERE id = ?', [req.params.id]);
-    res.json({ success: true, data: { changes: result.changes } });
+    const data = await withTransaction(async db => {
+      const existing = await db.get(
+        'SELECT id FROM speculation_cycle_events WHERE id = ? AND cycle_id = ?',
+        [req.params.eventId, req.params.id]
+      );
+      if (!existing) {
+        const error = new Error('周期过程节点不存在');
+        (error as any).statusCode = 404;
+        throw error;
+      }
+
+      const result = await db.run(
+        'DELETE FROM speculation_cycle_events WHERE id = ? AND cycle_id = ?',
+        [req.params.eventId, req.params.id]
+      );
+      await db.run(
+        'UPDATE speculation_cycle_records SET updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+        [req.params.id]
+      );
+      return { changes: result.changes };
+    });
+    res.json({ success: true, data });
   } catch (error) {
-    console.error('删除周期过程节点失败:', error);
-    res.status(500).json({ success: false, message: '删除周期过程节点失败' });
+    const statusCode = Number((error as any)?.statusCode) || 500;
+    if (statusCode === 500) console.error('删除周期过程节点失败:', error);
+    res.status(statusCode).json({
+      success: false,
+      message: statusCode === 404 ? '周期过程节点不存在' : '删除周期过程节点失败'
+    });
   }
 });
 

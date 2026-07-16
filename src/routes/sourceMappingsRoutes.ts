@@ -340,15 +340,10 @@ router.put("/source-mappings/:id", async (req, res) => {
 });
 
 router.delete("/source-mappings/:id", async (req, res) => {
-  try {
-    const db = await getDb();
-    const existing = await fetchMapping(db, String(req.params.id));
-    if (!existing) return res.status(404).json({ success: false, message: "数据源映射不存在" });
-    await db.run("DELETE FROM source_mappings WHERE id = ?", [req.params.id]);
-    res.json({ success: true, data: existing, message: "数据源映射已删除" });
-  } catch (error) {
-    res.status(500).json({ success: false, message: `删除数据源映射失败: ${(error as Error).message}` });
-  }
+  res.status(405).json({
+    success: false,
+    message: "业务页面不允许物理删除数据源映射，请使用停用或来源缺失状态；物理清理由独立数据库维护流程处理。"
+  });
 });
 
 export default router;

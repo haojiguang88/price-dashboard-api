@@ -29,8 +29,17 @@ const initDatabase = async (db: Database) => {
   const shouldInitializeBusinessTables = true;
   
   if (shouldInitializeBusinessTables) {
-	  await db.exec("CREATE TABLE IF NOT EXISTS price_records (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT NOT NULL, category TEXT NOT NULL, object_name TEXT NOT NULL, variant TEXT, price REAL NOT NULL, source TEXT, note TEXT, track TEXT, type TEXT DEFAULT 'manual', market_type_preset TEXT DEFAULT 'standard', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)");
-	  await db.exec("CREATE TABLE IF NOT EXISTS price_quality_alert_reviews (alert_key TEXT PRIMARY KEY, status TEXT NOT NULL DEFAULT 'pending', note TEXT, reviewed_at TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)");
+		  await db.exec("CREATE TABLE IF NOT EXISTS price_records (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT NOT NULL, category TEXT NOT NULL, object_name TEXT NOT NULL, variant TEXT, price REAL NOT NULL, source TEXT, note TEXT, track TEXT, type TEXT DEFAULT 'manual', market_type_preset TEXT DEFAULT 'standard', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)");
+		  await db.exec("CREATE TABLE IF NOT EXISTS price_import_batches (batch_id TEXT PRIMARY KEY, payload_hash TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('processing', 'completed')), result_json TEXT, created_at TEXT NOT NULL, completed_at TEXT)");
+		  await db.exec("CREATE TABLE IF NOT EXISTS price_quality_alert_reviews (alert_key TEXT PRIMARY KEY, status TEXT NOT NULL DEFAULT 'pending', note TEXT, reviewed_at TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)");
+		  await ensureColumn("price_quality_alert_reviews", "record_id", "INTEGER");
+		  await ensureColumn("price_quality_alert_reviews", "alert_type", "TEXT");
+		  await ensureColumn("price_quality_alert_reviews", "action", "TEXT");
+		  await ensureColumn("price_quality_alert_reviews", "reviewed_by", "TEXT");
+		  await ensureColumn("price_quality_alert_reviews", "correction_record_id", "INTEGER");
+		  await ensureColumn("price_quality_alert_reviews", "basis_json", "TEXT");
+		  await ensureColumn("price_quality_alert_reviews", "alert_snapshot_json", "TEXT");
+		  await ensureColumn("price_quality_alert_reviews", "last_checked_at", "TEXT");
 	  await db.exec("CREATE TABLE IF NOT EXISTS categories (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)");
   await db.exec("CREATE TABLE IF NOT EXISTS objects (id INTEGER PRIMARY KEY AUTOINCREMENT, category_id INTEGER NOT NULL, name TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE CASCADE, UNIQUE(category_id, name))");
   await db.exec("CREATE TABLE IF NOT EXISTS variants (id INTEGER PRIMARY KEY AUTOINCREMENT, object_id INTEGER NOT NULL, name TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (object_id) REFERENCES objects(id) ON DELETE CASCADE, UNIQUE(object_id, name))");
@@ -81,12 +90,19 @@ const initDatabase = async (db: Database) => {
 
   await db.exec("CREATE TABLE IF NOT EXISTS watchlist_items (id INTEGER PRIMARY KEY AUTOINCREMENT, category_id INTEGER NOT NULL, object_id INTEGER NOT NULL, variant_id INTEGER NOT NULL, status TEXT NOT NULL, priority TEXT NOT NULL, reason TEXT NOT NULL, watch_points TEXT, risks TEXT, note TEXT, track TEXT, type TEXT DEFAULT 'manual', market_type_preset TEXT DEFAULT 'standard', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE CASCADE, FOREIGN KEY (object_id) REFERENCES objects(id) ON DELETE CASCADE)");
   await ensureColumn("watchlist_items", "annual_plan_item_id", "INTEGER");
+  await ensureColumn("watchlist_items", "source_type", "TEXT");
+  await ensureColumn("watchlist_items", "source_id", "TEXT");
+  await ensureColumn("watchlist_items", "source_context_json", "TEXT");
   await db.exec("CREATE INDEX IF NOT EXISTS idx_watchlist_items_annual_plan_item ON watchlist_items(annual_plan_item_id)");
   }
 
   await db.exec("CREATE TABLE IF NOT EXISTS manual_todos (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, priority TEXT NOT NULL, status TEXT NOT NULL, due_date TEXT, note TEXT, domain TEXT NOT NULL DEFAULT 'business', workspace TEXT NOT NULL DEFAULT 'business', track TEXT, type TEXT DEFAULT 'manual', market_type_preset TEXT DEFAULT 'standard', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)");
   await ensureColumn("manual_todos", "domain", "TEXT NOT NULL DEFAULT 'business'");
   await ensureColumn("manual_todos", "workspace", "TEXT NOT NULL DEFAULT 'business'");
+  await ensureColumn("manual_todos", "source_type", "TEXT");
+  await ensureColumn("manual_todos", "source_id", "TEXT");
+  await ensureColumn("manual_todos", "source_context_json", "TEXT");
+  await ensureColumn("manual_todos", "completion_result", "TEXT");
   await db.exec("CREATE INDEX IF NOT EXISTS idx_manual_todos_workspace_status ON manual_todos(workspace, status, updated_at DESC)");
 
   if (shouldInitializeBusinessTables) {

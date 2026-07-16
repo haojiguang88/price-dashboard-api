@@ -319,6 +319,7 @@ router.get('/check-records', async (req, res) => {
 
     let query = `
       SELECT r.id, r.review_type, r.category_name, r.object_name, r.variant_name,
+             c.id AS category_id, o.id AS object_id, COALESCE(v.id, 0) AS variant_id,
              r.category_risk_type, r.parent_record_id, r.system_result, r.result_reason,
              r.summary, r.extra_result_json, r.rule_version, r.created_at, r.updated_at,
              (
@@ -332,6 +333,9 @@ router.get('/check-records', async (req, res) => {
                WHERE child.parent_record_id = r.id
              ) AS latest_child_record_id
       FROM risk_check_records r
+      LEFT JOIN categories c ON c.name = r.category_name AND COALESCE(c.is_archived, 0) = 0
+      LEFT JOIN objects o ON o.category_id = c.id AND o.name = r.object_name AND COALESCE(o.is_archived, 0) = 0
+      LEFT JOIN variants v ON v.object_id = o.id AND v.name = COALESCE(r.variant_name, '') AND COALESCE(v.is_archived, 0) = 0
       WHERE 1=1
     `;
     const params: any[] = [];
@@ -393,7 +397,14 @@ router.get('/check-records/:id', async (req, res) => {
     const db = await getDb();
     const { id } = req.params;
 
-    const record = await db.get('SELECT * FROM risk_check_records WHERE id = ?', [id]);
+    const record = await db.get(`
+      SELECT r.*, c.id AS category_id, o.id AS object_id, COALESCE(v.id, 0) AS variant_id
+      FROM risk_check_records r
+      LEFT JOIN categories c ON c.name = r.category_name AND COALESCE(c.is_archived, 0) = 0
+      LEFT JOIN objects o ON o.category_id = c.id AND o.name = r.object_name AND COALESCE(o.is_archived, 0) = 0
+      LEFT JOIN variants v ON v.object_id = o.id AND v.name = COALESCE(r.variant_name, '') AND COALESCE(v.is_archived, 0) = 0
+      WHERE r.id = ?
+    `, [id]);
     if (!record) {
       return res.status(404).json({ success: false, message: '风控检查记录不存在' });
     }

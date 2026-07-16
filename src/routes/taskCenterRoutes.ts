@@ -840,6 +840,15 @@ export const createTaskCenterRoutes = (
     }
   });
 
+  router.get('/task-center/runs/:id', async (req: Request, res: ExpressResponse) => {
+    try {
+      const data = await taskCenterService.getTaskCenterRun(String(req.params.id));
+      res.json({ success: true, data });
+    } catch (error) {
+      res.status(getWorkspaceCenterStatusCode(error)).json({ success: false, message: `获取任务执行详情失败: ${(error as Error).message}` });
+    }
+  });
+
   router.patch('/task-center/tasks/:id', async (req: Request, res: ExpressResponse) => {
     try {
       await taskCenterService.updateTaskCenterTask(String(req.params.id), req.body || {});

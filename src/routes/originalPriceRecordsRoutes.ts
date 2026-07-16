@@ -72,8 +72,31 @@ router.post('/original-price-records', async (req, res) => {
 router.get('/original-price-records', async (req, res) => {
   try {
     const db = await getDb();
-    const records = await db.all('SELECT * FROM original_price_records WHERE is_deleted = 0 ORDER BY created_at DESC');
-    res.json({ success: true, data: records });
+    const requestedPage = Math.max(1, Number.parseInt(String(req.query.page || '1'), 10) || 1);
+    const pageSize = Math.min(100, Math.max(10, Number.parseInt(String(req.query.pageSize || '50'), 10) || 50));
+    const countRow = await db.get<{ total: number }>(
+      'SELECT COUNT(*) AS total FROM original_price_records WHERE is_deleted = 0'
+    );
+    const total = Number(countRow?.total || 0);
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    const page = Math.min(requestedPage, totalPages);
+    const records = await db.all(
+      `SELECT *
+       FROM original_price_records
+       WHERE is_deleted = 0
+       ORDER BY effective_date DESC, datetime(created_at) DESC, id DESC
+       LIMIT ? OFFSET ?`,
+      [pageSize, (page - 1) * pageSize]
+    );
+    res.json({
+      success: true,
+      data: {
+        items: records,
+        total,
+        page,
+        pageSize
+      }
+    });
   } catch (error) {
     console.error('Error getting original price records:', error);
     res.status(500).json({ success: false, message: '获取原始价格记录失败' });

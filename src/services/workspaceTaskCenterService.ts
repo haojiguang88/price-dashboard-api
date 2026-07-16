@@ -61,6 +61,7 @@ const compactTaskRunRows = (runs: any[]) => runs.map((run) => {
   const originalResultJson = typeof run.result_json === "string" ? run.result_json : null;
   return {
     ...run,
+    message: run.status === "error" ? run.message : null,
     result_json: compactTaskRunResultJson(originalResultJson),
     result_json_size: originalResultJson?.length || 0
   };
@@ -122,7 +123,13 @@ export const getTaskCenterSnapshot = async (workspaceInput: unknown, compactInpu
          LIMIT 30`,
     runFilter.params
   );
-  return { tasks, runs: compactRuns ? compactTaskRunRows(runs) : runs };
+  const snapshotTasks = compactRuns
+    ? tasks.map((task: any) => ({
+      ...task,
+      last_message: task.last_status === "error" ? task.last_message : null
+    }))
+    : tasks;
+  return { tasks: snapshotTasks, runs: compactRuns ? compactTaskRunRows(runs) : runs };
 };
 
 const parseJson = (value?: string | null) => {
@@ -293,7 +300,21 @@ const getSourceMappingSummaries = async (db: any) => {
   return summaries;
 };
 
-const summarizeTaskRunPayload = (payload: any) => {
+type TaskDataStatus = "updated" | "no_change" | "no_source_data" | "mapping_gap" | "source_error" | "unknown";
+
+interface TaskRunDataSummary {
+  inserted: number;
+  updated: number;
+  skipped: number;
+  source_count: number;
+  matched_count: number;
+  filtered_count: number;
+  mapping_gap_count: number;
+  source_error_count: number;
+  data_status: TaskDataStatus;
+}
+
+const summarizeDirectTaskRunPayload = (payload: any): Omit<TaskRunDataSummary, "data_status"> => {
   const records = Array.isArray(payload?.records) ? payload.records : [];
   const inserted = toNumber(payload?.inserted_count ?? payload?.insertedCount ?? payload?.inserted);
   const updated = toNumber(payload?.updated_count ?? payload?.updatedCount ?? payload?.updated);
@@ -305,20 +326,8 @@ const summarizeTaskRunPayload = (payload: any) => {
     + countArray(payload?.missing_source_objects)
     + countArray(payload?.skipped_symbols);
   const sourceErrorCount = countArray(payload?.source_errors)
-    + countArray(payload?.failed_symbols);
-
-  let dataStatus: "updated" | "no_change" | "no_source_data" | "mapping_gap" | "source_error" | "unknown" = "unknown";
-  if (sourceErrorCount > 0) {
-    dataStatus = "source_error";
-  } else if (inserted + updated > 0) {
-    dataStatus = "updated";
-  } else if (mappingGapCount > 0) {
-    dataStatus = "mapping_gap";
-  } else if (sourceCount > 0 || matchedCount > 0 || skipped > 0 || filteredCount > 0) {
-    dataStatus = "no_change";
-  } else if (payload) {
-    dataStatus = "no_source_data";
-  }
+    + countArray(payload?.failed_symbols)
+    + toNumber(payload?.failed_count ?? payload?.failedCount);
 
   return {
     inserted,
@@ -328,8 +337,76 @@ const summarizeTaskRunPayload = (payload: any) => {
     matched_count: matchedCount,
     filtered_count: filteredCount,
     mapping_gap_count: mappingGapCount,
-    source_error_count: sourceErrorCount,
-    data_status: dataStatus
+    source_error_count: sourceErrorCount
+  };
+};
+
+const addTaskRunSummaries = (
+  base: Omit<TaskRunDataSummary, "data_status">,
+  extra: Omit<TaskRunDataSummary, "data_status">
+) => ({
+  inserted: base.inserted + extra.inserted,
+  updated: base.updated + extra.updated,
+  skipped: base.skipped + extra.skipped,
+  source_count: base.source_count + extra.source_count,
+  matched_count: base.matched_count + extra.matched_count,
+  filtered_count: base.filtered_count + extra.filtered_count,
+  mapping_gap_count: base.mapping_gap_count + extra.mapping_gap_count,
+  source_error_count: base.source_error_count + extra.source_error_count
+});
+
+const emptyTaskRunSummary = (): Omit<TaskRunDataSummary, "data_status"> => ({
+  inserted: 0,
+  updated: 0,
+  skipped: 0,
+  source_count: 0,
+  matched_count: 0,
+  filtered_count: 0,
+  mapping_gap_count: 0,
+  source_error_count: 0
+});
+
+const getTaskDataStatus = (
+  summary: Omit<TaskRunDataSummary, "data_status">,
+  hasPayload: boolean
+): TaskDataStatus => {
+  if (summary.source_error_count > 0) return "source_error";
+  if (summary.inserted + summary.updated > 0) return "updated";
+  if (summary.mapping_gap_count > 0) return "mapping_gap";
+  if (summary.source_count > 0 || summary.matched_count > 0 || summary.skipped > 0 || summary.filtered_count > 0) {
+    return "no_change";
+  }
+  return hasPayload ? "no_source_data" : "unknown";
+};
+
+export const summarizeTaskRunPayload = (payload: any): TaskRunDataSummary => {
+  const direct = summarizeDirectTaskRunPayload(payload);
+  const nestedPayloads = [
+    payload?.primary,
+    payload?.backup,
+    ...(Array.isArray(payload?.steps) ? payload.steps.map((step: any) => step?.data) : [])
+  ].filter(Boolean);
+  const nested = nestedPayloads.reduce((summary, child) => {
+    const childSummary = summarizeTaskRunPayload(child);
+    return addTaskRunSummaries(summary, childSummary);
+  }, emptyTaskRunSummary());
+  const hasDirectCounts = Object.values(direct).some(value => value > 0);
+  const combined = hasDirectCounts
+    ? {
+      inserted: Math.max(direct.inserted, nested.inserted),
+      updated: Math.max(direct.updated, nested.updated),
+      skipped: Math.max(direct.skipped, nested.skipped),
+      source_count: Math.max(direct.source_count, nested.source_count),
+      matched_count: Math.max(direct.matched_count, nested.matched_count),
+      filtered_count: Math.max(direct.filtered_count, nested.filtered_count),
+      mapping_gap_count: Math.max(direct.mapping_gap_count, nested.mapping_gap_count),
+      source_error_count: Math.max(direct.source_error_count, nested.source_error_count)
+    }
+    : nested;
+
+  return {
+    ...combined,
+    data_status: getTaskDataStatus(combined, Boolean(payload))
   };
 };
 
@@ -358,17 +435,23 @@ const getHealthStatus = (task: any, latestRun: any, lastSuccessRun: any, now = n
   }
 
   if (latestRun.status === "skipped") {
-    return { status: "skipped", severity: "ok", reason: latestRun.message || "任务成功跳过" };
+    return { status: "skipped", severity: "ok", reason: "任务按规则跳过，本次未写入数据" };
   }
 
   const payloadSummary = summarizeTaskRunPayload(parseJson(latestRun.result_json));
   if (payloadSummary.data_status === "source_error") {
-    return { status: "source_error", severity: "warning", reason: latestRun.message || "任务成功，但存在来源异常" };
+    return { status: "source_error", severity: "warning", reason: `任务执行完成，但有 ${payloadSummary.source_error_count} 个来源异常` };
   }
   if (payloadSummary.data_status === "mapping_gap") {
-    return { status: "mapping_gap", severity: "warning", reason: "任务成功，但存在映射缺口或来源缺失" };
+    return { status: "mapping_gap", severity: "warning", reason: `任务执行完成，但有 ${payloadSummary.mapping_gap_count} 个映射缺口或来源缺失` };
   }
-  return { status: "healthy", severity: "ok", reason: latestRun.message || "最近一次执行正常" };
+  if (payloadSummary.data_status === "no_source_data") {
+    return { status: "no_source_data", severity: "warning", reason: "任务执行完成，但没有获得有效来源数据，也没有新增或更新" };
+  }
+  if (payloadSummary.data_status === "updated") {
+    return { status: "healthy", severity: "ok", reason: `任务执行正常：新增 ${payloadSummary.inserted}，更新 ${payloadSummary.updated}` };
+  }
+  return { status: "healthy", severity: "ok", reason: "任务执行正常，本次没有新增或更新" };
 };
 
 export const getTaskCenterHealth = async (workspaceInput: unknown) => {
@@ -457,7 +540,7 @@ export const getTaskCenterHealth = async (workspaceInput: unknown) => {
         id: latestRun.id,
         status: latestRun.status,
         trigger_type: latestRun.trigger_type,
-        message: latestRun.message,
+        message: latestRun.status === "error" ? latestRun.message : undefined,
         started_at: latestRun.started_at,
         finished_at: latestRun.finished_at
       } : null,
@@ -490,6 +573,23 @@ export const getTaskCenterTask = async (id: string, workspaceInput: unknown) => 
   const task = await db.get(`SELECT * FROM task_center_tasks WHERE ${scopedTaskFilter.whereClause}`, scopedTaskFilter.params);
   if (!task) throw new WorkspaceCenterError(404, "任务不存在");
   return task;
+};
+
+export const getTaskCenterRun = async (id: string, workspaceInput: unknown) => {
+  const db = await getDb();
+  const workspace = normalizeWorkspace(workspaceInput);
+  if (!workspace) throw new WorkspaceCenterError(400, "缺少有效工作区");
+  const run = await db.get(
+    `SELECT id, task_id, task_key, domain, workspace, trigger_type, status, message, result_json, started_at, finished_at
+     FROM task_center_runs
+     WHERE id = ? AND workspace = ?`,
+    [id, workspace]
+  );
+  if (!run) throw new WorkspaceCenterError(404, "任务执行记录不存在");
+  return {
+    ...run,
+    result_json_size: typeof run.result_json === "string" ? run.result_json.length : 0
+  };
 };
 
 export const updateTaskCenterTask = async (
