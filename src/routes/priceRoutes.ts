@@ -6,7 +6,8 @@ import {
   buildPriceImportPreview,
   executePriceImportBatch,
   PriceImportBatchConflictError,
-  PriceImportValidationError
+  PriceImportValidationError,
+  registerPriceImportPreview
 } from "../services/priceImportService";
 import { buildQualityAlertRecheckMetadata } from "../services/priceQualityAlertService";
 
@@ -1865,13 +1866,17 @@ router.post("/import/price-records/preview", async (req, res) => {
       return res.status(400).json({ success: false, message: "请求体必须包含至少一条价格记录", data: null });
     }
 
-    const db = await getDb();
-    const preview = await buildPriceImportPreview(db, records);
+    const batchId = randomUUID();
+    const preview = await withTransaction(async transactionDb => {
+      const result = await buildPriceImportPreview(transactionDb, records);
+      await registerPriceImportPreview(transactionDb, batchId, records, result);
+      return result;
+    });
     res.json({
       success: true,
       message: preview.error_count || preview.conflict_count ? "预览完成，请先处理冲突和错误" : "预览完成，可以确认导入",
       data: {
-        batch_id: randomUUID(),
+        batch_id: batchId,
         ...preview
       }
     });

@@ -5472,6 +5472,24 @@ const migrations: Migration[] = [
     run: async (db: any) => {
       await ensureMigrationColumn(db, 'manual_todos', 'completion_result', 'TEXT');
     }
+  },
+  {
+    id: '20260716_002_add_price_import_previews',
+    name: 'Persist price import previews for snapshot validation',
+    run: async (db: any) => {
+      await dbExec(
+        db,
+        `CREATE TABLE IF NOT EXISTS price_import_previews (
+          batch_id TEXT PRIMARY KEY,
+          payload_hash TEXT NOT NULL,
+          preview_hash TEXT NOT NULL,
+          preview_json TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          consumed_at TEXT
+        )`
+      );
+      await dbExec(db, 'CREATE INDEX IF NOT EXISTS idx_price_import_previews_created_at ON price_import_previews(created_at DESC)');
+    }
   }
 
 ];

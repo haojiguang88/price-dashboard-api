@@ -251,7 +251,7 @@ const definitions: SearchDefinition[] = [
       p.category_name, p.object_name, COALESCE(p.variant_name, '') AS variant_name,
       NULL AS date, p.updated_at AS updated_at`,
     from: "positions p",
-    searchColumns: ["p.category_name", "p.object_name", "p.variant_name", "p.track"],
+    searchColumns: ["p.category_name", "p.object_name", "p.variant_name"],
     orderBy: "datetime(p.updated_at) DESC, p.id DESC"
   },
   {

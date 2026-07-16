@@ -19,6 +19,12 @@ export interface PriceImportPreviewItem extends PriceImportInput {
   reason: string;
   message: string;
   existing_record_id: number | null;
+  existing_record_snapshot: {
+    id: number;
+    price: number;
+    source: string;
+    note: string;
+  } | null;
 }
 
 export interface PriceImportPreview {
@@ -107,14 +113,16 @@ const previewItem = (
   action: PriceImportAction,
   reason: string,
   message: string,
-  existingRecordId: number | null = null
+  existingRecordId: number | null = null,
+  existingRecordSnapshot: PriceImportPreviewItem["existing_record_snapshot"] = null
 ): PriceImportPreviewItem => ({
   ...input,
   row_index: rowIndex,
   action,
   reason,
   message,
-  existing_record_id: existingRecordId
+  existing_record_id: existingRecordId,
+  existing_record_snapshot: existingRecordSnapshot
 });
 
 const summarizePreview = (records: PriceImportPreviewItem[], totalCount: number): PriceImportPreview => ({
@@ -159,6 +167,10 @@ const validateInput = (rawValue: unknown, record: PriceImportInput) => {
 
 export const hashPriceImportPayload = (records: unknown[]) => createHash("sha256")
   .update(JSON.stringify(records.map(normalizeInput)))
+  .digest("hex");
+
+export const hashPriceImportPreview = (preview: PriceImportPreview) => createHash("sha256")
+  .update(JSON.stringify(preview))
   .digest("hex");
 
 export const buildPriceImportPreview = async (db: any, rawRecords: unknown[]): Promise<PriceImportPreview> => {
@@ -294,7 +306,13 @@ export const buildPriceImportPreview = async (db: any, rawRecords: unknown[]): P
       unchanged ? "skip" : "update",
       unchanged ? "RECORD_UNCHANGED" : "EXISTING_RECORD_CHANGED",
       unchanged ? "数据库中已有完全相同记录，将跳过" : "数据库中已有同日记录，将更新价格、来源和备注",
-      Number(existing.id)
+      Number(existing.id),
+      {
+        id: Number(existing.id),
+        price: Number(existing.price),
+        source: toText(existing.source),
+        note: toText(existing.note)
+      }
     ));
   }
 
@@ -346,6 +364,35 @@ export const buildPriceImportCommitResult = (
   failed_records: preview.records.filter(record => record.action === "conflict" || record.action === "error")
 });
 
+export const registerPriceImportPreview = async (
+  db: any,
+  batchId: string,
+  rawRecords: unknown[],
+  preview: PriceImportPreview
+) => {
+  const payloadHash = hashPriceImportPayload(rawRecords);
+  const previewHash = hashPriceImportPreview(preview);
+  const existing = await db.get(
+    "SELECT payload_hash, preview_hash FROM price_import_previews WHERE batch_id = ?",
+    [batchId]
+  );
+
+  if (existing) {
+    if (existing.payload_hash !== payloadHash || existing.preview_hash !== previewHash) {
+      throw new PriceImportBatchConflictError("该预览批次已存在且内容不一致，请重新预览");
+    }
+    return { payloadHash, previewHash };
+  }
+
+  await db.run(
+    `INSERT INTO price_import_previews
+     (batch_id, payload_hash, preview_hash, preview_json, created_at)
+     VALUES (?, ?, ?, ?, ?)`,
+    [batchId, payloadHash, previewHash, JSON.stringify(preview), new Date().toISOString()]
+  );
+  return { payloadHash, previewHash };
+};
+
 export const executePriceImportBatch = async (
   db: any,
   batchId: string,
@@ -371,17 +418,36 @@ export const executePriceImportBatch = async (
     throw new PriceImportBatchConflictError("该批次尚未完成，请稍后重试");
   }
 
+  const registeredPreview = await db.get(
+    `SELECT payload_hash, preview_hash, consumed_at
+     FROM price_import_previews
+     WHERE batch_id = ?`,
+    [batchId]
+  );
+  if (!registeredPreview) {
+    throw new PriceImportBatchConflictError("未找到对应的预览批次，请先重新预览");
+  }
+  if (registeredPreview.payload_hash !== payloadHash) {
+    throw new PriceImportBatchConflictError("提交内容与预览批次不一致，请重新预览");
+  }
+  if (registeredPreview.consumed_at) {
+    throw new PriceImportBatchConflictError("该预览批次已被使用，请重新预览");
+  }
+
+  const preview = await buildPriceImportPreview(db, rawRecords);
+  if (hashPriceImportPreview(preview) !== registeredPreview.preview_hash) {
+    throw new PriceImportBatchConflictError("预览后相关数据已发生变化，请重新预览后再导入");
+  }
+  if (preview.conflict_count > 0 || preview.error_count > 0) {
+    throw new PriceImportValidationError(preview);
+  }
+
   const now = new Date().toISOString();
   await db.run(
     `INSERT INTO price_import_batches (batch_id, payload_hash, status, created_at)
      VALUES (?, ?, 'processing', ?)`,
     [batchId, payloadHash, now]
   );
-
-  const preview = await buildPriceImportPreview(db, rawRecords);
-  if (preview.conflict_count > 0 || preview.error_count > 0) {
-    throw new PriceImportValidationError(preview);
-  }
 
   const warningRecords: unknown[] = [];
   if (options.collectWarnings) {
@@ -409,6 +475,10 @@ export const executePriceImportBatch = async (
      SET status = 'completed', result_json = ?, completed_at = ?
      WHERE batch_id = ?`,
     [JSON.stringify(result), new Date().toISOString(), batchId]
+  );
+  await db.run(
+    "UPDATE price_import_previews SET consumed_at = ? WHERE batch_id = ?",
+    [new Date().toISOString(), batchId]
   );
 
   return { result, idempotentReplay: false };

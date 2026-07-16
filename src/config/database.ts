@@ -31,6 +31,7 @@ const initDatabase = async (db: Database) => {
   if (shouldInitializeBusinessTables) {
 		  await db.exec("CREATE TABLE IF NOT EXISTS price_records (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT NOT NULL, category TEXT NOT NULL, object_name TEXT NOT NULL, variant TEXT, price REAL NOT NULL, source TEXT, note TEXT, track TEXT, type TEXT DEFAULT 'manual', market_type_preset TEXT DEFAULT 'standard', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)");
 		  await db.exec("CREATE TABLE IF NOT EXISTS price_import_batches (batch_id TEXT PRIMARY KEY, payload_hash TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('processing', 'completed')), result_json TEXT, created_at TEXT NOT NULL, completed_at TEXT)");
+		  await db.exec("CREATE TABLE IF NOT EXISTS price_import_previews (batch_id TEXT PRIMARY KEY, payload_hash TEXT NOT NULL, preview_hash TEXT NOT NULL, preview_json TEXT NOT NULL, created_at TEXT NOT NULL, consumed_at TEXT)");
 		  await db.exec("CREATE TABLE IF NOT EXISTS price_quality_alert_reviews (alert_key TEXT PRIMARY KEY, status TEXT NOT NULL DEFAULT 'pending', note TEXT, reviewed_at TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)");
 		  await ensureColumn("price_quality_alert_reviews", "record_id", "INTEGER");
 		  await ensureColumn("price_quality_alert_reviews", "alert_type", "TEXT");

@@ -8,7 +8,8 @@ import { open, type Database } from "sqlite";
 import {
   buildPriceImportPreview,
   executePriceImportBatch,
-  PriceImportBatchConflictError
+  PriceImportBatchConflictError,
+  registerPriceImportPreview
 } from "../src/services/priceImportService";
 
 const setupDatabase = async (filename: string) => {
@@ -50,6 +51,14 @@ const setupDatabase = async (filename: string) => {
       result_json TEXT,
       created_at TEXT NOT NULL,
       completed_at TEXT
+    );
+    CREATE TABLE price_import_previews (
+      batch_id TEXT PRIMARY KEY,
+      payload_hash TEXT NOT NULL,
+      preview_hash TEXT NOT NULL,
+      preview_json TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      consumed_at TEXT
     );
   `);
   await db.run("INSERT INTO categories (name) VALUES (?)", ["纪念钞"]);
@@ -156,6 +165,8 @@ test("price import preview blocks an ambiguous existing duplicate instead of upd
 test("replaying the same import batch writes once and returns the original result", async () => {
   await withTempDatabase(async db => {
     const records = [record("2026-07-10", 70)];
+    const preview = await buildPriceImportPreview(db, records);
+    await registerPriceImportPreview(db, "batch-one", records, preview);
 
     await db.exec("BEGIN IMMEDIATE TRANSACTION");
     const first = await executePriceImportBatch(db, "batch-one", records);
@@ -178,5 +189,41 @@ test("replaying the same import batch writes once and returns the original resul
       PriceImportBatchConflictError
     );
     await db.exec("ROLLBACK");
+  });
+});
+
+test("price import commit rejects a batch when relevant data changed after preview", async () => {
+  await withTempDatabase(async db => {
+    const now = new Date().toISOString();
+    await db.run(
+      `INSERT INTO price_records
+       (date, category, object_name, variant, price, source, note, created_at, updated_at)
+       VALUES (?, ?, ?, '', ?, ?, ?, ?, ?)`,
+      ["2026-07-11", "纪念钞", "龙钞散张", 70, "闲鱼", "预览时价格", now, now]
+    );
+    const records = [record("2026-07-11", 72, "闲鱼", "准备导入")];
+    const preview = await buildPriceImportPreview(db, records);
+    await registerPriceImportPreview(db, "stale-preview", records, preview);
+
+    await db.run(
+      "UPDATE price_records SET price = ?, note = ?, updated_at = ? WHERE date = ?",
+      [71, "预览后人工修改", new Date().toISOString(), "2026-07-11"]
+    );
+
+    await db.exec("BEGIN IMMEDIATE TRANSACTION");
+    await assert.rejects(
+      () => executePriceImportBatch(db, "stale-preview", records),
+      (error: unknown) => error instanceof PriceImportBatchConflictError
+        && error.message.includes("数据已发生变化")
+    );
+    await db.exec("ROLLBACK");
+
+    const saved = await db.get<{ price: number; note: string }>(
+      "SELECT price, note FROM price_records WHERE date = ?",
+      ["2026-07-11"]
+    );
+    assert.deepEqual(saved, { price: 71, note: "预览后人工修改" });
+    const batch = await db.get("SELECT batch_id FROM price_import_batches WHERE batch_id = ?", ["stale-preview"]);
+    assert.equal(batch, undefined);
   });
 });
