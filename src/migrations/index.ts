@@ -5490,6 +5490,240 @@ const migrations: Migration[] = [
       );
       await dbExec(db, 'CREATE INDEX IF NOT EXISTS idx_price_import_previews_created_at ON price_import_previews(created_at DESC)');
     }
+  },
+  {
+    id: '20260718_001_seed_crybaby_crying_bunny_source_mapping',
+    name: 'Seed Crybaby crying bunny Qiandao source mapping',
+    run: async (db: any) => {
+      if (!(await migrationTableExists(db, 'source_mappings'))) return;
+
+      const category = await dbGet<any>(
+        db,
+        "SELECT id, name FROM categories WHERE name = ? AND COALESCE(is_archived, 0) = 0",
+        ['泡泡玛特']
+      );
+      const object = category
+        ? await dbGet<any>(
+          db,
+          "SELECT id, name FROM objects WHERE category_id = ? AND name = ? AND COALESCE(is_archived, 0) = 0",
+          [category.id, '眼泪工厂']
+        )
+        : undefined;
+      const variant = object
+        ? await dbGet<any>(
+          db,
+          "SELECT id, name FROM variants WHERE object_id = ? AND name = ? AND COALESCE(is_archived, 0) = 0",
+          [object.id, '哭哭兔']
+        )
+        : undefined;
+      const status = category && object && variant ? 'enabled' : 'unmapped';
+      const note = status === 'enabled'
+        ? '千岛眼泪工厂系列-搪胶脸毛绒盲盒；不要误接同名40元手办款'
+        : '初始化时未找到泡泡玛特/眼泪工厂/哭哭兔主数据，请在数据源映射页面确认';
+      const externalMeta = JSON.stringify({
+        query: '眼泪工厂 哭哭兔',
+        spu_id: '791072292330313271'
+      });
+
+      await dbRun(
+        db,
+        `INSERT OR IGNORE INTO source_mappings
+           (source_key, source_name, external_key, external_name, external_meta_json,
+            category_id, object_id, variant_id, category_name, object_name, variant_name,
+            status, note)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          'qiandao_popmart',
+          '千岛泡泡玛特',
+          '791072292330313271',
+          '哭哭兔',
+          externalMeta,
+          category?.id || null,
+          object?.id || null,
+          variant?.id || 0,
+          category?.name || '泡泡玛特',
+          object?.name || '眼泪工厂',
+          variant?.name || '哭哭兔',
+          status,
+          note
+        ]
+      );
+
+      await dbRun(
+        db,
+        `UPDATE source_mappings
+         SET source_name = ?,
+             external_name = ?,
+             external_meta_json = ?,
+             category_id = ?,
+             object_id = ?,
+             variant_id = ?,
+             category_name = ?,
+             object_name = ?,
+             variant_name = ?,
+             status = CASE WHEN status = 'disabled' THEN status ELSE ? END,
+             note = CASE WHEN status = 'disabled' THEN note ELSE ? END,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE source_key = ? AND external_key = ?`,
+        [
+          '千岛泡泡玛特',
+          '哭哭兔',
+          externalMeta,
+          category?.id || null,
+          object?.id || null,
+          variant?.id || 0,
+          category?.name || '泡泡玛特',
+          object?.name || '眼泪工厂',
+          variant?.name || '哭哭兔',
+          status,
+          note,
+          'qiandao_popmart',
+          '791072292330313271'
+        ]
+      );
+    }
+  },
+  {
+    id: '20260718_002_seed_crybaby_crying_bunny_history',
+    name: 'Seed Crybaby crying bunny master data and price history',
+    run: async (db: any) => {
+      if (!(await migrationTableExists(db, 'categories'))
+        || !(await migrationTableExists(db, 'objects'))
+        || !(await migrationTableExists(db, 'variants'))
+        || !(await migrationTableExists(db, 'price_records'))) {
+        return;
+      }
+
+      const now = new Date().toISOString();
+      await dbRun(
+        db,
+        `INSERT OR IGNORE INTO categories (name, created_at, updated_at)
+         VALUES (?, ?, ?)`,
+        ['泡泡玛特', now, now]
+      );
+      const category = await dbGet<any>(
+        db,
+        "SELECT id, name FROM categories WHERE name = ? AND COALESCE(is_archived, 0) = 0",
+        ['泡泡玛特']
+      );
+      if (!category) return;
+
+      await dbRun(
+        db,
+        `INSERT OR IGNORE INTO objects (category_id, name, created_at, updated_at)
+         VALUES (?, ?, ?, ?)`,
+        [category.id, '眼泪工厂', now, now]
+      );
+      const object = await dbGet<any>(
+        db,
+        "SELECT id, name FROM objects WHERE category_id = ? AND name = ? AND COALESCE(is_archived, 0) = 0",
+        [category.id, '眼泪工厂']
+      );
+      if (!object) return;
+
+      await dbRun(
+        db,
+        `INSERT OR IGNORE INTO variants (object_id, name, created_at, updated_at)
+         VALUES (?, ?, ?, ?)`,
+        [object.id, '哭哭兔', now, now]
+      );
+      const variant = await dbGet<any>(
+        db,
+        "SELECT id, name FROM variants WHERE object_id = ? AND name = ? AND COALESCE(is_archived, 0) = 0",
+        [object.id, '哭哭兔']
+      );
+      if (!variant) return;
+
+      const history: Array<[string, number]> = [
+        ['2025-07-18', 220],
+        ['2025-08-01', 210],
+        ['2025-08-08', 172],
+        ['2025-08-22', 150],
+        ['2025-09-12', 142],
+        ['2025-09-26', 132],
+        ['2025-10-24', 129],
+        ['2025-12-19', 128],
+        ['2026-01-02', 142],
+        ['2026-01-16', 154],
+        ['2026-01-30', 171],
+        ['2026-02-13', 186],
+        ['2026-02-20', 193],
+        ['2026-02-27', 174],
+        ['2026-03-06', 155],
+        ['2026-03-27', 161],
+        ['2026-04-10', 141],
+        ['2026-04-24', 138],
+        ['2026-05-08', 154],
+        ['2026-05-22', 178],
+        ['2026-06-05', 177],
+        ['2026-06-19', 189],
+        ['2026-06-26', 206],
+        ['2026-07-17', 238],
+        ['2026-07-18', 240]
+      ];
+
+      for (const [date, price] of history) {
+        await dbRun(
+          db,
+          `INSERT INTO price_records
+             (date, category, object_name, variant, price, source, note, created_at, updated_at)
+           SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
+           WHERE NOT EXISTS (
+             SELECT 1
+             FROM price_records
+             WHERE date = ?
+               AND category = ?
+               AND object_name = ?
+               AND COALESCE(variant, '') = ?
+           )`,
+          [
+            date,
+            '泡泡玛特',
+            '眼泪工厂',
+            '哭哭兔',
+            price,
+            '',
+            '',
+            now,
+            now,
+            date,
+            '泡泡玛特',
+            '眼泪工厂',
+            '哭哭兔'
+          ]
+        );
+      }
+
+      if (await migrationTableExists(db, 'source_mappings')) {
+        await dbRun(
+          db,
+          `UPDATE source_mappings
+           SET category_id = ?,
+               object_id = ?,
+               variant_id = ?,
+               category_name = ?,
+               object_name = ?,
+               variant_name = ?,
+               status = CASE WHEN status = 'disabled' THEN status ELSE 'enabled' END,
+               note = CASE
+                 WHEN status = 'disabled' THEN note
+                 ELSE '千岛眼泪工厂系列-搪胶脸毛绒盲盒；不要误接同名40元手办款'
+               END,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE source_key = ? AND external_key = ?`,
+          [
+            category.id,
+            object.id,
+            variant.id,
+            category.name,
+            object.name,
+            variant.name,
+            'qiandao_popmart',
+            '791072292330313271'
+          ]
+        );
+      }
+    }
   }
 
 ];

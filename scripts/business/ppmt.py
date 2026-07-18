@@ -37,8 +37,8 @@ HEADERS = {
     "Accept-Language": "zh-CN,zh;q=0.9",
 }
 
-# 泡泡玛特这一类在系统里没有变体，只按对象入库。
-# 这里只放已经能从名称、历史价格和搜索结果稳定对上的对象。
+# 这里只放已经能从名称、历史价格和搜索结果稳定对上的对象或变体。
+# 老映射仍按对象入库；同一对象下有多个具体商品时，通过 variant 精确落库。
 SOURCE_TARGETS = [
     {"object": "XG限定", "query": "XG限定", "spu_id": "929006833488630705"},
     {"object": "万圣节", "query": "Magic of Pumpkin", "spu_id": "789523968431240995"},
@@ -58,24 +58,35 @@ SOURCE_TARGETS = [
     {"object": "醒醒", "query": "醒醒", "spu_id": "970617028555622512"},
     {"object": "闪闪", "query": "闪闪", "spu_id": "801090280999627960"},
     {"object": "飞行员", "query": "JUMP FOR JOY", "spu_id": "593651152747287737"},
+    {
+        "object": "眼泪工厂",
+        "variant": "哭哭兔",
+        "query": "眼泪工厂 哭哭兔",
+        "spu_id": "791072292330313271",
+    },
 ]
 
 
 def load_source_targets(db_path):
     mappings, configured = load_enabled_source_mappings(db_path, SOURCE_KEY)
     if not configured:
-        return SOURCE_TARGETS
+        return [
+            {**target, "variant": str(target.get("variant") or "").strip()}
+            for target in SOURCE_TARGETS
+        ]
 
     targets = []
     for mapping in mappings:
         meta = mapping.get("external_meta") or {}
         object_name = str(mapping.get("object_name") or "").strip()
+        variant_name = str(mapping.get("variant_name") or "").strip()
         spu_id = str(meta.get("spu_id") or mapping.get("external_key") or "").strip()
         query = str(meta.get("query") or mapping.get("external_name") or object_name).strip()
         if not object_name or not spu_id or not query:
             continue
         targets.append({
             "object": object_name,
+            "variant": variant_name,
             "query": query,
             "spu_id": spu_id,
             "external_key": spu_id,
@@ -198,10 +209,10 @@ def fetch_source_items(source_targets):
     return source_items
 
 
-def load_enabled_objects(db_path, category):
+def load_enabled_master_data(db_path, category):
     conn = sqlite3.connect(db_path)
     try:
-        rows = conn.execute(
+        object_rows = conn.execute(
             """
             SELECT o.name
             FROM categories c
@@ -213,12 +224,36 @@ def load_enabled_objects(db_path, category):
             """,
             (category,),
         ).fetchall()
+        variant_rows = conn.execute(
+            """
+            SELECT o.name, v.name
+            FROM categories c
+            JOIN objects o ON o.category_id = c.id
+            JOIN variants v ON v.object_id = o.id
+            WHERE c.name = ?
+              AND COALESCE(c.is_archived, 0) = 0
+              AND COALESCE(o.is_archived, 0) = 0
+              AND COALESCE(v.is_archived, 0) = 0
+            ORDER BY o.name, v.name
+            """,
+            (category,),
+        ).fetchall()
     finally:
         conn.close()
-    return {row[0] for row in rows}
+    return (
+        {row[0] for row in object_rows},
+        {(row[0], row[1]) for row in variant_rows},
+    )
 
 
-def extract_records(source_items, enabled_objects, category, source_targets, source_name=SOURCE_NAME):
+def extract_records(
+    source_items,
+    enabled_objects,
+    enabled_variants,
+    category,
+    source_targets,
+    source_name=SOURCE_NAME,
+):
     records = []
     missing_source_objects = []
     missing_errors = {}
@@ -226,7 +261,10 @@ def extract_records(source_items, enabled_objects, category, source_targets, sou
 
     for item in source_items:
         object_name = item["object"]
+        variant_name = str(item.get("variant") or "").strip()
         if object_name not in enabled_objects:
+            continue
+        if variant_name and (object_name, variant_name) not in enabled_variants:
             continue
 
         matched = item.get("matched")
@@ -238,7 +276,7 @@ def extract_records(source_items, enabled_objects, category, source_targets, sou
         records.append({
             "category": category,
             "object": object_name,
-            "variant": "",
+            "variant": variant_name,
             "price": matched["price"],
             "raw_price": matched["price"],
             "price_date": today(),
@@ -353,7 +391,7 @@ def main():
     parser = build_parser()
     args = parser.parse_args()
     try:
-        enabled_objects = load_enabled_objects(args.db, args.category)
+        enabled_objects, enabled_variants = load_enabled_master_data(args.db, args.category)
         source_targets = load_source_targets(args.db)
         if not source_targets:
             payload = {
@@ -381,6 +419,7 @@ def main():
         records, unmapped_enabled_objects, missing_source_objects, missing_errors = extract_records(
             source_items,
             enabled_objects,
+            enabled_variants,
             args.category,
             source_targets,
             args.source_name,
