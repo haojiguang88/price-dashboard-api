@@ -4,13 +4,13 @@ import json
 import math
 import os
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import requests
 
 
-DEFAULT_SYMBOLS = ["XAUUSD", "SGE_AGTD"]
+DEFAULT_SYMBOLS = ["XAUUSD", "SGE_AGTD", "USDCNH"]
 
 SYMBOL_CONFIGS = {
     "XAUUSD": {
@@ -26,6 +26,13 @@ SYMBOL_CONFIGS = {
         "asset_type": "precious_metal_anchor",
         "source": "tushare_sge",
         "source_label": "Tushare 上金所 Ag(T+D)",
+    },
+    "USDCNH": {
+        "name": "美元兑人民币",
+        "market": "global_fx",
+        "asset_type": "currency_conversion_auxiliary",
+        "source": "tushare_fxcm",
+        "source_label": "Tushare FXCM / USD/CNH",
     },
 }
 
@@ -253,33 +260,88 @@ def normalize_price_item(symbol, raw):
     }
 
 
+def midpoint(raw, bid_key, ask_key):
+    bid = json_number(raw.get(bid_key))
+    ask = json_number(raw.get(ask_key))
+    if bid is not None and ask is not None:
+        return (bid + ask) / 2
+    return bid if bid is not None else ask
+
+
+def normalize_fx_item(raw):
+    config = SYMBOL_CONFIGS["USDCNH"]
+    trade_date = format_tushare_date(raw.get("trade_date"))
+    close = json_number(raw.get("usd_cny_mid"))
+    if close is None:
+        close = midpoint(raw, "bid_close", "ask_close")
+    if not trade_date or close is None or is_weekend_date(trade_date):
+        return None
+    return {
+        "symbol": "USDCNH",
+        "name": config["name"],
+        "market": config["market"],
+        "asset_type": config["asset_type"],
+        "trade_date": trade_date,
+        "open": midpoint(raw, "bid_open", "ask_open") or close,
+        "high": midpoint(raw, "bid_high", "ask_high") or close,
+        "low": midpoint(raw, "bid_low", "ask_low") or close,
+        "close": close,
+        "volume": json_number(raw.get("tick_qty")),
+        "amount": None,
+        "source": config["source"],
+        "source_label": config["source_label"],
+        "raw_json": json.dumps(raw, ensure_ascii=False, default=str),
+    }
+
+
 def import_history_from_trading(source_db, symbols):
     if not Path(source_db).exists():
         raise RuntimeError(f"交易库不存在：{source_db}")
     source = sqlite3.connect(source_db)
     source.row_factory = sqlite3.Row
     try:
-        placeholders = ",".join("?" for _ in symbols)
-        rows = source.execute(
-            f"""
-            SELECT symbol, name, market, asset_type, trade_date, open, high, low, close,
-                   volume, amount, source
-            FROM financial_daily_prices
-            WHERE symbol IN ({placeholders})
-              AND source IN ('twelvedata', 'tushare_sge')
-            ORDER BY symbol ASC, trade_date ASC
-            """,
-            symbols,
-        ).fetchall()
         items = []
-        for row in rows:
-            symbol = row["symbol"]
-            if symbol not in SYMBOL_CONFIGS:
-                continue
-            raw = dict(row)
-            item = normalize_price_item(symbol, raw)
-            if item:
-                items.append(item)
+        main_symbols = [symbol for symbol in symbols if symbol in ("XAUUSD", "SGE_AGTD")]
+        if main_symbols:
+            placeholders = ",".join("?" for _ in main_symbols)
+            rows = source.execute(
+                f"""
+                SELECT symbol, name, market, asset_type, trade_date, open, high, low, close,
+                       volume, amount, source
+                FROM financial_daily_prices
+                WHERE symbol IN ({placeholders})
+                  AND source IN ('twelvedata', 'tushare_sge')
+                ORDER BY symbol ASC, trade_date ASC
+                """,
+                main_symbols,
+            ).fetchall()
+            for row in rows:
+                symbol = row["symbol"]
+                raw = dict(row)
+                item = normalize_price_item(symbol, raw)
+                if item:
+                    items.append(item)
+
+        if "USDCNH" in symbols:
+            fx_table = source.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'fx_daily_rates'"
+            ).fetchone()
+            if fx_table:
+                fx_rows = source.execute(
+                    """
+                    SELECT trade_date, usd_cny_mid,
+                           bid_open, bid_close, bid_high, bid_low,
+                           ask_open, ask_close, ask_high, ask_low,
+                           tick_qty
+                    FROM fx_daily_rates
+                    WHERE ts_code = 'USDCNH.FXCM' AND source = 'tushare_fxcm'
+                    ORDER BY trade_date ASC
+                    """
+                ).fetchall()
+                for row in fx_rows:
+                    item = normalize_fx_item(dict(row))
+                    if item:
+                        items.append(item)
         return items
     finally:
         source.close()
@@ -335,6 +397,28 @@ def fetch_tushare_silver():
     return sorted([item for item in items if item], key=lambda item: item["trade_date"])
 
 
+def fetch_tushare_fx():
+    load_local_env()
+    token = os.getenv("TUSHARE_TOKEN")
+    if not token:
+        raise RuntimeError("TUSHARE_TOKEN 未配置，无法拉取美元兑人民币")
+    try:
+        import tushare as ts
+    except ImportError as error:
+        raise RuntimeError(f"Tushare模块未安装：{error}") from error
+    pro = ts.pro_api(token)
+    start_date = (datetime.now() - timedelta(days=420)).strftime("%Y%m%d")
+    df = pro.fx_daily(
+        ts_code="USDCNH.FXCM",
+        start_date=start_date,
+        end_date=datetime.now().strftime("%Y%m%d"),
+    )
+    if df is None or df.empty:
+        raise RuntimeError("Tushare FXCM USD/CNH 返回数据为空")
+    items = [normalize_fx_item(dict(row)) for row in df.to_dict("records")]
+    return sorted([item for item in items if item], key=lambda item: item["trade_date"])
+
+
 def fetch_updates(symbols):
     items = []
     errors = []
@@ -351,6 +435,12 @@ def fetch_updates(symbols):
         except Exception as error:
             errors.append(f"SGE_AGTD: {error}")
             failed_symbols.append("SGE_AGTD")
+    if "USDCNH" in symbols:
+        try:
+            items.extend(fetch_tushare_fx())
+        except Exception as error:
+            errors.append(f"USDCNH: {error}")
+            failed_symbols.append("USDCNH")
     if errors and not items:
         raise RuntimeError("；".join(errors))
     return items, errors, failed_symbols

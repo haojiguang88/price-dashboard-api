@@ -367,7 +367,7 @@ const runMarketAnchorRefresh = async (timeoutMs = DEFAULT_REFRESH_TIMEOUT_MS): P
     "--mode",
     "update",
     "--symbols",
-    "XAUUSD,SGE_AGTD"
+    "XAUUSD,SGE_AGTD,USDCNH"
   ];
 
   return new Promise((resolve) => {

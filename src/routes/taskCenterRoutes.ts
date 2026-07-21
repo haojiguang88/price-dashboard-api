@@ -522,7 +522,7 @@ async function runCommodityMetalsPriceUpdate(config: any, timeoutMs: number, tas
 async function runPreciousMetalMarketUpdate(config: any, timeoutMs: number, taskName: string): Promise<BusinessTaskRunResult> {
   const symbols = Array.isArray(config.symbols)
     ? config.symbols.join(',')
-    : String(config.symbols || 'XAUUSD,SGE_AGTD');
+    : String(config.symbols || 'XAUUSD,SGE_AGTD,USDCNH');
   const args = [
     '--db',
     getDatabasePath(),

@@ -1,6 +1,7 @@
 import express from "express";
 import getDb, { getDatabasePath } from "../config/database";
 import { getSilverAnchorEvidence } from "../services/marketAnchorService";
+import { loadGoldSilverRatioSummary } from "../services/goldSilverRatioService";
 import {
   evaluateSilverSwingRules,
   MARKET_ASSIST_EVALUATOR_VERSION,
@@ -890,7 +891,7 @@ const buildCurrentSignalPayload = (
 router.get("/precious-metal-market/overview", async (_req, res) => {
   try {
     const db = await getDb();
-    const [mainQuotes, coverageRows, latestTask, marketCycle] = await Promise.all([
+    const [mainQuotes, coverageRows, latestTask, marketCycle, goldSilverRatio] = await Promise.all([
       loadMainQuoteSummaries(db),
       db.all(
         `SELECT symbol,
@@ -901,9 +902,9 @@ router.get("/precious-metal-market/overview", async (_req, res) => {
                 MIN(trade_date) AS min_date,
                 MAX(trade_date) AS max_date
          FROM market_anchor_daily_prices
-         WHERE symbol IN ('XAUUSD', 'SGE_AGTD')
+         WHERE symbol IN ('XAUUSD', 'SGE_AGTD', 'USDCNH')
          GROUP BY symbol, source
-         ORDER BY CASE symbol WHEN 'XAUUSD' THEN 1 WHEN 'SGE_AGTD' THEN 2 ELSE 99 END`
+         ORDER BY CASE symbol WHEN 'XAUUSD' THEN 1 WHEN 'SGE_AGTD' THEN 2 WHEN 'USDCNH' THEN 3 ELSE 99 END`
       ),
       db.get(
         `SELECT last_status, last_message, last_run_at
@@ -911,11 +912,12 @@ router.get("/precious-metal-market/overview", async (_req, res) => {
          WHERE task_key = 'precious_metal_market_update'
          LIMIT 1`
       ),
-      loadMarketCyclePreference(db)
+      loadMarketCyclePreference(db),
+      loadGoldSilverRatioSummary(db)
     ]);
 
     const layerCoverages = coverageRows.map((row: any) => ({
-      layer: "生意行情锚点",
+      layer: row.symbol === "USDCNH" ? "换算辅助数据" : "生意行情锚点",
       table: "market_anchor_daily_prices",
       label: `${row.name || row.symbol} · ${row.source_label || row.source}`,
       count: Number(row.total_count || 0),
@@ -934,6 +936,7 @@ router.get("/precious-metal-market/overview", async (_req, res) => {
         model_scores: [],
         training_gates: [],
         market_cycle: marketCycle,
+        gold_silver_ratio: goldSilverRatio,
         task_status: latestTask || null
       }
     });
@@ -949,6 +952,7 @@ router.get("/precious-metal-market/overview", async (_req, res) => {
         model_scores: [],
         training_gates: [],
         market_cycle: serializeMarketCyclePreference(null),
+        gold_silver_ratio: null,
         task_status: null
       }
     });

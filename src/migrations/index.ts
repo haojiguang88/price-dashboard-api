@@ -1,3 +1,5 @@
+import { DEFAULT_SELF_COGNITION_PROFILE } from "../services/selfCognitionProfileService";
+
 // 迁移管理模块
 
 interface Migration {
@@ -5723,6 +5725,116 @@ const migrations: Migration[] = [
           ]
         );
       }
+    }
+  },
+  {
+    id: '20260718_003_add_gold_silver_ratio_fx_auxiliary',
+    name: 'Add USD/CNH auxiliary source for display-only gold silver ratio',
+    run: async (db: any) => {
+      if (!(await migrationTableExists(db, 'task_center_tasks'))) return;
+      const task = await dbGet<any>(
+        db,
+        "SELECT config_json FROM task_center_tasks WHERE task_key = 'precious_metal_market_update' LIMIT 1"
+      );
+      if (!task) return;
+
+      let config: Record<string, any> = {};
+      try {
+        config = JSON.parse(String(task.config_json || '{}')) || {};
+      } catch {
+        config = {};
+      }
+      const configuredSymbols = Array.isArray(config.symbols)
+        ? config.symbols.map((value: unknown) => String(value || '').trim().toUpperCase()).filter(Boolean)
+        : String(config.symbols || 'XAUUSD,SGE_AGTD').split(',').map(value => value.trim().toUpperCase()).filter(Boolean);
+      config.symbols = Array.from(new Set([...configuredSymbols, 'USDCNH']));
+      if (!Number.isFinite(Number(config.task_timeout_minutes)) || Number(config.task_timeout_minutes) <= 0) {
+        config.task_timeout_minutes = 30;
+      }
+
+      await dbRun(
+        db,
+        `UPDATE task_center_tasks
+         SET config_json = ?,
+             last_message = ?,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE task_key = 'precious_metal_market_update'`,
+        [
+          JSON.stringify(config),
+          '每天拉取黄金现货、白银延期和美元兑人民币辅助数据；金银比只展示相对过热，不单独决定买卖'
+        ]
+      );
+    }
+  },
+  {
+    id: '20260719_001_create_self_cognition_profile',
+    name: 'Create editable self cognition profile and immutable version history',
+    run: async (db: any) => {
+      await dbExec(db, `
+        CREATE TABLE IF NOT EXISTS self_cognition_profiles (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          version_label TEXT NOT NULL,
+          profile_date TEXT NOT NULL,
+          phase_title TEXT NOT NULL,
+          phase_summary TEXT NOT NULL,
+          content_json TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS self_cognition_profile_versions (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          profile_id INTEGER NOT NULL DEFAULT 1,
+          version_label TEXT NOT NULL,
+          profile_date TEXT NOT NULL,
+          change_note TEXT NOT NULL,
+          phase_title TEXT NOT NULL,
+          phase_summary TEXT NOT NULL,
+          content_json TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          FOREIGN KEY (profile_id) REFERENCES self_cognition_profiles(id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_self_cognition_profile_versions_date
+          ON self_cognition_profile_versions(profile_id, datetime(created_at) DESC, id DESC);
+      `);
+
+      const existing = await dbGet<any>(db, 'SELECT id FROM self_cognition_profiles WHERE id = 1');
+      if (existing) return;
+
+      const seed = DEFAULT_SELF_COGNITION_PROFILE;
+      const now = new Date().toISOString();
+      const contentJson = JSON.stringify(seed.content);
+      await dbRun(
+        db,
+        `INSERT INTO self_cognition_profiles
+          (id, version_label, profile_date, phase_title, phase_summary, content_json, created_at, updated_at)
+         VALUES (1, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          seed.versionLabel,
+          seed.profileDate,
+          seed.phaseTitle,
+          seed.phaseSummary,
+          contentJson,
+          now,
+          now
+        ]
+      );
+      await dbRun(
+        db,
+        `INSERT INTO self_cognition_profile_versions
+          (profile_id, version_label, profile_date, change_note, phase_title, phase_summary, content_json, created_at)
+         VALUES (1, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          seed.versionLabel,
+          seed.profileDate,
+          seed.changeNote,
+          seed.phaseTitle,
+          seed.phaseSummary,
+          contentJson,
+          now
+        ]
+      );
     }
   }
 
