@@ -9,6 +9,7 @@ PY="${PY:-$API/.venv/bin/python}"
 PUBLIC_BASE_URL="${PUBLIC_BASE_URL:-}"
 PUBLIC_API="${PUBLIC_API:-${PUBLIC_BASE_URL:+$PUBLIC_BASE_URL/api}}"
 CORS_ORIGINS="${CORS_ORIGINS:-$PUBLIC_BASE_URL}"
+SERVER_AUTH_MODE="${SERVER_AUTH_MODE:-session}"
 AUTH_IDENTITY_HEADER="${AUTH_IDENTITY_HEADER:-X-Authenticated-User}"
 SECRETS_FILE="${SECRETS_FILE:-$API/.env.secrets}"
 
@@ -81,7 +82,7 @@ append_known_secrets_from_old_env() {
   [ -f "$old_env" ] || return 0
 
   local key line
-  for key in TWELVE_DATA_API_KEY TUSHARE_TOKEN AIRMB_USER_ID AIRMB_ACCESS_TOKEN AIRMB_OUT_SOURCE AIRMB_COOKIE; do
+  for key in TWELVE_DATA_API_KEY TUSHARE_TOKEN AIRMB_USER_ID AIRMB_ACCESS_TOKEN AIRMB_OUT_SOURCE AIRMB_COOKIE AUTH_USERNAME AUTH_PASSWORD_HASH AUTH_SESSION_SECRET AUTH_SESSION_TTL_HOURS; do
     line="$(grep -E "^${key}=" "$old_env" | tail -n 1 || true)"
     if [ -n "$line" ] && ! grep -qE "^${key}=" "$API/.env"; then
       printf '%s\n' "$line" >> "$API/.env"
@@ -150,6 +151,10 @@ if [ -z "$CORS_ORIGINS" ] || printf '%s' "$CORS_ORIGINS" | tr ',' '\n' | grep -E
   echo "远程 CORS_ORIGINS 必须全部使用 HTTPS。"
   exit 1
 fi
+if [ "$SERVER_AUTH_MODE" != "session" ] && [ "$SERVER_AUTH_MODE" != "trusted_reverse_proxy" ]; then
+  echo "SERVER_AUTH_MODE 只能是 session 或 trusted_reverse_proxy。"
+  exit 1
+fi
 if [ ! -f "$DB" ]; then
   echo "生产数据库不存在，部署脚本不会自动创建：$DB"
   exit 1
@@ -211,13 +216,24 @@ TASK_CENTER_PYTHON=$PY
 CORS_ORIGINS=$CORS_ORIGINS
 PUBLIC_BASE_URL=$PUBLIC_BASE_URL
 TRUST_PROXY=loopback
-SERVER_AUTH_MODE=trusted_reverse_proxy
+SERVER_AUTH_MODE=$SERVER_AUTH_MODE
 AUTH_IDENTITY_HEADER=$AUTH_IDENTITY_HEADER
 EOF
 
 append_env_file_entries "$SECRETS_FILE"
 if [ -n "$OLD_ENV_BACKUP" ]; then
   append_known_secrets_from_old_env "$OLD_ENV_BACKUP"
+fi
+if [ "$SERVER_AUTH_MODE" = "session" ]; then
+  for key in AUTH_USERNAME AUTH_PASSWORD_HASH AUTH_SESSION_SECRET; do
+    if ! grep -qE "^${key}=.+" "$API/.env"; then
+      echo "会话认证缺少 ${key}，请先写入 $SECRETS_FILE。"
+      exit 1
+    fi
+  done
+  if ! grep -q '^AUTH_SESSION_TTL_HOURS=' "$API/.env"; then
+    echo "AUTH_SESSION_TTL_HOURS=12" >> "$API/.env"
+  fi
 fi
 chmod 600 "$API/.env"
 

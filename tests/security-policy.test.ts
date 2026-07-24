@@ -99,6 +99,22 @@ test("remote mode requires HTTPS reverse proxy and server-side identity", () => 
   assert.equal(resolveAllowedCorsOrigins(config, ["https://business.example.com"]).has("http://localhost:5173"), false);
 });
 
+test("remote session mode fails closed when server credentials are missing", () => {
+  assert.throws(
+    () => resolveServerSecurityConfig({
+      NODE_ENV: "production",
+      DEPLOYMENT_MODE: "remote",
+      HOST: "127.0.0.1",
+      PORT: "3001",
+      CORS_ORIGINS: "https://business.example.com",
+      PUBLIC_BASE_URL: "https://business.example.com",
+      TRUST_PROXY: "loopback",
+      SERVER_AUTH_MODE: "session"
+    }),
+    /AUTH_USERNAME/
+  );
+});
+
 test("remote middleware rejects direct or anonymous access and accepts proxy identity", async () => {
   const config = resolveServerSecurityConfig({
     NODE_ENV: "production",

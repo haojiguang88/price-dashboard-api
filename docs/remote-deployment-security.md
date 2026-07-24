@@ -14,12 +14,22 @@
 远程部署不是把 API 直接监听到公网。API 仍然必须绑定 `127.0.0.1`，公网边界由同机 HTTPS 反向代理承担：
 
 1. 反向代理终止 TLS，公网只开放 HTTPS。
-2. 反向代理接入真实的服务端认证，例如 OIDC、Authelia、Cloudflare Access 或受控的服务器 Basic Auth。
-3. 认证成功后，反向代理先删除客户端传来的身份头，再写入由认证层生成的身份头。
-4. API 使用 `SERVER_AUTH_MODE=trusted_reverse_proxy`，并要求该身份头存在。
-5. API 端口不对公网开放，`TRUST_PROXY` 只信任 loopback。
+2. API 端口不对公网开放，`TRUST_PROXY` 只信任 loopback。
+3. 单用户部署使用服务端会话认证；账号、密码哈希和会话密钥只存放在后端环境变量。
+4. 登录成功后由后端签发 `HttpOnly + Secure + SameSite=Strict` Cookie，前端不保存密码或固定 Token。
+5. 如以后接入 OIDC、Authelia 或 Cloudflare Access，可切换回受信反向代理身份模式。
 
-示例环境：
+### 单用户会话模式
+
+生成密码哈希和会话密钥：
+
+```bash
+cd /www/wwwroot/price-dashboard-api
+npm run auth:hash-password
+openssl rand -hex 32
+```
+
+生产环境示例：
 
 ```dotenv
 NODE_ENV=production
@@ -28,9 +38,34 @@ HOST=127.0.0.1
 PORT=3001
 PUBLIC_BASE_URL=https://business.example.com
 TRUST_PROXY=loopback
+SERVER_AUTH_MODE=session
+AUTH_USERNAME=owner
+AUTH_PASSWORD_HASH=scrypt-v1:generated-salt:generated-hash
+AUTH_SESSION_SECRET=generated-random-secret
+AUTH_SESSION_TTL_HOURS=12
+CORS_ORIGINS=https://business.example.com
+```
+
+这三个认证变量缺失或格式错误时，生产后端会直接启动失败。
+
+会话模式下的 Nginx `/api` 代理至少保留以下请求信息：
+
+```nginx
+location /api/ {
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_pass http://127.0.0.1:3001;
+}
+```
+
+### 受信反向代理模式
+
+使用外部认证产品时配置：
+
+```dotenv
 SERVER_AUTH_MODE=trusted_reverse_proxy
 AUTH_IDENTITY_HEADER=X-Authenticated-User
-CORS_ORIGINS=https://business.example.com
 ```
 
 反向代理必须用认证上游产生的变量覆盖身份头，不能引用或透传客户端的同名头：
@@ -42,11 +77,10 @@ proxy_set_header X-Forwarded-Proto https;
 proxy_pass http://127.0.0.1:3001;
 ```
 
-当前代码只定义并强制执行上述“受信反向代理身份”契约，不擅自创建用户、密码或登录页面。认证产品和账号体系需要单独确认后再落地。
-
 ## 明确禁止
 
 - 不把 API Token、固定密钥或“万能密码”打进前端包。
+- 不把明文密码提交到 Git。
 - 不用 CORS 代替认证。
 - 不直接暴露 `3001` 端口。
 - 不在 HTTP 上发送登录凭据。

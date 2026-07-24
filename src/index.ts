@@ -15,6 +15,10 @@ import {
 import { getExpectedMigrationIds, runMigrations } from "./migrations";
 import { cleanupTaskCenterStartupState, startTaskCenterScheduler } from "./services/taskCenterScheduler";
 import { registerApiRoutes } from "./routes/apiRouteRegistry";
+import {
+  registerProtectedAuthRoutes,
+  registerPublicAuthRoutes
+} from "./routes/authRoutes";
 import { requestDatabaseContextMiddleware } from "./middleware/databaseContext";
 import {
   createProductionJsonSanitizer,
@@ -63,6 +67,7 @@ const allowLoopbackCors = !isProduction;
 app.use(requestIdMiddleware);
 app.use(createProductionJsonSanitizer(isProduction));
 app.use(cors({
+  credentials: true,
   origin(origin, callback) {
     if (!origin || allowedCorsOrigins.has(origin) || (allowLoopbackCors && isLoopbackOrigin(origin))) {
       callback(null, true);
@@ -74,8 +79,10 @@ app.use(cors({
   }
 }));
 app.use(express.json({ limit: "20mb" }));
-app.use(requestDatabaseContextMiddleware);
+registerPublicAuthRoutes(app, securityConfig);
 app.use(createRemoteAuthenticationMiddleware(securityConfig));
+registerProtectedAuthRoutes(app, securityConfig);
+app.use(requestDatabaseContextMiddleware);
 
 if (!isProduction) {
   app.get("/db-test", async (_req, res, next) => {

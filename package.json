@@ -8,6 +8,7 @@
     "dev:business": "sh -c 'PORT=${PORT:-3001} BUSINESS_DB_PATH=${BUSINESS_DB_PATH:-./data/price_dashboard_business_dev.db} tsx watch src/index.ts'",
     "build": "tsc",
     "test": "tsx --test tests/*.test.ts",
+    "auth:hash-password": "tsx scripts/generate-auth-password-hash.ts",
     "verify:business-db": "tsx scripts/verify-business-database.ts",
     "setup:business-tasks": "sh -c '${TASK_CENTER_PYTHON:-python3} -m pip install -r requirements-business-tasks.txt'",
     "sync:online-prices": "python3 scripts/business/sync_online_price_records.py",
