@@ -4,6 +4,8 @@ dist
 .playwright-cli
 deploy_artifacts
 .env
+.env.secrets
+.env.before_deploy_*
 .env.local
 .env.development
 .env.production
@@ -25,4 +27,7 @@ data/*.db-wal
 data/*.db-shm
 data/backups
 backups/
+deploy-sync/
+*.bundle
+create_record_tables_online.sql
 *.log
