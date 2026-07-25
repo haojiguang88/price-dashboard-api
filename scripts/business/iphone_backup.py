@@ -460,9 +460,7 @@ def upsert_price_records(db_path, records, dry_run=False):
                 ),
             ).fetchone()
 
-            note = f"备用源补价；源更新时间：{record.get('source_time') or '-'}"
-            if record.get("source_is_outdated"):
-                note += "；来源标记为非当天更新"
+            note = "来源标记为非当天更新" if record.get("source_is_outdated") else ""
 
             if existing is None:
                 conn.execute(
