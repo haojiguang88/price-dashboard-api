@@ -2,6 +2,7 @@ import express from "express";
 import getDb, { getDatabasePath } from "../config/database";
 import { getSilverAnchorEvidence } from "../services/marketAnchorService";
 import { loadGoldSilverRatioSummary } from "../services/goldSilverRatioService";
+import { getCoinSilverPremiumContext } from "../services/coinSilverPremiumService";
 import {
   evaluateSilverSwingRules,
   MARKET_ASSIST_EVALUATOR_VERSION,
@@ -1318,6 +1319,29 @@ router.get("/precious-metal-market/silver-anchor", async (req, res) => {
     res.status(200).json({
       success: false,
       message: (error as Error).message || "银价锚读取失败",
+      data: null
+    });
+  }
+});
+
+router.get("/precious-metal-market/coin-silver-premium-context", async (req, res) => {
+  try {
+    const refreshParam = String(req.query.refresh || "none").trim();
+    const refresh = refreshParam === "force"
+      ? "force"
+      : refreshParam === "stale"
+        ? "stale"
+        : "none";
+    const data = await getCoinSilverPremiumContext({
+      objectName: normalizeText(req.query.object_name),
+      variantName: normalizeText(req.query.variant_name),
+      refresh
+    });
+    res.json({ success: true, data });
+  } catch (error) {
+    res.status(200).json({
+      success: false,
+      message: (error as Error).message || "纪念币银本体溢价上下文读取失败",
       data: null
     });
   }

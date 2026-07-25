@@ -5,6 +5,11 @@ import {
   getSilverAnchorEvidence,
   usesSilverAnchorEvidence
 } from '../services/marketAnchorService';
+import {
+  buildCoinSilverPremiumItemValue,
+  getCoinSilverPremiumContext,
+  type CoinSilverPremiumInput
+} from '../services/coinSilverPremiumService';
 
 const router = express.Router();
 
@@ -40,6 +45,8 @@ const isPlainObject = (value: unknown): value is Record<string, unknown> => (
 const attachSilverAnchorEvidence = async (
   categoryName: string,
   categoryRiskType: string,
+  objectName: string,
+  variantName: string,
   extraResult: unknown,
   items: any[]
 ) => {
@@ -72,22 +79,81 @@ const attachSilverAnchorEvidence = async (
     silver_anchor: anchor
   };
 
+  const rawPremiumInput = isPlainObject(nextExtraResult.coin_silver_premium_input)
+    ? nextExtraResult.coin_silver_premium_input
+    : null;
+  const premiumInput: CoinSilverPremiumInput | undefined = rawPremiumInput
+    ? {
+        reference_price: rawPremiumInput.reference_price === null || rawPremiumInput.reference_price === undefined
+          ? null
+          : Number(rawPremiumInput.reference_price),
+        silver_grams: rawPremiumInput.silver_grams === null || rawPremiumInput.silver_grams === undefined
+          ? null
+          : Number(rawPremiumInput.silver_grams),
+        price_source: normalizeText(rawPremiumInput.price_source),
+        price_effective_date: normalizeText(rawPremiumInput.price_effective_date),
+        weight_basis: normalizeText(rawPremiumInput.weight_basis)
+      }
+    : undefined;
+  const premiumContext = categoryName === '纪念币' || categoryRiskType === 'commemorative_coin'
+    ? await getCoinSilverPremiumContext({
+        objectName,
+        variantName,
+        input: premiumInput,
+        anchor,
+        marketValues: Object.fromEntries(
+          items
+            .filter(item => normalizeText(item?.item_key))
+            .map(item => [normalizeText(item.item_key), item?.item_value])
+        )
+      })
+    : null;
+  const premiumSnapshot = premiumContext?.calculation || null;
+
+  if (premiumSnapshot) {
+    nextExtraResult.coin_silver_premium_snapshot = premiumSnapshot;
+    if (snapshot && isPlainObject(nextExtraResult.risk_evidence_snapshot)) {
+      const nextSnapshot = nextExtraResult.risk_evidence_snapshot;
+      nextExtraResult.risk_evidence_snapshot = {
+        ...nextSnapshot,
+        market_anchor: {
+          ...(isPlainObject(nextSnapshot.market_anchor) ? nextSnapshot.market_anchor : {}),
+          silver_anchor: anchor,
+          coin_silver_premium: premiumSnapshot
+        }
+      };
+    }
+  }
+
   const hasSilverAnchorItem = items.some(item => item?.item_key === 'silver_market_anchor');
+  const hasCoinPremiumItem = items.some(item => item?.item_key === 'coin_silver_premium');
+  const augmentedItems = hasSilverAnchorItem
+    ? [...items]
+    : [
+        ...items,
+        {
+          item_key: 'silver_market_anchor',
+          item_label: '银价锚背景',
+          group_name: '行情锚点',
+          item_value: buildSilverAnchorItemValue(anchor),
+          trigger_type: 'none',
+          trigger_reason: anchor.risk_reference_note || anchor.evidence_note
+        }
+      ];
+  if (premiumSnapshot && !hasCoinPremiumItem) {
+    augmentedItems.push({
+      item_key: 'coin_silver_premium',
+      item_label: '银本体溢价',
+      group_name: '行情锚点',
+      item_value: buildCoinSilverPremiumItemValue(premiumSnapshot),
+      trigger_type: 'none',
+      trigger_reason: premiumSnapshot.risk_note
+    });
+  }
+
   return {
     extraResult: nextExtraResult,
-    items: hasSilverAnchorItem
-      ? items
-      : [
-          ...items,
-          {
-            item_key: 'silver_market_anchor',
-            item_label: '银价锚背景',
-            group_name: '行情锚点',
-            item_value: buildSilverAnchorItemValue(anchor),
-            trigger_type: 'none',
-            trigger_reason: anchor.risk_reference_note || anchor.evidence_note
-          }
-        ]
+    items: augmentedItems
   };
 };
 
@@ -215,6 +281,8 @@ router.post('/check-records/category-risk', async (req, res) => {
     const augmented = await attachSilverAnchorEvidence(
       normalizeText(category_name),
       normalizeText(category_risk_type),
+      normalizeText(object_name),
+      normalizeText(variant_name),
       extra_result,
       items
     );
@@ -289,7 +357,7 @@ router.post('/check-records/category-risk', async (req, res) => {
     res.json({
       success: true,
       message: '品类风控记录保存成功',
-      data: { id: recordId }
+      data: { id: recordId, system_result }
     });
   } catch (error) {
     await db.run('ROLLBACK').catch(() => undefined);
