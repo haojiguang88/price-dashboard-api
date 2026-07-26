@@ -69,6 +69,24 @@ export type CoinSilverPremiumSnapshot = {
   };
 };
 
+export type HistoricalCoinSilverPremiumSnapshot = {
+  version: "historical-v1";
+  reference_price: number;
+  price_effective_date: string;
+  silver_grams: number;
+  weight_basis: string;
+  silver_anchor_date: string;
+  silver_price_per_gram: number;
+  silver_content_value: number;
+  premium_amount: number;
+  premium_percent: number;
+  premium_band: CoinSilverPremiumBand;
+  premium_label: string;
+  anchor_match: "same_day" | "previous_trading_day";
+  anchor_gap_days: number | null;
+  calculation_note: string;
+};
+
 type OriginalPriceRow = {
   id: number;
   object_name?: string | null;
@@ -175,11 +193,11 @@ export const inferCommemorativeCoinSilverWeight = (
     };
   }
 
-  const knownThirtyGramObjects = /交通卡|农行卡|工商卡|招商|邮政|智能卡|封装龙|龙银币|抗战80周年/;
-  if (knownThirtyGramObjects.test(normalizeText(objectName))) {
+  const knownOneOunceObjects = /交通卡|农行卡|工商卡|招商|邮政|智能卡|封装龙|龙银币/;
+  if (knownOneOunceObjects.test(normalizeText(objectName))) {
     return {
-      grams: 30,
-      basis: "按本地龙银币/卡类 30g 口径估算，可手动修改"
+      grams: 31,
+      basis: "按本地龙银币/卡类 1 盎司（31g）口径估算，可手动修改"
     };
   }
 
@@ -198,6 +216,74 @@ const getPremiumBand = (premiumPercent: number): {
   if (premiumPercent <= 60) return { band: "medium", label: "中等溢价" };
   if (premiumPercent <= 100) return { band: "high", label: "高溢价" };
   return { band: "very_high", label: "超高溢价" };
+};
+
+const dateOnlyToUtc = (value: string): number | null => {
+  const match = normalizeText(value).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const timestamp = Date.UTC(year, month - 1, day);
+  const date = new Date(timestamp);
+  if (
+    date.getUTCFullYear() !== year
+    || date.getUTCMonth() !== month - 1
+    || date.getUTCDate() !== day
+  ) {
+    return null;
+  }
+  return timestamp;
+};
+
+export const calculateHistoricalCoinSilverPremiumSnapshot = (
+  input: CoinSilverPremiumInput,
+  anchor: { trade_date?: string | null; close?: number | null }
+): HistoricalCoinSilverPremiumSnapshot | null => {
+  const referencePrice = positiveNumber(input.reference_price);
+  const silverGrams = positiveNumber(input.silver_grams);
+  const silverClose = positiveNumber(anchor.close);
+  const effectiveDate = normalizeText(input.price_effective_date).slice(0, 10);
+  const anchorDate = normalizeText(anchor.trade_date).slice(0, 10);
+  if (
+    referencePrice === null
+    || silverGrams === null
+    || silverClose === null
+    || !effectiveDate
+    || !anchorDate
+  ) {
+    return null;
+  }
+
+  const effectiveTimestamp = dateOnlyToUtc(effectiveDate);
+  const anchorTimestamp = dateOnlyToUtc(anchorDate);
+  const anchorGapDays = effectiveTimestamp !== null && anchorTimestamp !== null
+    ? Math.round((effectiveTimestamp - anchorTimestamp) / 86400000)
+    : null;
+  if (anchorGapDays !== null && anchorGapDays < 0) return null;
+
+  const silverContentValue = silverGrams * silverClose;
+  const premiumAmount = referencePrice - silverContentValue;
+  const premiumPercent = (referencePrice / silverContentValue - 1) * 100;
+  const premium = getPremiumBand(premiumPercent);
+
+  return {
+    version: "historical-v1",
+    reference_price: round(referencePrice),
+    price_effective_date: effectiveDate,
+    silver_grams: round(silverGrams, 3),
+    weight_basis: normalizeText(input.weight_basis) || "人工填写",
+    silver_anchor_date: anchorDate,
+    silver_price_per_gram: round(silverClose, 3),
+    silver_content_value: round(silverContentValue),
+    premium_amount: round(premiumAmount),
+    premium_percent: round(premiumPercent, 1),
+    premium_band: premium.band,
+    premium_label: premium.label,
+    anchor_match: anchorDate === effectiveDate ? "same_day" : "previous_trading_day",
+    anchor_gap_days: anchorGapDays,
+    calculation_note: "按发售/生效日或此前最近交易日的 Ag(T+D) 收盘价 × 含银克重计算；不计包装、评级、渠道费用和成色微差。"
+  };
 };
 
 const getTrendRisk = (anchor: SilverAnchorEvidence): {

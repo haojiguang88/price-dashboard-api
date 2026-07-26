@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  calculateHistoricalCoinSilverPremiumSnapshot,
   calculateCoinSilverPremiumSnapshot,
   inferCommemorativeCoinSilverWeight
 } from "../src/services/coinSilverPremiumService";
@@ -69,6 +70,39 @@ test("纪念币银本体溢价按重量和当日银价计算", () => {
   assert.equal(result.decision, "neutral");
 });
 
+test("商品原始价格按发售日历史银价生成溢价快照", () => {
+  const sameDay = calculateHistoricalCoinSilverPremiumSnapshot({
+    reference_price: 909,
+    silver_grams: 30,
+    price_effective_date: "2026-04-17",
+    weight_basis: "30g"
+  }, {
+    trade_date: "2026-04-17",
+    close: 19.588
+  });
+
+  assert.ok(sameDay);
+  assert.equal(sameDay.silver_content_value, 587.64);
+  assert.equal(sameDay.premium_percent, 54.7);
+  assert.equal(sameDay.anchor_match, "same_day");
+  assert.equal(sameDay.anchor_gap_days, 0);
+
+  const previousTradingDay = calculateHistoricalCoinSilverPremiumSnapshot({
+    reference_price: 430,
+    silver_grams: 30,
+    price_effective_date: "2025-08-02",
+    weight_basis: "30g"
+  }, {
+    trade_date: "2025-08-01",
+    close: 8.888
+  });
+
+  assert.ok(previousTradingDay);
+  assert.equal(previousTradingDay.premium_percent, 61.3);
+  assert.equal(previousTradingDay.anchor_match, "previous_trading_day");
+  assert.equal(previousTradingDay.anchor_gap_days, 1);
+});
+
 test("超高溢价在真实热度未确认时只提示补证据，不直接改变结果", () => {
   const result = calculateCoinSilverPremiumSnapshot({
     reference_price: 1198,
@@ -135,14 +169,14 @@ test("银价连续暴涨时负溢价只作背景，强承接下不直接降级",
   assert.match(result.risk_note, /不单独改变风控结果/);
 });
 
-test("含银重量优先从名称识别，龙银币卡类才按 30g 估算", () => {
+test("含银重量优先从名称识别，龙银币卡类才按 1 盎司 31g 估算", () => {
   assert.deepEqual(
     inferCommemorativeCoinSilverWeight("马年银币", "150g大黑马"),
     { grams: 150, basis: "从本地名称/记录识别 150g" }
   );
   assert.deepEqual(
     inferCommemorativeCoinSilverWeight("工商卡", "2026年"),
-    { grams: 30, basis: "按本地龙银币/卡类 30g 口径估算，可手动修改" }
+    { grams: 31, basis: "按本地龙银币/卡类 1 盎司（31g）口径估算，可手动修改" }
   );
   assert.equal(inferCommemorativeCoinSilverWeight("未知纪念币", "普通版").grams, null);
 });

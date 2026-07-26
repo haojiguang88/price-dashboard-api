@@ -2,11 +2,87 @@ import express from 'express';
 import getDb from '../config/database';
 import { isValidDateOnly } from '../utils/dateValidation';
 import { validateActiveMasterTargetByIds } from '../utils/masterData';
+import {
+  calculateHistoricalCoinSilverPremiumSnapshot,
+  inferCommemorativeCoinSilverWeight,
+} from '../services/coinSilverPremiumService';
 
 const router = express.Router();
 
+interface OriginalPriceRecordRow {
+  id: number;
+  category_name: string;
+  object_name: string;
+  variant_name?: string | null;
+  original_price: number;
+  effective_date: string;
+  reason?: string | null;
+  note?: string | null;
+  silver_anchor_date?: string | null;
+  silver_anchor_close?: number | null;
+  [key: string]: unknown;
+}
+
+const ORIGINAL_PRICE_RECORD_SELECT = `
+  SELECT opr.*,
+         CASE WHEN opr.category_name = '纪念币' THEN (
+           SELECT anchor.trade_date
+           FROM market_anchor_daily_prices anchor
+           WHERE anchor.symbol = 'SGE_AGTD'
+             AND anchor.source = 'tushare_sge'
+             AND anchor.trade_date <= opr.effective_date
+           ORDER BY anchor.trade_date DESC, anchor.id DESC
+           LIMIT 1
+         ) END AS silver_anchor_date,
+         CASE WHEN opr.category_name = '纪念币' THEN (
+           SELECT anchor.close
+           FROM market_anchor_daily_prices anchor
+           WHERE anchor.symbol = 'SGE_AGTD'
+             AND anchor.source = 'tushare_sge'
+             AND anchor.trade_date <= opr.effective_date
+           ORDER BY anchor.trade_date DESC, anchor.id DESC
+           LIMIT 1
+         ) END AS silver_anchor_close
+  FROM original_price_records opr
+`;
+
+const decorateOriginalPriceRecord = (row: OriginalPriceRecordRow | undefined) => {
+  if (!row) return undefined;
+  const {
+    silver_anchor_date: silverAnchorDate,
+    silver_anchor_close: silverAnchorClose,
+    ...record
+  } = row;
+  if (row.category_name !== '纪念币') {
+    return { ...record, silver_premium: null };
+  }
+
+  const inferredWeight = inferCommemorativeCoinSilverWeight(
+    row.object_name,
+    row.variant_name || '',
+    [row.reason, row.note].filter(Boolean).join(' '),
+  );
+  const silverPremium = calculateHistoricalCoinSilverPremiumSnapshot({
+    reference_price: row.original_price,
+    silver_grams: inferredWeight.grams,
+    price_effective_date: row.effective_date,
+    weight_basis: inferredWeight.basis,
+    price_source: `商品原始价格 #${row.id}`,
+  }, {
+    trade_date: silverAnchorDate,
+    close: silverAnchorClose,
+  });
+
+  return { ...record, silver_premium: silverPremium };
+};
+
 const getOriginalPriceRecordById = async (db: any, id: number | string) => {
-  return db.get('SELECT * FROM original_price_records WHERE id = ? AND is_deleted = 0', [id]);
+  const row: OriginalPriceRecordRow | undefined = await db.get(
+    `${ORIGINAL_PRICE_RECORD_SELECT}
+     WHERE opr.id = ? AND opr.is_deleted = 0`,
+    [id],
+  );
+  return decorateOriginalPriceRecord(row);
 };
 
 // 新增原始价格记录
@@ -80,14 +156,14 @@ router.get('/original-price-records', async (req, res) => {
     const total = Number(countRow?.total || 0);
     const totalPages = Math.max(1, Math.ceil(total / pageSize));
     const page = Math.min(requestedPage, totalPages);
-    const records = await db.all(
-      `SELECT *
-       FROM original_price_records
-       WHERE is_deleted = 0
-       ORDER BY effective_date DESC, datetime(created_at) DESC, id DESC
+    const rows = await db.all<OriginalPriceRecordRow[]>(
+      `${ORIGINAL_PRICE_RECORD_SELECT}
+       WHERE opr.is_deleted = 0
+       ORDER BY opr.effective_date DESC, datetime(opr.created_at) DESC, opr.id DESC
        LIMIT ? OFFSET ?`,
       [pageSize, (page - 1) * pageSize]
     );
+    const records = rows.map((row) => decorateOriginalPriceRecord(row));
     res.json({
       success: true,
       data: {
