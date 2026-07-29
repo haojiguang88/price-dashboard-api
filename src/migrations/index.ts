@@ -5836,6 +5836,27 @@ const migrations: Migration[] = [
         ]
       );
     }
+  },
+  {
+    id: '20260728_001_clear_automated_longyinbi_price_notes',
+    name: 'Remove automated Longyinbi price offset notes',
+    run: async (db: any) => {
+      if (!(await migrationTableExists(db, 'price_records'))) return;
+
+      await dbRun(
+        db,
+        `UPDATE price_records
+         SET note = '',
+             updated_at = CURRENT_TIMESTAMP
+         WHERE category = '纪念币'
+           AND object_name = '龙银币'
+           AND variant IN ('2025年信泰评级', '2026年信泰评级')
+           AND (
+             TRIM(COALESCE(note, '')) GLOB '裸币价 *；信泰+*'
+             OR TRIM(COALESCE(note, '')) GLOB '裸币价 *；信泰-*'
+           )`
+      );
+    }
   }
 
 ];

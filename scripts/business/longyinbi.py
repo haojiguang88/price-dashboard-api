@@ -75,15 +75,6 @@ def normalize_output_price(value):
     return round(price) if price.is_integer() else price
 
 
-def format_signed_price_offset(offset):
-    normalized = normalize_output_price(offset)
-    return f"+{normalized}" if float(normalized) >= 0 else str(normalized)
-
-
-def build_price_offset_note(source_price, offset):
-    return f"裸币价 {normalize_output_price(source_price)}；信泰{format_signed_price_offset(offset)}"
-
-
 def parse_external_key(external_key):
     parts = [part.strip() for part in normalize_text(external_key).split("|")]
     return {
@@ -139,18 +130,6 @@ def apply_price_offset(records, target):
             "note": "",
         })
 
-    if adjusted_records:
-        latest_index = max(
-            range(len(adjusted_records)),
-            key=lambda index: (
-                normalize_text(adjusted_records[index].get("price_date")),
-                index,
-            ),
-        )
-        adjusted_records[latest_index]["note"] = build_price_offset_note(
-            adjusted_records[latest_index]["source_price"],
-            offset,
-        )
     return adjusted_records
 
 
@@ -178,7 +157,7 @@ def upsert_price_records(db_path, records, dry_run=False):
             now = datetime.now().isoformat()
             existing = conn.execute(
                 """
-                SELECT id, price, source, note
+                SELECT id, price, source
                 FROM price_records
                 WHERE date = ?
                   AND category = ?
@@ -219,12 +198,8 @@ def upsert_price_records(db_path, records, dry_run=False):
                 results.append({**record, "action": "insert"})
                 continue
 
-            record_id, old_price, old_source, old_note = existing
-            if (
-                float(old_price) == float(record["price"])
-                and old_source == record["source"]
-                and (old_note or "") == note
-            ):
+            record_id, old_price, old_source = existing
+            if float(old_price) == float(record["price"]) and old_source == record["source"]:
                 skipped += 1
                 results.append({**record, "action": "skip", "id": record_id})
                 continue
@@ -234,11 +209,10 @@ def upsert_price_records(db_path, records, dry_run=False):
                 UPDATE price_records
                 SET price = ?,
                     source = ?,
-                    note = ?,
                     updated_at = ?
                 WHERE id = ?
                 """,
-                (record["price"], record["source"], note, now, record_id),
+                (record["price"], record["source"], now, record_id),
             )
             updated += 1
             results.append({**record, "action": "update", "id": record_id, "old_price": old_price})
