@@ -148,8 +148,9 @@ const permissionLayer = (evaluation: SilverSwingEvaluation) => {
   if (hits.has("extreme_volatility") || hits.has("falling_knife") || hits.has("fast_drop")) return "P0 买入关闭";
   if (hits.has("fast_rise") || hits.has("overheat_rise") || hits.has("ma250_stretch")) return "P5 只卖不买";
   if (hits.has("high_volatility") || hits.has("slow_decline")) return "P1 降权复核";
-  if (hits.has("healthy_pullback") || hits.has("medium_sideways") || hits.has("sideways")) return "P2 小批次观察";
-  if (hits.has("slow_rise")) return "P2 慢涨观察，不追";
+  if (hits.has("healthy_pullback")) return "P3 修复候选";
+  if (hits.has("medium_sideways") || hits.has("slow_rise")) return "P2 小批次观察";
+  if (hits.has("sideways")) return "P1 观察复评";
   return "P4 正常计划复核";
 };
 
@@ -578,7 +579,7 @@ const main = async () => {
     sections.push("- 优先看行情簇后验，单日起点后验只作降权参考，避免一轮行情被重复计数。");
     sections.push("- 固定样本窗口分开看：历史窗口用于防过拟合，当前窗口用于验证，不直接调参。");
     sections.push("- 暴涨、连续过热、飞刀、暴跌的后验只用于验证纪律，不用于预测下一天。");
-    sections.push("- 白银实物侧只在高波动/飞刀/阴跌/远离年线等拦截解除后，才讨论横盘或回踩不破带来的小批次复核。");
+    sections.push("- 白银实物侧只在高波动/飞刀/阴跌/远离年线等拦截解除后，才讨论中期横盘或回踩不破带来的小批次复核；普通横盘只恢复观察。");
     sections.push("- 黄金仍然只作贵金属天气锚，不能单独授予白银买卖权限。");
     sections.push("- 这份报告是雷达，不是方向盘；它负责发现风险和阶段位置，不负责主动开车。");
     sections.push("");

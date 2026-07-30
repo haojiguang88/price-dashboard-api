@@ -10,6 +10,10 @@ import {
   type MarketPricePoint,
   type SilverSwingEvaluation
 } from "../services/marketAssistEvaluator";
+import {
+  buildSilverRealtimeInterpretation,
+  type MarketOhlcvPoint
+} from "../services/marketRealtimeInterpretation";
 
 const router = express.Router();
 
@@ -466,8 +470,7 @@ const buildVolatilityRestoreConditions = (
   const noFallingKnife = !hits.has("falling_knife") && !hits.has("fast_drop");
   const noOverheat = !hits.has("overheat_rise") && !hits.has("fast_rise");
   const enoughCoolingDays = clearStreakDays >= 5;
-  const structureRepaired = hits.has("sideways")
-    || hits.has("medium_sideways")
+  const structureRepaired = hits.has("medium_sideways")
     || hits.has("healthy_pullback")
     || (hits.has("slow_rise") && noOverheat);
 
@@ -513,8 +516,10 @@ const buildVolatilityRestoreConditions = (
       label: "结构有修复证据",
       status: statusOf(structureRepaired),
       text: structureRepaired
-        ? "横盘、回踩不破或温和慢涨给出结构修复证据。"
-        : "暂未看到横盘、回踩不破或温和慢涨的结构证据。"
+        ? "中期横盘、回踩不破或温和慢涨给出结构修复证据。"
+        : hits.has("sideways")
+          ? "普通横盘只是候选，仍需中期横盘、回踩不破或温和慢涨确认。"
+          : "暂未看到中期横盘、回踩不破或温和慢涨的结构证据。"
     }
   ];
 };
@@ -576,7 +581,7 @@ const buildVolatilityPhase = (
       tone = "watch";
       summary = "高波动还在延续，买入继续降权；有仓按纪律管理，不急着判断已经安全。";
     }
-    buyPermissionHint = "买入降权，只允许观察或小批次复核。";
+    buyPermissionHint = "买入降权，只允许观察和复评，不执行正式买入。";
   } else if (recentHighVolatilityDays20 > 0 && clearStreakDays < 5) {
     key = "cooling";
     label = "高波动解除观察中";
@@ -736,15 +741,15 @@ const buildActionBias = (evaluation: SilverSwingEvaluation, rules: any[] = []) =
     return {
       buy_permission: "reduced",
       sell_discipline: "watch",
-      position_hint: "买入降权，只允许小批次复核；等待波动继续冷却。",
+      position_hint: "买入降权，只允许观察和复评；等待波动继续冷却。",
       summary: `高波动冷却区。${metricText}。`
     };
   }
   if (hits.has("slow_rise")) {
     return {
-      buy_permission: "normal",
+      buy_permission: "small_batch",
       sell_discipline: "watch",
-      position_hint: "慢涨不出，不追涨；有仓按计划持有观察，卖点提前挂好。",
+      position_hint: "慢涨不出、不追涨；只允许小批次观察，有仓按计划持有并提前挂好卖点。",
       summary: `慢涨信号命中。${metricText}。`
     };
   }
@@ -756,18 +761,34 @@ const buildActionBias = (evaluation: SilverSwingEvaluation, rules: any[] = []) =
       summary: `阴跌信号命中。${metricText}。`
     };
   }
-  if (hits.has("sideways") || hits.has("healthy_pullback")) {
+  if (hits.has("healthy_pullback")) {
     return {
       buy_permission: "small_batch",
       sell_discipline: "normal",
-      position_hint: "允许小批次重新评估，不一把打满。",
-      summary: `结构进入观察修复区。${metricText}。`
+      position_hint: "健康回踩已有修复证据，允许按计划小批次执行，仍不放大仓位。",
+      summary: `结构进入修复候选区。${metricText}。`
+    };
+  }
+  if (hits.has("medium_sideways")) {
+    return {
+      buy_permission: "small_batch",
+      sell_discipline: "normal",
+      position_hint: "中期横盘已经确认，允许带退出条件的小批次观察，不一把打满。",
+      summary: `结构进入中期横盘观察区。${metricText}。`
+    };
+  }
+  if (hits.has("sideways")) {
+    return {
+      buy_permission: "review_only",
+      sell_discipline: "normal",
+      position_hint: "普通横盘只恢复观察和复评，不执行正式买入；等待中期横盘或健康回踩。",
+      summary: `结构只是横盘候选。${metricText}。`
     };
   }
   return {
-    buy_permission: "normal",
+    buy_permission: "review_only",
     sell_discipline: "normal",
-    position_hint: "未命中强纪律信号，按计划仓位和价格区间执行。",
+    position_hint: "未命中强纪律信号也不自动放行买入，继续观察并等待明确结构。",
     summary: `当前为中性观察。${metricText}。`
   };
 };
@@ -846,12 +867,32 @@ const buildCurrentSignalPayload = (
   evaluation: SilverSwingEvaluation,
   rules: any[],
   ruleGroup: string,
-  recentEvaluations: SilverSwingEvaluation[] = [evaluation]
+  recentEvaluations: SilverSwingEvaluation[] = [evaluation],
+  pricePoints: MarketOhlcvPoint[] = [],
+  goldContext: {
+    evaluation: SilverSwingEvaluation;
+    latestPoint?: MarketOhlcvPoint | null;
+  } | null = null
 ) => {
   const primaryState = pickPrimaryState(evaluation);
-  const actionBias = ruleGroup === "precious_metal_plan" || symbolConfig.symbol === "XAUUSD"
+  const baseActionBias = ruleGroup === "precious_metal_plan" || symbolConfig.symbol === "XAUUSD"
     ? buildGoldAnchorBias(evaluation)
     : buildActionBias(evaluation, rules);
+  const realtimeInterpretation = symbolConfig.symbol === "SGE_AGTD"
+    ? buildSilverRealtimeInterpretation({
+      evaluation,
+      pricePoints,
+      primaryState,
+      goldContext
+    })
+    : null;
+  const actionBias = realtimeInterpretation
+    ? {
+      ...baseActionBias,
+      buy_permission: realtimeInterpretation.buy_permission,
+      position_hint: realtimeInterpretation.action_hint
+    }
+    : baseActionBias;
   const hitSet = new Set(evaluation.hitRuleKeys);
   const ruleMap = new Map(rules.map((rule: any) => [rule.rule_key, rule]));
   const stateSteps = stateStepConfigs.map(config => {
@@ -881,6 +922,7 @@ const buildCurrentSignalPayload = (
     action_bias: actionBias,
     hit_rule_keys: evaluation.hitRuleKeys,
     rule_evaluations: evaluation.rules,
+    realtime_interpretation: realtimeInterpretation,
     volatility_phase: symbolConfig.symbol === "SGE_AGTD"
       ? buildVolatilityPhase(evaluation, recentEvaluations.length ? recentEvaluations : [evaluation])
       : null,
@@ -1235,14 +1277,14 @@ router.get("/precious-metal-market/current-signal", async (req, res) => {
     const defaultRuleGroup = symbolConfig.symbol === "XAUUSD" ? "precious_metal_plan" : "silver_swing_plan";
     const ruleGroup = String(req.query.rule_group || defaultRuleGroup).trim();
     const points = await db.all(
-      `SELECT trade_date, close
+      `SELECT trade_date, open, high, low, close, volume, updated_at
        FROM market_anchor_daily_prices
        WHERE symbol = ?
          AND source = ?
          AND close IS NOT NULL
        ORDER BY trade_date ASC`,
       [symbolConfig.symbol, symbolConfig.source]
-    ) as MarketPricePoint[];
+    ) as Array<MarketPricePoint & MarketOhlcvPoint>;
     const rules = await db.all(
       `SELECT rule_key, rule_type, threshold_json, status, display_order
        FROM market_assist_rules
@@ -1253,7 +1295,7 @@ router.get("/precious-metal-market/current-signal", async (req, res) => {
       [symbolConfig.symbol, ruleGroup]
     ) as MarketAssistRuleInput[];
     const ruleRows = await db.all(
-      `SELECT rule_key, rule_name, rule_type, action_hint, note
+      `SELECT rule_key, rule_name, rule_type, threshold_json, action_hint, note
        FROM market_assist_rules
        WHERE asset_symbol = ?
          AND rule_group = ?
@@ -1279,6 +1321,7 @@ router.get("/precious-metal-market/current-signal", async (req, res) => {
             summary: "暂无足够数据或规则。"
           },
           hit_rule_keys: [],
+          realtime_interpretation: null,
           volatility_phase: null,
           state_steps: [],
           metrics: null
@@ -1292,9 +1335,52 @@ router.get("/precious-metal-market/current-signal", async (req, res) => {
     const recentEvaluations = recentTargetDates
       .filter(Boolean)
       .map(date => evaluateSilverSwingRules(points, rules, date));
+    let goldContext: {
+      evaluation: SilverSwingEvaluation;
+      latestPoint?: MarketOhlcvPoint | null;
+    } | null = null;
+    if (symbolConfig.symbol === "SGE_AGTD") {
+      const goldConfig = MAIN_PRICE_SYMBOLS.find(item => item.symbol === "XAUUSD");
+      if (goldConfig) {
+        const [goldPoints, goldRules] = await Promise.all([
+          db.all(
+            `SELECT trade_date, open, high, low, close, volume, updated_at
+             FROM market_anchor_daily_prices
+             WHERE symbol = ?
+               AND source = ?
+               AND close IS NOT NULL
+             ORDER BY trade_date ASC`,
+            [goldConfig.symbol, goldConfig.source]
+          ) as Promise<Array<MarketPricePoint & MarketOhlcvPoint>>,
+          db.all(
+            `SELECT rule_key, rule_type, threshold_json, status, display_order
+             FROM market_assist_rules
+             WHERE asset_symbol = ?
+               AND rule_group = 'precious_metal_plan'
+               AND status = 'active'
+             ORDER BY display_order ASC`,
+            [goldConfig.symbol]
+          ) as Promise<MarketAssistRuleInput[]>
+        ]);
+        if (goldPoints.length && goldRules.length) {
+          goldContext = {
+            evaluation: evaluateSilverSwingRules(goldPoints, goldRules),
+            latestPoint: goldPoints[goldPoints.length - 1] || null
+          };
+        }
+      }
+    }
     res.json({
       success: true,
-      data: buildCurrentSignalPayload(symbolConfig, evaluation, ruleRows, ruleGroup, recentEvaluations)
+      data: buildCurrentSignalPayload(
+        symbolConfig,
+        evaluation,
+        ruleRows,
+        ruleGroup,
+        recentEvaluations,
+        points,
+        goldContext
+      )
     });
   } catch (error) {
     res.status(200).json({
