@@ -5854,7 +5854,591 @@ const migrations: Migration[] = [
            AND (
              TRIM(COALESCE(note, '')) GLOB '裸币价 *；信泰+*'
              OR TRIM(COALESCE(note, '')) GLOB '裸币价 *；信泰-*'
-           )`
+        )`
+      );
+    }
+  },
+  {
+    id: '20260731_001_create_human_case_library',
+    name: 'Create human behavior case library and seed first pattern cards',
+    run: async (db: any) => {
+      await dbExec(db, `
+        CREATE TABLE IF NOT EXISTS behavior_patterns (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          name TEXT NOT NULL,
+          axis TEXT NOT NULL CHECK (axis IN ('market', 'human')),
+          category TEXT NOT NULL CHECK (
+            category IN ('market_structure', 'human_bias', 'execution_error', 'positive_discipline')
+          ),
+          summary TEXT NOT NULL DEFAULT '',
+          trigger_phrases_json TEXT NOT NULL DEFAULT '[]',
+          observable_actions_json TEXT NOT NULL DEFAULT '[]',
+          mechanism TEXT NOT NULL DEFAULT '',
+          risk_chain TEXT NOT NULL DEFAULT '',
+          counter_question TEXT NOT NULL DEFAULT '',
+          protective_action TEXT NOT NULL DEFAULT '',
+          positive_counterpart TEXT NOT NULL DEFAULT '',
+          status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),
+          sort_order INTEGER NOT NULL DEFAULT 0,
+          note TEXT NOT NULL DEFAULT '',
+          is_deleted INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_behavior_patterns_active_name
+          ON behavior_patterns(axis, name)
+          WHERE is_deleted = 0;
+        CREATE INDEX IF NOT EXISTS idx_behavior_patterns_display
+          ON behavior_patterns(is_deleted, status, axis, category, sort_order, id);
+
+        CREATE TABLE IF NOT EXISTS behavior_cases (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          title TEXT NOT NULL,
+          origin_type TEXT NOT NULL DEFAULT 'other' CHECK (
+            origin_type IN ('self', 'other', 'public', 'unconfirmed')
+          ),
+          subject_alias TEXT NOT NULL DEFAULT '',
+          source_note TEXT NOT NULL DEFAULT '',
+          evidence_level TEXT NOT NULL DEFAULT 'unconfirmed' CHECK (
+            evidence_level IN ('first_hand', 'documented', 'second_hand', 'unconfirmed')
+          ),
+          case_date TEXT,
+          track TEXT NOT NULL DEFAULT '',
+          project_name TEXT NOT NULL DEFAULT '',
+          background TEXT NOT NULL,
+          visible_information TEXT NOT NULL DEFAULT '',
+          pressure_context TEXT NOT NULL DEFAULT '',
+          action_taken TEXT NOT NULL,
+          result TEXT NOT NULL DEFAULT '',
+          action_quality TEXT NOT NULL DEFAULT 'unknown' CHECK (
+            action_quality IN ('good', 'flawed', 'bad', 'mixed', 'unknown')
+          ),
+          outcome_type TEXT NOT NULL DEFAULT 'unknown' CHECK (
+            outcome_type IN ('profit', 'loss', 'avoided_loss', 'sold_early', 'ongoing', 'mixed', 'unknown')
+          ),
+          self_response TEXT NOT NULL,
+          learn_to_keep TEXT NOT NULL DEFAULT '',
+          learn_to_avoid TEXT NOT NULL DEFAULT '',
+          applicability_boundary TEXT NOT NULL DEFAULT '',
+          linked_rule_refs_json TEXT NOT NULL DEFAULT '[]',
+          source_type TEXT NOT NULL DEFAULT '',
+          source_id TEXT NOT NULL DEFAULT '',
+          note TEXT NOT NULL DEFAULT '',
+          is_deleted INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_behavior_cases_list
+          ON behavior_cases(is_deleted, case_date DESC, updated_at DESC, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_behavior_cases_origin
+          ON behavior_cases(is_deleted, origin_type, action_quality, outcome_type);
+        CREATE INDEX IF NOT EXISTS idx_behavior_cases_source
+          ON behavior_cases(source_type, source_id, is_deleted);
+
+        CREATE TABLE IF NOT EXISTS behavior_case_pattern_links (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          case_id INTEGER NOT NULL,
+          pattern_id INTEGER NOT NULL,
+          role TEXT NOT NULL DEFAULT 'secondary' CHECK (role IN ('primary', 'secondary')),
+          note TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(case_id, pattern_id),
+          FOREIGN KEY (case_id) REFERENCES behavior_cases(id) ON DELETE CASCADE,
+          FOREIGN KEY (pattern_id) REFERENCES behavior_patterns(id) ON DELETE RESTRICT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_behavior_case_pattern_case
+          ON behavior_case_pattern_links(case_id, role, pattern_id);
+        CREATE INDEX IF NOT EXISTS idx_behavior_case_pattern_pattern
+          ON behavior_case_pattern_links(pattern_id, role, case_id);
+      `);
+
+      const seedPatterns = [
+        {
+          name: '暴涨后崩跌',
+          axis: 'market',
+          category: 'market_structure',
+          summary: '价格在情绪和资金推动下快速远离正常承接，随后因兑现、补货或增量买家不足而剧烈回落。',
+          triggers: ['连续急涨', '价格远离正常消费逻辑', '全民讨论'],
+          actions: ['高位追入', '把暴涨继续外推', '忽略退出流动性'],
+          mechanism: '暴涨阶段的成交证明有人换手，不等于后续仍有足够增量资金承接。',
+          riskChain: '急涨 → 情绪透支 → 后手接力变弱 → 高位回落 → 流动性收缩',
+          counterQuestion: '如果今天没有这段涨幅，我还会认可当前价格和承接吗？',
+          protectiveAction: '把急涨视为兑现窗口，重新检查增量买家、后续供给和退出深度。',
+          positiveCounterpart: '分批兑现、保留主动权',
+          sortOrder: 10
+        },
+        {
+          name: '补货结构反转',
+          axis: 'market',
+          category: 'market_structure',
+          summary: '供给从稀缺或慢放切换到连续、大范围或长期补货，原有稀缺逻辑失效。',
+          triggers: ['多渠道补货', '无限制放货', '通货化'],
+          actions: ['继续按稀缺品估值', '把补货当短期噪音'],
+          mechanism: '供给结构变化会改变价格中枢，旧逻辑不能继续支撑原仓位。',
+          riskChain: '补货扩大 → 稀缺溢价压缩 → 成交变慢 → 阴跌 → 库存挂树',
+          counterQuestion: '现在支撑价格的还是稀缺，还是我不愿承认供给已经变了？',
+          protectiveAction: '出现确定补货信号先减仓，再观察新供给下的真实承接。',
+          positiveCounterpart: '逻辑变化时先降低风险',
+          sortOrder: 20
+        },
+        {
+          name: '弱市集中放量',
+          axis: 'market',
+          category: 'market_structure',
+          summary: '市场承接偏弱时，多渠道或大批量供应在短期内集中释放。',
+          triggers: ['弱市', '多渠道同时供货', '短期大量到货'],
+          actions: ['只看题材和颜值', '把期货轻溢价当真实承接'],
+          mechanism: '弱市资金有限，集中供给会优先打穿承接，题材加分无法抵消供需压力。',
+          riskChain: '弱承接 → 集中到货 → 买盘不足 → 慢跌 → 被动退出',
+          counterQuestion: '现有买盘真的能消化这批货，还是只在到货前维持表面价格？',
+          protectiveAction: '优先看短期可流通量和到货节奏，必要时到货前主动退出。',
+          positiveCounterpart: '先看承接容量，再看故事',
+          sortOrder: 30
+        },
+        {
+          name: '反抽不是止跌',
+          axis: 'market',
+          category: 'market_structure',
+          summary: '下跌后的短期反弹只能证明出现买盘，不能单独证明结构已经反转。',
+          triggers: ['暴跌后反弹', '单日大涨', '回到短期均线'],
+          actions: ['把第一根反弹当反转', '忽略低点是否继续下移'],
+          mechanism: '反抽可能来自空头回补、短线资金或流动性修复，结构确认需要后续路径。',
+          riskChain: '深跌 → 技术反抽 → 误判反转 → 追入 → 再次下探',
+          counterQuestion: '它只是弹了一下，还是已经证明止跌、承接和回踩质量？',
+          protectiveAction: '继续观察后续几天走势、回踩质量和低点结构，不因单次反弹恢复权限。',
+          positiveCounterpart: '等待结构确认',
+          sortOrder: 40
+        },
+        {
+          name: '资金拉盘',
+          axis: 'market',
+          category: 'market_structure',
+          summary: '少量筹码、集中流量或资金推动造成短期价格快速抬升，真实成交不等于长期承接。',
+          triggers: ['收货价持续抬高', '短期翻倍', '定向底货异常走强'],
+          actions: ['把拉盘当基本面重估', '后手高位补票'],
+          mechanism: '拉盘能制造成交和价格，但最终仍需要更晚的买家接住筹码。',
+          riskChain: '筹码集中 → 快速抬价 → FOMO 接力 → 放量兑现 → 后手接盘',
+          counterQuestion: '当前买家是终端需求，还是下一轮寻找接盘的资金？',
+          protectiveAction: '低位仓可按计划兑现，后手不因真实成交而追高。',
+          positiveCounterpart: '区分价格推动与真实需求',
+          sortOrder: 50
+        },
+        {
+          name: '贪婪与不兑现',
+          axis: 'human',
+          category: 'human_bias',
+          summary: '盈利扩大后不断上调心理目标，把已经获得的主动权重新交给市场。',
+          triggers: ['还能更高', '再多赚一点', '卖了就买不回来'],
+          actions: ['暴涨不卖', '临时取消退出计划', '利润回吐后继续等'],
+          mechanism: '浮盈会强化自我正确感，让人低估回撤和流动性变化。',
+          riskChain: '盈利 → 自信增强 → 拒绝兑现 → 回撤 → 从主动卖出变成被迫处理',
+          counterQuestion: '我是在执行原计划，还是因为已经赚钱而临时变得更贪？',
+          protectiveAction: '上涨前写好阶梯退出，触发后不允许因为情绪上调全部目标。',
+          positiveCounterpart: '分批兑现、接受卖飞',
+          sortOrder: 110
+        },
+        {
+          name: '恐惧与过度防守',
+          axis: 'human',
+          category: 'human_bias',
+          summary: '上一轮损失或弱市背景压制新判断，把所有相似机会一票否决。',
+          triggers: ['上次就被反撸', '这次肯定也不行', '还是别碰了'],
+          actions: ['证据变化后仍拒绝重评', '把防守变成完全不观察'],
+          mechanism: '近期痛苦经历会被高估，导致风险识别从保护升级为僵化回避。',
+          riskChain: '旧损失阴影 → 拒绝重新观察 → 新证据被忽略 → 完全踏空',
+          counterQuestion: '我是在识别当前风险，还是只是在躲避上一次的痛苦？',
+          protectiveAction: '保留观察和小参与权，用当前证据重新判断，不用旧伤替代新分析。',
+          positiveCounterpart: '风险敏感但允许重新验证',
+          sortOrder: 120
+        },
+        {
+          name: '沉没成本绑架决策',
+          axis: 'human',
+          category: 'human_bias',
+          summary: '过去投入的时间、资金和情绪开始主导现在是否继续持有。',
+          triggers: ['等回本', '已经拿这么久', '现在卖太亏', '再等等'],
+          actions: ['死扛', '补仓摊平', '拒绝退出', '只谈成本不谈逻辑'],
+          mechanism: '不甘心承认过去投入已经损失，把持有当成修复自尊而不是重新决策。',
+          riskChain: '小亏 → 拖延 → 中亏 → 压力增加 → 被迫割肉 → 错过新机会',
+          counterQuestion: '如果现在空仓，我还会在这个价格买入吗？',
+          protectiveAction: '只按当前结构、未来概率、风险收益比和失效条件重新判断。',
+          positiveCounterpart: '承认错误、归零判断、快速退出',
+          sortOrder: 130
+        },
+        {
+          name: '确认偏误与供给幻想',
+          axis: 'human',
+          category: 'human_bias',
+          summary: '先相信不会补货或逻辑仍在，再主动寻找支持原判断的信息。',
+          triggers: ['官方应该不会补', '这次只是小补', '价格还能扛住'],
+          actions: ['忽略确定风险消息', '只关注有利信息', '用反弹证明自己正确'],
+          mechanism: '持仓后更愿意保护原判断，容易把反证解释成暂时噪音。',
+          riskChain: '先入为主 → 过滤反证 → 逻辑变化未处理 → 风险持续扩大',
+          counterQuestion: '什么证据出现时，我愿意承认原判断已经失效？',
+          protectiveAction: '持仓前写清反证条件，出现确定消息先减仓而不是先解释。',
+          positiveCounterpart: '主动寻找反方证据',
+          sortOrder: 140
+        },
+        {
+          name: 'FOMO 与追高',
+          axis: 'human',
+          category: 'human_bias',
+          summary: '因为别人赚钱、价格加速或错失感而在赔率恶化后补票。',
+          triggers: ['大家都赚钱', '再不上就没机会', '原价没抢到只能追'],
+          actions: ['高位补票', '忽略后续供给', '用上涨替代估值'],
+          mechanism: '错失感会把“不参与的遗憾”放大，却压低高位接盘的真实风险。',
+          riskChain: '看见暴涨 → 错失焦虑 → 高位追入 → 增量资金衰减 → 接盘',
+          counterQuestion: '如果我没有看到别人已经赚钱，现在还愿意按这个价格参与吗？',
+          protectiveAction: '错过原价不等于亏损，赔率不舒服时放弃后手补票。',
+          positiveCounterpart: '允许踏空、等待下一次',
+          sortOrder: 150
+        },
+        {
+          name: '连续盈利后的自信膨胀',
+          axis: 'human',
+          category: 'human_bias',
+          summary: '连续盈利后把概率兑现误当成能力得到证明，并主动扩大风险暴露。',
+          triggers: ['这套方法已经证明了', '可以把仓位放大', '最近怎么做都对'],
+          actions: ['超计划加仓', '降低风控标准', '把一次经验推广到所有场景'],
+          mechanism: '近期盈利会让人低估运气和市场环境，高估判断的稳定性。',
+          riskChain: '连续盈利 → 过度归因能力 → 扩仓 → 单次错误放大 → 回吐或打穿',
+          counterQuestion: '我的能力真的提高了，还是当前环境刚好奖励了这套动作？',
+          protectiveAction: '仓位上限与连续盈亏脱钩，扩容必须经过独立样本和边界验证。',
+          positiveCounterpart: '盈利后仍保持原风控',
+          sortOrder: 160
+        },
+        {
+          name: '慢跌拖延与拒绝承认',
+          axis: 'human',
+          category: 'execution_error',
+          summary: '没有单日暴跌就不断延后处理，把持续走弱误当成风险不大。',
+          triggers: ['每天只跌一点', '损失还不大', '等反弹再卖'],
+          actions: ['慢跌不减仓', '失效后继续观察', '用时间代替判断'],
+          mechanism: '缓慢损失不够痛，容易让人持续推迟必须执行的动作。',
+          riskChain: '轻微下跌 → 延后处理 → 承接继续变弱 → 仓位失去流动性 → 挂树',
+          counterQuestion: '如果它今天一次性跌完这段幅度，我还会继续不处理吗？',
+          protectiveAction: '按结构和连续弱化处理，不要求市场用暴跌提醒自己。',
+          positiveCounterpart: '逻辑失效后及时降低风险',
+          sortOrder: 210
+        },
+        {
+          name: '快速退出与承认错误',
+          axis: 'human',
+          category: 'positive_discipline',
+          summary: '核心条件失效时先降低风险，再复盘原因，不用自尊和沉没成本拖延。',
+          triggers: ['逻辑失效', '风险边界被打穿', '证据与原判断冲突'],
+          actions: ['先退出', '承认判断错误', '保留复盘记录'],
+          mechanism: '把错误视为概率成本，而不是对个人能力的否定。',
+          riskChain: '识别失效 → 快速退出 → 控制损失 → 复盘 → 保留下一次参与能力',
+          counterQuestion: '现在最重要的是证明我对，还是保留重新决策的能力？',
+          protectiveAction: '提前定义失效线，触发后优先执行，不在持仓中临时修改。',
+          positiveCounterpart: '退出能力、错误修正',
+          sortOrder: 310
+        },
+        {
+          name: '按计划执行',
+          axis: 'human',
+          category: 'positive_discipline',
+          summary: '在情绪最强时仍按照持仓前制定的分批、退出和风险计划行动。',
+          triggers: ['达到计划价格', '风险条件触发', '仓位进入兑现区'],
+          actions: ['分批卖出', '不临时上调全部目标', '接受卖飞'],
+          mechanism: '用事前理性约束持仓后的贪婪、恐惧和自我证明。',
+          riskChain: '事前计划 → 触发执行 → 控制回撤 → 结果复盘 → 纪律强化',
+          counterQuestion: '这个动作是否来自持仓前的规则，而不是此刻的情绪？',
+          protectiveAction: '保留计划快照，执行后按过程质量复盘，不用最高价倒推对错。',
+          positiveCounterpart: '系统优先、接受不完美结果',
+          sortOrder: 320
+        },
+        {
+          name: '主动放弃与纪律优先',
+          axis: 'human',
+          category: 'positive_discipline',
+          summary: '看懂机会但赔率、结构或能力边界不符合体系时，主动不参与。',
+          triggers: ['不属于我的结构', '赔率不舒服', '证据不足'],
+          actions: ['不追高', '保留观察', '等待更适合的机会'],
+          mechanism: '不把每个看懂的机会都转化成仓位，接受踏空是风险成本。',
+          riskChain: '识别边界 → 主动放弃 → 保留现金流 → 等待高赔率机会',
+          counterQuestion: '我不参与是因为纪律成立，还是因为恐惧替代了判断？',
+          protectiveAction: '记录放弃依据并后验复盘，区分正确放弃与过度防守。',
+          positiveCounterpart: '等待、现金流保留',
+          sortOrder: 330
+        }
+      ];
+
+      for (const pattern of seedPatterns) {
+        await dbRun(
+          db,
+          `INSERT OR IGNORE INTO behavior_patterns
+            (name, axis, category, summary, trigger_phrases_json, observable_actions_json,
+             mechanism, risk_chain, counter_question, protective_action, positive_counterpart,
+             status, sort_order, note, is_deleted, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, '', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [
+            pattern.name,
+            pattern.axis,
+            pattern.category,
+            pattern.summary,
+            JSON.stringify(pattern.triggers),
+            JSON.stringify(pattern.actions),
+            pattern.mechanism,
+            pattern.riskChain,
+            pattern.counterQuestion,
+            pattern.protectiveAction,
+            pattern.positiveCounterpart,
+            pattern.sortOrder
+          ]
+        );
+      }
+    }
+  },
+  {
+    id: '20260801_001_connect_human_case_sources',
+    name: 'Connect human cases to immutable source snapshots',
+    run: async (db: any) => {
+      await ensureMigrationColumn(
+        db,
+        'behavior_cases',
+        'source_snapshot_json',
+        "TEXT NOT NULL DEFAULT '{}'"
+      );
+      await dbExec(db, `
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_behavior_cases_active_source
+          ON behavior_cases(source_type, source_id)
+          WHERE is_deleted = 0 AND source_type <> '' AND source_id <> '';
+      `);
+    }
+  },
+  {
+    id: '20260801_002_make_decision_patterns_primary',
+    name: 'Promote decision patterns and classify case evidence roles',
+    run: async (db: any) => {
+      await ensureMigrationColumn(
+        db,
+        'behavior_patterns',
+        'maturity',
+        "TEXT NOT NULL DEFAULT 'candidate'"
+      );
+      await ensureMigrationColumn(
+        db,
+        'behavior_cases',
+        'evidence_role',
+        "TEXT NOT NULL DEFAULT 'neutral'"
+      );
+      await dbExec(db, `
+        CREATE INDEX IF NOT EXISTS idx_behavior_patterns_maturity
+          ON behavior_patterns(is_deleted, status, category, maturity, sort_order, id);
+        CREATE INDEX IF NOT EXISTS idx_behavior_cases_evidence_role
+          ON behavior_cases(is_deleted, evidence_role, case_date DESC, id DESC);
+      `);
+
+      await dbRun(
+        db,
+        `UPDATE behavior_patterns
+         SET name = 'FOMO（错失焦虑）',
+             summary = '因为别人赚钱、价格加速或错失感而高估不参与的遗憾，低估高位接盘的风险。',
+             updated_at = CURRENT_TIMESTAMP
+         WHERE axis = 'human'
+           AND name = 'FOMO 与追高'
+           AND is_deleted = 0`
+      );
+      await dbRun(
+        db,
+        `UPDATE behavior_patterns
+         SET name = '死扛与拖延',
+             summary = '核心条件已经变弱或失效，却因为损失不够剧烈、等回本或不愿认错而持续拖延退出。',
+             updated_at = CURRENT_TIMESTAMP
+         WHERE axis = 'human'
+           AND name = '慢跌拖延与拒绝承认'
+           AND is_deleted = 0`
+      );
+
+      const decisionPatterns = [
+        {
+          name: '追高',
+          summary: '在价格加速、赔率明显恶化以后，因为害怕错过而补票。',
+          triggers: ['末端加速', '大家都赚钱', '再不上车就没机会'],
+          actions: ['高位追入', '忽略回撤空间', '用上涨替代估值'],
+          mechanism: '常由 FOMO、群体情绪和近期上涨共同触发。',
+          riskChain: '价格加速 → 错失焦虑 → 高位追入 → 增量买家衰减 → 接盘或死扛',
+          counterQuestion: '如果我没有看到别人已经赚钱，现在还愿意按这个价格参与吗？',
+          protectiveAction: '重新计算盈亏比；末端加速不追，等待回踩或下一次机会。',
+          counterpart: '允许踏空、等待确认',
+          sortOrder: 210
+        },
+        {
+          name: '过度下注',
+          summary: '单次仓位超过现金流和退出容量，让一次普通判断错误升级成生存风险。',
+          triggers: ['这次把握很大', '想一次赚够', '连续盈利后扩仓'],
+          actions: ['重仓或满仓', '忽略退出容量', '用结果预期替代仓位边界'],
+          mechanism: '过度自信会放大收益想象，却弱化对错误概率和流动性的感受。',
+          riskChain: '高置信 → 过度下注 → 判断失误 → 无法从容退出 → 现金流受损',
+          counterQuestion: '即使这次判断错了，这个仓位还允许我继续留在场内吗？',
+          protectiveAction: '仓位服从现金流、退出容量和单次损失边界，不随情绪临时放大。',
+          counterpart: '分批参与、保留现金流',
+          sortOrder: 220
+        },
+        {
+          name: '抢跑/没有等待',
+          summary: '关键条件还没有得到确认，就因为看见机会而提前行动。',
+          triggers: ['应该差不多了', '先进去再说', '怕确认后买不到'],
+          actions: ['未确认止跌就买入', '供给未明就下注', '把猜测当证据'],
+          mechanism: '行动冲动会把等待误解成错失，让人用仓位替代观察。',
+          riskChain: '看到机会 → 跳过确认 → 提前入场 → 结构继续恶化 → 被动等待',
+          counterQuestion: '我现在掌握的是证据，还是只是希望它成立？',
+          protectiveAction: '列出必须出现的确认信号，信号未到只观察，不用仓位催促结果。',
+          counterpart: '等待结构确认',
+          sortOrder: 230
+        },
+        {
+          name: '逻辑失效仍坚持',
+          summary: '供给、需求、规则或市场结构已经改变，却继续沿用最初的持有理由。',
+          triggers: ['只是暂时变化', '以后还会回来', '原逻辑长期没问题'],
+          actions: ['忽略反证', '继续按旧中枢估值', '用反弹证明原判断'],
+          mechanism: '确认偏误和路径依赖会保护旧判断，阻止人重新定价。',
+          riskChain: '结构改变 → 拒绝更新 → 继续持有 → 新中枢下移 → 损失扩大',
+          counterQuestion: '如果今天第一次看到这个标的，我还会使用原来的逻辑吗？',
+          protectiveAction: '持有前写清失效条件；条件触发后归零重评，不能用成本维持旧逻辑。',
+          counterpart: '主动寻找反证、归零判断',
+          sortOrder: 240
+        },
+        {
+          name: '没有退出机制',
+          summary: '参与前只设计怎么买，没有提前规定何时兑现、何时认错和如何退出。',
+          triggers: ['先买了再看', '涨到哪算哪', '跌了再研究'],
+          actions: ['盈利不兑现', '失效后临时改规则', '退出全靠情绪'],
+          mechanism: '持仓后贪婪和不甘心会接管决策，事后很难保持中立。',
+          riskChain: '无退出计划 → 情绪持仓 → 错过主动窗口 → 回撤或流动性收缩 → 被迫处理',
+          counterQuestion: '如果价格立刻朝两个方向运动，我分别准备怎么退出？',
+          protectiveAction: '参与前同时写好兑现、失效和流动性退出方案，触发后按计划执行。',
+          counterpart: '事前计划、分批兑现',
+          sortOrder: 250
+        }
+      ];
+
+      for (const pattern of decisionPatterns) {
+        await dbRun(
+          db,
+          `INSERT OR IGNORE INTO behavior_patterns
+            (name, axis, category, summary, trigger_phrases_json, observable_actions_json,
+             mechanism, risk_chain, counter_question, protective_action, positive_counterpart,
+             maturity, status, sort_order, note, is_deleted, created_at, updated_at)
+           VALUES (?, 'human', 'execution_error', ?, ?, ?, ?, ?, ?, ?, ?,
+                   'candidate', 'active', ?, '', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [
+            pattern.name,
+            pattern.summary,
+            JSON.stringify(pattern.triggers),
+            JSON.stringify(pattern.actions),
+            pattern.mechanism,
+            pattern.riskChain,
+            pattern.counterQuestion,
+            pattern.protectiveAction,
+            pattern.counterpart,
+            pattern.sortOrder
+          ]
+        );
+      }
+    }
+  },
+  {
+    id: '20260801_003_separate_dead_hold_action_pattern',
+    name: 'Separate dead-hold action from sunk-cost mechanism',
+    run: async (db: any) => {
+      await dbRun(
+        db,
+        `UPDATE behavior_patterns
+         SET name = '沉没成本与拒绝承认',
+             category = 'human_bias',
+             summary = '已经投入时间、金钱或情绪后，不愿承认原判断失效，并不断寻找继续等待的理由。',
+             updated_at = CURRENT_TIMESTAMP
+         WHERE axis = 'human'
+           AND name IN ('慢跌拖延与拒绝承认', '死扛与拖延')
+           AND is_deleted = 0`
+      );
+      await dbRun(
+        db,
+        `INSERT OR IGNORE INTO behavior_patterns
+          (name, axis, category, summary, trigger_phrases_json, observable_actions_json,
+           mechanism, risk_chain, counter_question, protective_action, positive_counterpart,
+           maturity, status, sort_order, note, is_deleted, created_at, updated_at)
+         VALUES ('死扛', 'human', 'execution_error',
+                 '原始逻辑已经变弱或失效，却因为不甘心、等回本或害怕认错而拒绝退出。',
+                 '["等回本","已经拿这么久","现在卖太亏"]',
+                 '["拒绝退出","无边界补仓","只谈成本不谈结构"]',
+                 '沉没成本、损失厌恶和确认偏误共同让人把过去投入带进当前决策。',
+                 '小亏 → 拖延 → 中亏 → 心理压力增加 → 被迫退出',
+                 '如果现在空仓，我还会按当前价格和结构重新买入吗？',
+                 '忽略历史成本，按当前结构、未来概率、风险收益比和失效条件归零重评。',
+                 '承认错误、归零判断、快速退出',
+                 'candidate', 'active', 215, '', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+      );
+    }
+  },
+  {
+    id: '20260801_004_merge_duplicate_sunk_cost_mechanism',
+    name: 'Merge duplicate sunk-cost mechanism patterns',
+    run: async (db: any) => {
+      const canonical = await dbGet<{ id: number }>(
+        db,
+        `SELECT id
+         FROM behavior_patterns
+         WHERE name = '沉没成本绑架决策' AND is_deleted = 0
+         ORDER BY id
+         LIMIT 1`
+      );
+      const duplicate = await dbGet<{ id: number }>(
+        db,
+        `SELECT id
+         FROM behavior_patterns
+         WHERE name = '沉没成本与拒绝承认' AND is_deleted = 0
+         ORDER BY id
+         LIMIT 1`
+      );
+
+      if (!duplicate) {
+        return;
+      }
+
+      if (!canonical) {
+        await dbRun(
+          db,
+          `UPDATE behavior_patterns
+           SET name = '沉没成本绑架决策', updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?`,
+          [duplicate.id]
+        );
+        return;
+      }
+
+      await dbRun(
+        db,
+        `DELETE FROM behavior_case_pattern_links
+         WHERE pattern_id = ?
+           AND EXISTS (
+             SELECT 1
+             FROM behavior_case_pattern_links canonical_link
+             WHERE canonical_link.case_id = behavior_case_pattern_links.case_id
+               AND canonical_link.pattern_id = ?
+           )`,
+        [duplicate.id, canonical.id]
+      );
+      await dbRun(
+        db,
+        `UPDATE behavior_case_pattern_links
+         SET pattern_id = ?, updated_at = CURRENT_TIMESTAMP
+         WHERE pattern_id = ?`,
+        [canonical.id, duplicate.id]
+      );
+      await dbRun(
+        db,
+        `UPDATE behavior_patterns
+         SET status = 'archived', is_deleted = 1, updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`,
+        [duplicate.id]
       );
     }
   }

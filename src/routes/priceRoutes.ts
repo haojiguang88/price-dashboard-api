@@ -9,6 +9,7 @@ import {
   PriceImportValidationError,
   registerPriceImportPreview
 } from "../services/priceImportService";
+import { assessPriceMove } from "../services/priceAnomalyDetection";
 import { buildQualityAlertRecheckMetadata } from "../services/priceQualityAlertService";
 
 const router = express.Router();
@@ -473,7 +474,14 @@ const buildPriceQualityAlerts = async (db: any): Promise<PriceQualityAlert[]> =>
 
       if (previous && previous.price > 0) {
         const change = percentChange(record.price, previous.price);
-        if (change !== null && Math.abs(change) >= LARGE_PRICE_MOVE_PERCENT) {
+        const assessment = change === null
+          ? null
+          : assessPriceMove({
+            categoryName: record.category,
+            changePercent: change,
+            changeAmount: record.price - previous.price
+          });
+        if (change !== null && assessment?.shouldAlert) {
           alerts.push(createQualityAlert(
             record,
             "LARGE_MOVE_FROM_PREVIOUS",
@@ -483,7 +491,8 @@ const buildPriceQualityAlerts = async (db: any): Promise<PriceQualityAlert[]> =>
               baseline_record_id: previous.id,
               baseline_date: previous.date,
               baseline_price: roundNumber(previous.price),
-              change_percent: roundNumber(change)
+              change_percent: roundNumber(change),
+              threshold_profile: assessment.profile
             }
           ));
         }
@@ -491,7 +500,14 @@ const buildPriceQualityAlerts = async (db: any): Promise<PriceQualityAlert[]> =>
 
       if (next && next.price > 0) {
         const change = percentChange(record.price, next.price);
-        if (change !== null && Math.abs(change) >= LARGE_PRICE_MOVE_PERCENT) {
+        const assessment = change === null
+          ? null
+          : assessPriceMove({
+            categoryName: record.category,
+            changePercent: change,
+            changeAmount: record.price - next.price
+          });
+        if (change !== null && assessment?.shouldAlert) {
           alerts.push(createQualityAlert(
             record,
             "LARGE_MOVE_FROM_NEXT",
@@ -501,7 +517,8 @@ const buildPriceQualityAlerts = async (db: any): Promise<PriceQualityAlert[]> =>
               baseline_record_id: next.id,
               baseline_date: next.date,
               baseline_price: roundNumber(next.price),
-              change_percent: roundNumber(change)
+              change_percent: roundNumber(change),
+              threshold_profile: assessment.profile
             }
           ));
         }
@@ -752,7 +769,13 @@ const buildPriceAnomalyWarnings = async (
   const pushMoveWarning = (row: any, direction: "上一条" | "下一条") => {
     if (!row || Number(row.price) <= 0) return;
     const change = percentChange(input.price, Number(row.price));
-    if (change === null || Math.abs(change) < LARGE_PRICE_MOVE_PERCENT) return;
+    if (change === null) return;
+    const assessment = assessPriceMove({
+      categoryName: input.category_name,
+      changePercent: change,
+      changeAmount: input.price - Number(row.price)
+    });
+    if (!assessment.shouldAlert) return;
     warnings.push({
       code: direction === "上一条" ? "LARGE_MOVE_FROM_PREVIOUS" : "LARGE_MOVE_FROM_NEXT",
       severity: "warning",
