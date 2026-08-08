@@ -109,6 +109,8 @@ def load_target_definitions(db_path):
             "goods_id": normalize_text(meta.get("goods_id")) or parsed_key["goods_id"] or DEFAULT_GOODS_ID,
             "cat_id": normalize_text(meta.get("cat_id")) or parsed_key["cat_id"] or DEFAULT_CAT_ID,
             "page_size": to_positive_int(meta.get("page_size"), 0),
+            "api_mode": normalize_text(meta.get("api_mode")),
+            "selected_time": normalize_text(meta.get("selected_time") or meta.get("selectedTime")),
             "price_offset": to_float(meta.get("price_offset"), DEFAULT_PRICE_OFFSET),
             "start_date": normalize_text(meta.get("start_date") or meta.get("since")),
             "source_name": normalize_text(mapping.get("source_name")) or SOURCE_NAME,

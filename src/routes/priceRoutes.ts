@@ -211,6 +211,7 @@ const getTargetIdMaps = async (db: any) => {
   const archivedCategories = new Set<string>();
   const archivedObjects = new Set<string>();
   const archivedVariants = new Set<string>();
+  const variantCounts = new Map<number, { total: number; active: number }>();
 
   categories.forEach((category: any) => {
     categoryIds.set(category.name, category.id);
@@ -227,9 +228,23 @@ const getTargetIdMaps = async (db: any) => {
   });
 
   variants.forEach((variant: any) => {
+    const objectId = Number(variant.object_id);
     variantIds.set(`${variant.object_id}|${variant.name}`, variant.id);
+    const counts = variantCounts.get(objectId) || { total: 0, active: 0 };
+    counts.total += 1;
     if (Number(variant.is_archived) === 1) {
       archivedVariants.add(`${variant.object_id}|${variant.name}`);
+    } else {
+      counts.active += 1;
+    }
+    variantCounts.set(objectId, counts);
+  });
+
+  // 变体已全部归档的对象，按归档对象处理，避免价格列表/洞察继续露出。
+  objects.forEach((object: any) => {
+    const counts = variantCounts.get(Number(object.id));
+    if (counts && counts.total > 0 && counts.active === 0) {
+      archivedObjects.add(`${object.category_id}|${object.name}`);
     }
   });
 

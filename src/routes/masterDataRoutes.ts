@@ -31,6 +31,38 @@ const archiveResponse = async (
   return result.changes;
 };
 
+const objectHasActiveVariants = async (db: any, objectId: number | string) => {
+  const row = await db.get(
+    `SELECT COUNT(1) AS count
+     FROM variants
+     WHERE object_id = ?
+       AND COALESCE(is_archived, 0) = 0`,
+    [objectId]
+  );
+  return Number(row?.count || 0) > 0;
+};
+
+const objectHasAnyVariants = async (db: any, objectId: number | string) => {
+  const row = await db.get(
+    `SELECT COUNT(1) AS count FROM variants WHERE object_id = ?`,
+    [objectId]
+  );
+  return Number(row?.count || 0) > 0;
+};
+
+const ACTIVE_OBJECT_LIST_FILTER = `
+  ${archiveField("o")} = 0
+  AND ${archiveField("c")} = 0
+  AND (
+    NOT EXISTS (SELECT 1 FROM variants v0 WHERE v0.object_id = o.id)
+    OR EXISTS (
+      SELECT 1 FROM variants v1
+      WHERE v1.object_id = o.id
+        AND COALESCE(v1.is_archived, 0) = 0
+    )
+  )
+`;
+
 router.get("/categories", async (req, res) => {
   try {
     const db = await getDb();
@@ -155,9 +187,9 @@ router.delete("/categories/:id", async (req, res) => {
 router.get("/objects", async (req, res) => {
   try {
     const db = await getDb();
-    const where = includeArchived(req)
-      ? ""
-      : `WHERE ${archiveField("o")} = 0 AND ${archiveField("c")} = 0`;
+    // 默认列表：对象本身未归档，且若已有变体则至少保留一个未归档变体。
+    // 避免“颜色全归档、对象还挂在价格工作台”的空壳对象。
+    const where = includeArchived(req) ? "" : `WHERE ${ACTIVE_OBJECT_LIST_FILTER}`;
     const objects = await db.all(`
       SELECT o.id, o.category_id, o.name, c.name AS category_name,
         COALESCE(o.is_archived, 0) AS is_archived, o.archived_at,
@@ -496,8 +528,23 @@ router.put("/variants/:id", async (req, res) => {
 router.patch("/variants/:id/archive", async (req, res) => {
   try {
     const db = await getDb();
+    const variant = await db.get(
+      `SELECT id, object_id FROM variants WHERE id = ?`,
+      [req.params.id]
+    );
+    if (!variant) return res.status(404).json({ success: false, message: "变体不存在" });
+
     const changes = await archiveResponse(db, "variants", req.params.id, true);
     if (changes === 0) return res.status(404).json({ success: false, message: "变体不存在" });
+
+    // 该对象下变体已全部归档时，同步归档对象，避免工作台/下拉继续露出空壳对象。
+    if (
+      (await objectHasAnyVariants(db, variant.object_id))
+      && !(await objectHasActiveVariants(db, variant.object_id))
+    ) {
+      await archiveResponse(db, "objects", String(variant.object_id), true);
+    }
+
     res.json({ success: true, data: { message: "变体已归档" } });
   } catch (error) {
     res.status(500).json({ success: false, message: "归档变体失败" });
@@ -508,12 +555,19 @@ router.patch("/variants/:id/restore", async (req, res) => {
   try {
     const db = await getDb();
     const variant = await db.get(`
-      SELECT v.id FROM variants v
+      SELECT v.id, v.object_id, COALESCE(o.is_archived, 0) AS object_is_archived
+      FROM variants v
       JOIN objects o ON v.object_id = o.id
       JOIN categories c ON o.category_id = c.id
-      WHERE v.id = ? AND COALESCE(o.is_archived, 0) = 0 AND COALESCE(c.is_archived, 0) = 0
+      WHERE v.id = ? AND COALESCE(c.is_archived, 0) = 0
     `, [req.params.id]);
-    if (!variant) return res.status(400).json({ success: false, message: "变体不存在或上级已归档" });
+    if (!variant) return res.status(400).json({ success: false, message: "变体不存在或所属品类已归档" });
+
+    // 恢复变体时，若对象已归档则一并恢复，否则无法重新进入工作台。
+    if (Number(variant.object_is_archived) === 1) {
+      await archiveResponse(db, "objects", String(variant.object_id), false);
+    }
+
     const changes = await archiveResponse(db, "variants", req.params.id, false);
     if (changes === 0) return res.status(404).json({ success: false, message: "变体不存在" });
     res.json({ success: true, data: { message: "变体已恢复" } });

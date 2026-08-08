@@ -6441,6 +6441,159 @@ const migrations: Migration[] = [
         [duplicate.id]
       );
     }
+  },
+  {
+    id: '20260808_001_switch_longyinbi_2026_to_price_record_line',
+    name: 'Switch Longyinbi 2026 source to airmb price record line',
+    run: async (db: any) => {
+      if (!(await migrationTableExists(db, 'source_mappings'))) return;
+
+      const row = await dbGet<any>(
+        db,
+        `SELECT id, external_key, external_meta_json, note
+         FROM source_mappings
+         WHERE source_key = ?
+           AND category_name = ?
+           AND object_name = ?
+           AND variant_name = ?
+         ORDER BY id DESC
+         LIMIT 1`,
+        ['airmb_longyinbi_presale', '纪念币', '龙银币', '2026年信泰评级']
+      );
+      if (!row) return;
+
+      const externalKey = '25|line|selectedTime=2|2026龙银币';
+      const metaJson = JSON.stringify({
+        api_mode: 'price_record_line',
+        goods_id: '25',
+        selected_time: '2',
+        price_offset: 0,
+        price_offset_reason: '2026 龙银币改用爱藏价格线直采，不再从 2025 裸币加减价',
+        start_date: '2026-07-05',
+        start_date_reason: '2026 信泰评级旧历史来源不准，从 2026-07-05 起自动采集；旧历史由用户手工补'
+      });
+      const mappingNote = '源头改为爱藏 2026 龙银币价格线（id=25, selectedTime=2）；直采入库到 2026年信泰评级，不再使用 2025 裸币-70。';
+
+      const conflict = await dbGet<any>(
+        db,
+        `SELECT id FROM source_mappings
+         WHERE source_key = ?
+           AND external_key = ?
+           AND id != ?
+         LIMIT 1`,
+        ['airmb_longyinbi_presale', externalKey, row.id]
+      );
+      if (conflict) {
+        await dbRun(
+          db,
+          `UPDATE source_mappings
+           SET status = 'disabled',
+               note = TRIM(COALESCE(note, '') || CASE WHEN COALESCE(note, '') = '' THEN '' ELSE '\n' END || '已由 2026 价格线映射接管'),
+               updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?`,
+          [conflict.id]
+        );
+      }
+
+      await dbRun(
+        db,
+        `UPDATE source_mappings
+         SET external_key = ?,
+             external_name = ?,
+             external_meta_json = ?,
+             note = ?,
+             status = 'enabled',
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`,
+        [externalKey, '2026龙银币', metaJson, mappingNote, row.id]
+      );
+
+      if (await migrationTableExists(db, 'variants')) {
+        await dbRun(
+          db,
+          `UPDATE variants
+           SET note = ?,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE name = ?
+             AND object_id IN (
+               SELECT o.id
+               FROM objects o
+               JOIN categories c ON c.id = o.category_id
+               WHERE c.name = ? AND o.name = ?
+             )`,
+          [
+            '源头为爱藏 2026 龙银币价格线直采，不再按 2025 裸币加减价',
+            '2026年信泰评级',
+            '纪念币',
+            '龙银币'
+          ]
+        );
+      }
+
+      if (await migrationTableExists(db, 'task_center_tasks')) {
+        const task = await dbGet<any>(
+          db,
+          "SELECT id, config_json FROM task_center_tasks WHERE task_key = ?",
+          ['longyinbi_price_update']
+        );
+        if (task) {
+          let config: Record<string, any> = {};
+          try {
+            config = task.config_json ? JSON.parse(task.config_json) : {};
+          } catch {
+            config = {};
+          }
+          config.target_offsets = {
+            ...(config.target_offsets || {}),
+            '2025年信泰评级': 100,
+            '2026年信泰评级': 0
+          };
+          config.target_start_dates = {
+            ...(config.target_start_dates || {}),
+            '2026年信泰评级': '2026-07-05'
+          };
+          const taskMessage = '每天抓取爱藏龙银币：2025年信泰评级=裸币+100；2026年信泰评级改用价格线直采（id=25）';
+          await dbRun(
+            db,
+            `UPDATE task_center_tasks
+             SET config_json = ?,
+                 last_message = CASE
+                   WHEN last_status = 'pending' OR last_message LIKE '每天抓取爱藏%' THEN ?
+                   ELSE last_message
+                 END,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?`,
+            [JSON.stringify(config), taskMessage, task.id]
+          );
+        }
+      }
+    }
+  },
+  {
+    id: '20260808_002_archive_objects_with_only_archived_variants',
+    name: 'Archive objects whose variants are all archived',
+    run: async (db: any) => {
+      if (!(await migrationTableExists(db, 'objects'))) return;
+      if (!(await migrationTableExists(db, 'variants'))) return;
+
+      await dbRun(
+        db,
+        `UPDATE objects
+         SET is_archived = 1,
+             archived_at = COALESCE(archived_at, CURRENT_TIMESTAMP),
+             updated_at = CURRENT_TIMESTAMP
+         WHERE COALESCE(is_archived, 0) = 0
+           AND EXISTS (
+             SELECT 1 FROM variants v WHERE v.object_id = objects.id
+           )
+           AND NOT EXISTS (
+             SELECT 1
+             FROM variants v
+             WHERE v.object_id = objects.id
+               AND COALESCE(v.is_archived, 0) = 0
+           )`
+      );
+    }
   }
 
 ];

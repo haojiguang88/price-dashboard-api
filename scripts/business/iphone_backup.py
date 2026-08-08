@@ -117,8 +117,13 @@ def normalize_iphone_model_name(name):
 
 
 def build_iphone_object_name(source_name):
+    # 代数限制 1-2 位，避免 iPhone17 256G 被吃成 iPhone 1725 6G。
     compact = re.sub(r"\s+", "", str(source_name or ""))
-    match = re.search(r"iPhone(\d+)(ProMax|Pro|Plus)?(\d+)(TB|T|G)", compact, flags=re.IGNORECASE)
+    match = re.search(
+        r"iPhone(\d{1,2})(ProMax|Pro|Plus)?(\d+)(TB|T|G)",
+        compact,
+        flags=re.IGNORECASE,
+    )
     if not match:
         return ""
     generation = match.group(1)

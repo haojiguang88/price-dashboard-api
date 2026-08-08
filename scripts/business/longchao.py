@@ -17,6 +17,7 @@ from source_mappings import (
 )
 
 API_URL = "https://w.airmb.com/sw/goods/sys-presale/preGoodsPriceRecord"
+LINE_API_URL = "https://w.airmb.com/sw/goods/sys-presale/preGoodsPriceRecordLine"
 SOURCE_KEY = "airmb_longchao_presale"
 SOURCE_NAME = "爱藏龙钞"
 DEFAULT_CATEGORY = "纪念钞"
@@ -140,9 +141,21 @@ def load_target_definitions(db_path):
             "goods_id": normalize_text(meta.get("goods_id")) or parsed_key["goods_id"] or DEFAULT_GOODS_ID,
             "cat_id": normalize_text(meta.get("cat_id")) or parsed_key["cat_id"] or DEFAULT_CAT_ID,
             "page_size": to_positive_int(meta.get("page_size"), 0),
+            "api_mode": normalize_text(meta.get("api_mode")),
+            "selected_time": normalize_text(meta.get("selected_time") or meta.get("selectedTime")),
             "source_name": normalize_text(mapping.get("source_name")) or SOURCE_NAME,
         })
     return targets, True
+
+
+def uses_price_record_line_api(target):
+    api_mode = normalize_text(target.get("api_mode")).lower()
+    return api_mode in {
+        "price_record_line",
+        "line",
+        "pregoods_price_record_line",
+        "pregoodspricerecordline",
+    }
 
 
 def fetch_page(session, target, page, page_size):
@@ -167,8 +180,34 @@ def fetch_page(session, target, page, page_size):
     return data
 
 
+def fetch_line_rows(session, target):
+    headers = build_headers()
+    headers["Referer"] = "https://w.airmb.com/wap/presale/newPrice"
+    selected_time = normalize_text(target.get("selected_time")) or "2"
+    response = session.post(
+        LINE_API_URL,
+        data={
+            "id": target["goods_id"],
+            "selectedTime": selected_time,
+        },
+        headers=headers,
+        timeout=25,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if payload.get("code") != 0:
+        raise RuntimeError(payload.get("message") or "爱藏价格线接口返回失败")
+    data = payload.get("data") or []
+    if not isinstance(data, list):
+        raise RuntimeError("爱藏价格线接口 data 不是列表")
+    return data
+
+
 def fetch_source_rows(target, default_page_size, max_pages):
     session = requests.Session()
+    if uses_price_record_line_api(target):
+        return fetch_line_rows(session, target)
+
     rows = []
     page = 1
     page_size = target.get("page_size") or default_page_size
@@ -191,7 +230,11 @@ def extract_records(source_rows, target, since="", until=""):
     errors = []
     for row in source_rows:
         try:
-            price_date, source_time, timestamp = parse_timestamp(row.get("createTime") or row.get("createTimeInt"))
+            # 价格线接口 createTime 常为展示值（如 "7.10"），优先用 createTimeInt。
+            timestamp_value = row.get("createTimeInt")
+            if timestamp_value in (None, ""):
+                timestamp_value = row.get("createTime")
+            price_date, source_time, timestamp = parse_timestamp(timestamp_value)
             if since and price_date < since:
                 skipped_rows += 1
                 continue
