@@ -1,5 +1,5 @@
 import express from "express";
-import getDb, { getDatabasePath } from "../config/database";
+import getDb from "../config/database";
 import { getSilverAnchorEvidence } from "../services/marketAnchorService";
 import { loadGoldSilverRatioSummary } from "../services/goldSilverRatioService";
 import { getCoinSilverPremiumContext } from "../services/coinSilverPremiumService";
@@ -971,7 +971,6 @@ router.get("/precious-metal-market/overview", async (_req, res) => {
     res.json({
       success: true,
       data: {
-        business_db_path: getDatabasePath(),
         generated_at: new Date().toISOString(),
         main_quotes: mainQuotes,
         layer_coverages: layerCoverages,
@@ -988,7 +987,6 @@ router.get("/precious-metal-market/overview", async (_req, res) => {
       success: false,
       message: (error as Error).message || "贵金属大盘行情读取失败",
       data: {
-        business_db_path: getDatabasePath(),
         main_quotes: [],
         layer_coverages: [],
         latest_actions: [],

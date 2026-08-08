@@ -6712,13 +6712,27 @@ export async function runMigrations(dbPath: string): Promise<void> {
         continue;
       }
 
-      if (migration.run) {
-        await migration.run(db);
-      } else if (migration.sql) {
-        await dbExec(db, migration.sql);
-      }
+      let transactionStarted = false;
+      try {
+        await dbExec(db, 'BEGIN IMMEDIATE TRANSACTION');
+        transactionStarted = true;
 
-      await dbRun(db, 'INSERT INTO migrations (id, name) VALUES (?, ?)', [migration.id, migration.name]);
+        if (migration.run) {
+          await migration.run(db);
+        } else if (migration.sql) {
+          await dbExec(db, migration.sql);
+        }
+
+        await dbRun(db, 'INSERT INTO migrations (id, name) VALUES (?, ?)', [migration.id, migration.name]);
+        await dbExec(db, 'COMMIT');
+        transactionStarted = false;
+      } catch (error) {
+        if (transactionStarted) {
+          await dbExec(db, 'ROLLBACK').catch(() => undefined);
+        }
+        const detail = error instanceof Error ? error.message : String(error);
+        throw new Error(`Migration ${migration.id} (${migration.name}) failed: ${detail}`);
+      }
     }
   } finally {
     await dbClose(db);

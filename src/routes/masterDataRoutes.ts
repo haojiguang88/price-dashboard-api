@@ -3,6 +3,8 @@ import getDb from "../config/database";
 import {
   cascadeMasterDataRename,
   countMasterDataReferences,
+  countOpenPositionsForMaster,
+  formatOpenPositionArchiveBlockMessage,
   formatReferenceBlockMessage
 } from "../utils/masterData";
 import { parseVariantXianyuHeatLevel } from "../utils/variantHeat";
@@ -142,8 +144,46 @@ router.put("/categories/:id", async (req, res) => {
 router.patch("/categories/:id/archive", async (req, res) => {
   try {
     const db = await getDb();
-    const changes = await archiveResponse(db, "categories", req.params.id, true);
-    if (changes === 0) return res.status(404).json({ success: false, message: "品类不存在" });
+    const category = await db.get("SELECT id, name FROM categories WHERE id = ?", [req.params.id]);
+    if (!category) return res.status(404).json({ success: false, message: "品类不存在" });
+
+    const openPositions = await countOpenPositionsForMaster(db, {
+      level: "category",
+      categoryName: category.name
+    });
+    if (openPositions > 0) {
+      return res.status(409).json({
+        success: false,
+        message: formatOpenPositionArchiveBlockMessage(openPositions)
+      });
+    }
+
+    const now = new Date().toISOString();
+    try {
+      await db.run("BEGIN IMMEDIATE TRANSACTION");
+      await db.run(
+        "UPDATE categories SET is_archived = 1, archived_at = ?, updated_at = ? WHERE id = ?",
+        [now, now, req.params.id]
+      );
+      await db.run(
+        `UPDATE objects
+         SET is_archived = 1, archived_at = ?, updated_at = ?
+         WHERE category_id = ? AND COALESCE(is_archived, 0) = 0`,
+        [now, now, req.params.id]
+      );
+      await db.run(
+        `UPDATE variants
+         SET is_archived = 1, archived_at = ?, updated_at = ?
+         WHERE object_id IN (SELECT id FROM objects WHERE category_id = ?)
+           AND COALESCE(is_archived, 0) = 0`,
+        [now, now, req.params.id]
+      );
+      await db.run("COMMIT");
+    } catch (error) {
+      await db.run("ROLLBACK").catch(() => undefined);
+      throw error;
+    }
+
     res.json({ success: true, data: { message: "品类已归档" } });
   } catch (error) {
     res.status(500).json({ success: false, message: "归档品类失败" });
@@ -283,8 +323,45 @@ router.put("/objects/:id", async (req, res) => {
 router.patch("/objects/:id/archive", async (req, res) => {
   try {
     const db = await getDb();
-    const changes = await archiveResponse(db, "objects", req.params.id, true);
-    if (changes === 0) return res.status(404).json({ success: false, message: "对象不存在" });
+    const object = await db.get(`
+      SELECT o.id, o.name AS object_name, c.name AS category_name
+      FROM objects o
+      JOIN categories c ON o.category_id = c.id
+      WHERE o.id = ?
+    `, [req.params.id]);
+    if (!object) return res.status(404).json({ success: false, message: "对象不存在" });
+
+    const openPositions = await countOpenPositionsForMaster(db, {
+      level: "object",
+      categoryName: object.category_name,
+      objectName: object.object_name
+    });
+    if (openPositions > 0) {
+      return res.status(409).json({
+        success: false,
+        message: formatOpenPositionArchiveBlockMessage(openPositions)
+      });
+    }
+
+    const now = new Date().toISOString();
+    try {
+      await db.run("BEGIN IMMEDIATE TRANSACTION");
+      await db.run(
+        "UPDATE objects SET is_archived = 1, archived_at = ?, updated_at = ? WHERE id = ?",
+        [now, now, req.params.id]
+      );
+      await db.run(
+        `UPDATE variants
+         SET is_archived = 1, archived_at = ?, updated_at = ?
+         WHERE object_id = ? AND COALESCE(is_archived, 0) = 0`,
+        [now, now, req.params.id]
+      );
+      await db.run("COMMIT");
+    } catch (error) {
+      await db.run("ROLLBACK").catch(() => undefined);
+      throw error;
+    }
+
     res.json({ success: true, data: { message: "对象已归档" } });
   } catch (error) {
     res.status(500).json({ success: false, message: "归档对象失败" });
@@ -529,20 +606,48 @@ router.patch("/variants/:id/archive", async (req, res) => {
   try {
     const db = await getDb();
     const variant = await db.get(
-      `SELECT id, object_id FROM variants WHERE id = ?`,
+      `SELECT v.id, v.object_id, v.name AS variant_name,
+              o.name AS object_name, c.name AS category_name
+       FROM variants v
+       JOIN objects o ON v.object_id = o.id
+       JOIN categories c ON o.category_id = c.id
+       WHERE v.id = ?`,
       [req.params.id]
     );
     if (!variant) return res.status(404).json({ success: false, message: "变体不存在" });
 
-    const changes = await archiveResponse(db, "variants", req.params.id, true);
-    if (changes === 0) return res.status(404).json({ success: false, message: "变体不存在" });
+    const openPositions = await countOpenPositionsForMaster(db, {
+      level: "variant",
+      categoryName: variant.category_name,
+      objectName: variant.object_name,
+      variantName: variant.variant_name
+    });
+    if (openPositions > 0) {
+      return res.status(409).json({
+        success: false,
+        message: formatOpenPositionArchiveBlockMessage(openPositions)
+      });
+    }
 
-    // 该对象下变体已全部归档时，同步归档对象，避免工作台/下拉继续露出空壳对象。
-    if (
-      (await objectHasAnyVariants(db, variant.object_id))
-      && !(await objectHasActiveVariants(db, variant.object_id))
-    ) {
-      await archiveResponse(db, "objects", String(variant.object_id), true);
+    try {
+      await db.run("BEGIN IMMEDIATE TRANSACTION");
+      const changes = await archiveResponse(db, "variants", req.params.id, true);
+      if (changes === 0) {
+        await db.run("ROLLBACK").catch(() => undefined);
+        return res.status(404).json({ success: false, message: "变体不存在" });
+      }
+
+      // 该对象下变体已全部归档时，同步归档对象，避免工作台/下拉继续露出空壳对象。
+      if (
+        (await objectHasAnyVariants(db, variant.object_id))
+        && !(await objectHasActiveVariants(db, variant.object_id))
+      ) {
+        await archiveResponse(db, "objects", String(variant.object_id), true);
+      }
+      await db.run("COMMIT");
+    } catch (error) {
+      await db.run("ROLLBACK").catch(() => undefined);
+      throw error;
     }
 
     res.json({ success: true, data: { message: "变体已归档" } });

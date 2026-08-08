@@ -46,6 +46,29 @@ interface PlanExecutionEventInput {
 
 const validStatuses = ['pending', 'in_progress', 'completed', 'cancelled'];
 
+/** Plans whose category/object/variant master data is still active (not archived). */
+const ACTIVE_PLAN_MASTER_FILTER = `
+  EXISTS (
+    SELECT 1
+    FROM categories c
+    JOIN objects o ON o.category_id = c.id
+    WHERE c.name = p.category_name
+      AND o.name = p.object_name
+      AND COALESCE(c.is_archived, 0) = 0
+      AND COALESCE(o.is_archived, 0) = 0
+      AND (
+        COALESCE(p.variant_name, '') = ''
+        OR EXISTS (
+          SELECT 1
+          FROM variants v
+          WHERE v.object_id = o.id
+            AND v.name = p.variant_name
+            AND COALESCE(v.is_archived, 0) = 0
+        )
+      )
+  )
+`;
+
 const planConfigs: PlanConfig[] = [
   { kind: 'buying', endpoint: 'buying-plans', tableName: 'buying_plans', label: '买入计划' },
   { kind: 'selling', endpoint: 'selling-plans', tableName: 'selling_plans', label: '卖出计划' }
@@ -292,6 +315,7 @@ const getBuyingPlanPriceAlerts = async (db: any) => {
     FROM buying_plans p
     ${annualPlanLinkJoins('p')}
     WHERE p.status IN ('pending', 'in_progress')
+      AND ${ACTIVE_PLAN_MASTER_FILTER}
     ORDER BY p.updated_at DESC, p.id DESC
   `);
   const latestPriceMap = await getLatestPriceMap(db);
@@ -544,16 +568,21 @@ const registerPlanRoutes = (config: PlanConfig) => {
     try {
       const db = await getDb();
       const { status } = req.query;
+      const includeArchived = ['1', 'true'].includes(String(req.query.include_archived || '').toLowerCase());
       const params: any[] = [];
       let query = `
         SELECT p.*, ${annualPlanLinkSelectFields}
         FROM ${config.tableName} p
         ${annualPlanLinkJoins('p')}
+        WHERE 1 = 1
       `;
 
       if (status) {
-        query += ' WHERE p.status = ?';
+        query += ' AND p.status = ?';
         params.push(status);
+      }
+      if (!includeArchived) {
+        query += ` AND ${ACTIVE_PLAN_MASTER_FILTER}`;
       }
 
       query += ' ORDER BY p.created_at DESC, p.id DESC';
@@ -722,22 +751,36 @@ router.get('/plans/stats', async (req, res) => {
     const db = await getDb();
 
     const buyStats = await db.get(
-      'SELECT COUNT(*) as count, COALESCE(SUM(total_amount), 0) as amount FROM buying_plans WHERE status IN (?, ?)',
+      `SELECT COUNT(*) as count, COALESCE(SUM(total_amount), 0) as amount
+       FROM buying_plans p
+       WHERE p.status IN (?, ?)
+         AND ${ACTIVE_PLAN_MASTER_FILTER}`,
       ['pending', 'in_progress']
     );
 
     const sellStats = await db.get(
-      'SELECT COUNT(*) as count, COALESCE(SUM(total_amount), 0) as amount FROM selling_plans WHERE status IN (?, ?)',
+      `SELECT COUNT(*) as count, COALESCE(SUM(total_amount), 0) as amount
+       FROM selling_plans p
+       WHERE p.status IN (?, ?)
+         AND ${ACTIVE_PLAN_MASTER_FILTER}`,
       ['pending', 'in_progress']
     );
 
     const buyStatsByCategory = await db.all(
-      'SELECT category_name, COUNT(*) as count, COALESCE(SUM(total_amount), 0) as amount FROM buying_plans WHERE status IN (?, ?) GROUP BY category_name',
+      `SELECT p.category_name, COUNT(*) as count, COALESCE(SUM(p.total_amount), 0) as amount
+       FROM buying_plans p
+       WHERE p.status IN (?, ?)
+         AND ${ACTIVE_PLAN_MASTER_FILTER}
+       GROUP BY p.category_name`,
       ['pending', 'in_progress']
     );
 
     const sellStatsByCategory = await db.all(
-      'SELECT category_name, COUNT(*) as count, COALESCE(SUM(total_amount), 0) as amount FROM selling_plans WHERE status IN (?, ?) GROUP BY category_name',
+      `SELECT p.category_name, COUNT(*) as count, COALESCE(SUM(p.total_amount), 0) as amount
+       FROM selling_plans p
+       WHERE p.status IN (?, ?)
+         AND ${ACTIVE_PLAN_MASTER_FILTER}
+       GROUP BY p.category_name`,
       ['pending', 'in_progress']
     );
 

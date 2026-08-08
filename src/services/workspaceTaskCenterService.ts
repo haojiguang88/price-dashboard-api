@@ -185,24 +185,25 @@ const getFreshnessThresholdHours = (scheduleDays: string) => (
   scheduleDays === "work_days" ? 84 : 36
 );
 
-const getTaskFreshness = (task: any, lastSuccessRun: any, now = new Date()) => {
+const getTaskFreshness = (task: any, lastDataWriteRun: any, now = new Date()) => {
   if (Number(task.enabled) !== 1) {
     return { status: "disabled", label: "已关闭", age_hours: null, threshold_hours: getFreshnessThresholdHours(task.schedule_days) };
   }
 
-  const successAtText = lastSuccessRun?.finished_at || lastSuccessRun?.started_at || "";
-  const successAt = successAtText ? new Date(successAtText) : null;
+  // Freshness tracks last effective write (inserted/updated > 0), not merely a green run/skip.
+  const writeAtText = lastDataWriteRun?.finished_at || lastDataWriteRun?.started_at || "";
+  const writeAt = writeAtText ? new Date(writeAtText) : null;
   const thresholdHours = getFreshnessThresholdHours(task.schedule_days);
-  if (!successAt || !Number.isFinite(successAt.getTime())) {
-    return { status: "unknown", label: "无成功记录", age_hours: null, threshold_hours: thresholdHours };
+  if (!writeAt || !Number.isFinite(writeAt.getTime())) {
+    return { status: "unknown", label: "无有效写入记录", age_hours: null, threshold_hours: thresholdHours };
   }
 
-  const ageHours = Math.max(0, Math.round((now.getTime() - successAt.getTime()) / 36_000) / 100);
+  const ageHours = Math.max(0, Math.round((now.getTime() - writeAt.getTime()) / 36_000) / 100);
   if (ageHours > thresholdHours) {
-    return { status: "stale", label: `距上次成功 ${ageHours.toFixed(1)} 小时`, age_hours: ageHours, threshold_hours: thresholdHours };
+    return { status: "stale", label: `距上次有效写入 ${ageHours.toFixed(1)} 小时`, age_hours: ageHours, threshold_hours: thresholdHours };
   }
 
-  return { status: "fresh", label: `距上次成功 ${ageHours.toFixed(1)} 小时`, age_hours: ageHours, threshold_hours: thresholdHours };
+  return { status: "fresh", label: `距上次有效写入 ${ageHours.toFixed(1)} 小时`, age_hours: ageHours, threshold_hours: thresholdHours };
 };
 
 const countArray = (value: unknown) => Array.isArray(value) ? value.length : 0;
@@ -300,9 +301,17 @@ const getSourceMappingSummaries = async (db: any) => {
   return summaries;
 };
 
-type TaskDataStatus = "updated" | "no_change" | "no_source_data" | "mapping_gap" | "source_error" | "unknown";
+export type TaskDataStatus =
+  | "updated"
+  | "no_change"
+  | "no_source_data"
+  | "mapping_gap"
+  | "source_error"
+  | "unknown";
 
-interface TaskRunDataSummary {
+export type TaskRunStatus = "success" | "skipped" | "error" | "running";
+
+export interface TaskRunDataSummary {
   inserted: number;
   updated: number;
   skipped: number;
@@ -313,6 +322,16 @@ interface TaskRunDataSummary {
   source_error_count: number;
   data_status: TaskDataStatus;
 }
+
+/** Canonical data_status values used by health UI and freshness. */
+export const TASK_DATA_STATUSES: readonly TaskDataStatus[] = [
+  "updated",
+  "no_change",
+  "no_source_data",
+  "mapping_gap",
+  "source_error",
+  "unknown"
+] as const;
 
 const summarizeDirectTaskRunPayload = (payload: any): Omit<TaskRunDataSummary, "data_status"> => {
   const records = Array.isArray(payload?.records) ? payload.records : [];
@@ -451,7 +470,20 @@ const getHealthStatus = (task: any, latestRun: any, lastSuccessRun: any, now = n
   if (payloadSummary.data_status === "updated") {
     return { status: "healthy", severity: "ok", reason: `任务执行正常：新增 ${payloadSummary.inserted}，更新 ${payloadSummary.updated}` };
   }
+  if (payloadSummary.data_status === "no_change") {
+    return {
+      status: "no_change",
+      severity: "info",
+      reason: `脚本执行成功，但无新增/更新（跳过 ${payloadSummary.skipped}）`
+    };
+  }
   return { status: "healthy", severity: "ok", reason: "任务执行正常，本次没有新增或更新" };
+};
+
+const isDataWriteRun = (run: any) => {
+  if (!run || run.status !== "success") return false;
+  const summary = summarizeTaskRunPayload(parseJson(run.result_json));
+  return summary.data_status === "updated";
 };
 
 export const getTaskCenterHealth = async (workspaceInput: unknown) => {
@@ -486,8 +518,10 @@ export const getTaskCenterHealth = async (workspaceInput: unknown) => {
   const healthTasks = tasks.map((task: any) => {
     const taskRuns = runsByTaskKey.get(task.task_key) || [];
     const latestRun = taskRuns[0] || null;
+    // Schedule "did it run" vs data "did it write" are different signals.
     const lastSuccessRun = taskRuns.find((run: any) => ["success", "skipped"].includes(run.status)) || null;
-    const freshness = getTaskFreshness(task, lastSuccessRun, now);
+    const lastDataWriteRun = taskRuns.find((run: any) => isDataWriteRun(run)) || null;
+    const freshness = getTaskFreshness(task, lastDataWriteRun, now);
     const recentRuns = taskRuns.slice(0, 10);
     const recentFailures = recentRuns.filter((run: any) => run.status === "error").length;
     const latestPayload = latestRun ? parseJson(latestRun.result_json) : null;
@@ -512,13 +546,23 @@ export const getTaskCenterHealth = async (workspaceInput: unknown) => {
     let health = getHealthStatus(task, latestRun, lastSuccessRun, now);
     if (
       sourceMappingSummary
-      && health.severity === "ok"
+      && (health.severity === "ok" || health.severity === "info")
       && (sourceMappingSummary.unmapped_count > 0 || sourceMappingSummary.last_error_count > 0)
     ) {
       health = {
         status: "mapping_gap",
         severity: "warning",
         reason: "任务最近执行正常，但数据源映射里仍有未映射或来源错误"
+      };
+    }
+    if (
+      (health.severity === "ok" || health.severity === "info")
+      && freshness.status === "stale"
+    ) {
+      health = {
+        status: "stale_data",
+        severity: "warning",
+        reason: `脚本近期能跑通，但距上次有效写入已 ${freshness.age_hours} 小时（阈值 ${freshness.threshold_hours} 小时）`
       };
     }
 
@@ -536,15 +580,20 @@ export const getTaskCenterHealth = async (workspaceInput: unknown) => {
       health_status: health.status,
       severity: health.severity,
       reason: health.reason,
+      run_status: latestRun?.status || null,
+      data_status: dataSummary.data_status,
       latest_run: latestRun ? {
         id: latestRun.id,
         status: latestRun.status,
+        run_status: latestRun.status,
+        data_status: dataSummary.data_status,
         trigger_type: latestRun.trigger_type,
         message: latestRun.status === "error" ? latestRun.message : undefined,
         started_at: latestRun.started_at,
         finished_at: latestRun.finished_at
       } : null,
       last_success_at: lastSuccessRun?.finished_at || lastSuccessRun?.started_at || null,
+      last_data_write_at: lastDataWriteRun?.finished_at || lastDataWriteRun?.started_at || null,
       freshness,
       recent_failures: recentFailures,
       source_mapping: sourceMappingSummary,

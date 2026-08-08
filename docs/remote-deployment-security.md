@@ -66,13 +66,19 @@ location /api/ {
 ```dotenv
 SERVER_AUTH_MODE=trusted_reverse_proxy
 AUTH_IDENTITY_HEADER=X-Authenticated-User
+AUTH_PROXY_SHARED_SECRET=replace-with-at-least-32-random-characters
+# optional override; default is X-Price-Dashboard-Proxy-Secret
+# AUTH_PROXY_SECRET_HEADER=X-Price-Dashboard-Proxy-Secret
 ```
 
-反向代理必须用认证上游产生的变量覆盖身份头，不能引用或透传客户端的同名头：
+反向代理必须：
+1. 用认证上游产生的变量覆盖身份头，不能引用或透传客户端的同名头；
+2. 注入仅 nginx 知道的共享密钥头（客户端伪造身份头时仍无法通过）。
 
 ```nginx
 # $authenticated_user 必须只由 auth_request / OIDC 认证结果赋值。
 proxy_set_header X-Authenticated-User $authenticated_user;
+proxy_set_header X-Price-Dashboard-Proxy-Secret "<same value as AUTH_PROXY_SHARED_SECRET>";
 proxy_set_header X-Forwarded-Proto https;
 proxy_pass http://127.0.0.1:3001;
 ```

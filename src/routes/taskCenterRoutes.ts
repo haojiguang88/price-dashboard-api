@@ -8,6 +8,8 @@ import {
   type ScopedWorkspaceTaskCenterService
 } from '../services/workspaceCenterScopedServices';
 import { getWorkspaceCenterStatusCode } from '../services/workspaceCenterErrors';
+import { summarizeTaskRunPayload } from '../services/workspaceTaskCenterService';
+import { buildTaskChildEnv, resolveTaskPython } from '../utils/taskExecutionEnv';
 
 type TaskRow = {
   id: number;
@@ -27,7 +29,6 @@ type TaskRow = {
 
 const lastScheduledRunByTaskWindow = new Map<string, string>();
 const DEFAULT_TASK_TIMEOUT_MS = 30 * 60 * 1000;
-const DEFAULT_TASK_PYTHON = 'python3';
 const RUNTIME_TASK_WORKSPACE: WorkspaceKey = 'business';
 
 function getTaskDomain(task: Partial<TaskRow>) {
@@ -252,13 +253,8 @@ async function getScheduledTaskRunningReason(db: any, task: TaskRow, now = new D
   return `${task.name || task.task_key}正在执行，本轮定时跳过，避免重复启动。开始时间：${formatChinaDateTime(running.started_at)}`;
 }
 
-function getTaskPython(config: any) {
-  return String(
-    config.python ||
-    process.env.TASK_CENTER_PYTHON ||
-    process.env.PYTHON_BIN ||
-    DEFAULT_TASK_PYTHON
-  );
+function getTaskPython(config?: any) {
+  return resolveTaskPython(config);
 }
 
 type ExecFileTaskError = Error & {
@@ -292,7 +288,7 @@ function runExecFileWithTimeout(command: string, args: string[], timeoutMs: numb
     const child = execFile(command, args, {
       cwd: path.join(__dirname, '../..'),
       maxBuffer: 1024 * 1024 * 10,
-      env: process.env
+      env: buildTaskChildEnv()
     }, (error, stdout, stderr) => {
       if (timeout) clearTimeout(timeout);
       if (forceKillTimeout) clearTimeout(forceKillTimeout);
@@ -759,11 +755,19 @@ async function executeTask(task: TaskRow, triggerType: 'manual' | 'schedule') {
     const update = await runBusinessTask(task, config, taskTimeoutMs);
     const finalStatus = update.status || 'success';
     const now = new Date().toISOString();
+    // Keep run_status (process) separate from data_status (writes) in the persisted payload.
+    const dataSummary = summarizeTaskRunPayload(update.data);
+    const resultPayload = {
+      ...(update.data && typeof update.data === 'object' ? update.data : { value: update.data }),
+      run_status: finalStatus,
+      data_status: dataSummary.data_status,
+      data_summary: dataSummary
+    };
     const finalRunUpdate = await db.run(
       `UPDATE task_center_runs
        SET status = ?, message = ?, result_json = ?, finished_at = ?
        WHERE id = ? AND status = 'running'`,
-      [finalStatus, update.message, JSON.stringify(update.data), now, runId]
+      [finalStatus, update.message, JSON.stringify(resultPayload), now, runId]
     );
     if (Number(finalRunUpdate?.changes || 0) === 0) {
       return {

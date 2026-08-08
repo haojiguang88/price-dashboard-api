@@ -53,3 +53,18 @@ test("pipeline step writes are included in the top-level task result", () => {
   assert.equal(summary.inserted, 3);
   assert.equal(summary.data_status, "updated");
 });
+
+test("successful run with only skips is no_change, not updated", () => {
+  const summary = summarizeTaskRunPayload({
+    inserted_count: 0,
+    updated_count: 0,
+    skipped_count: 5,
+    source_count: 10,
+    matched_count: 5,
+    filtered_count: 230
+  });
+
+  assert.equal(summary.data_status, "no_change");
+  assert.equal(summary.skipped, 5);
+});
+

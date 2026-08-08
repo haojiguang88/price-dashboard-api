@@ -423,3 +423,56 @@ export const formatReferenceBlockMessage = (references: { table: string; count: 
   const summary = references.map(item => `${item.table}:${item.count}`).join(", ");
   return `已有 ${total} 条业务引用，不能硬删除；请先归档或清理引用。${summary}`;
 };
+
+/** Count open positions (remaining_quantity > 0) that still reference this master target. */
+export const countOpenPositionsForMaster = async (
+  db: any,
+  target:
+    | { level: "category"; categoryName: string }
+    | { level: "object"; categoryName: string; objectName: string }
+    | { level: "variant"; categoryName: string; objectName: string; variantName: string }
+): Promise<number> => {
+  if (!(await tableExists(db, "positions")) || !(await tableExists(db, "position_batches"))) {
+    return 0;
+  }
+
+  if (target.level === "category") {
+    const row = await db.get(
+      `SELECT COUNT(DISTINCT p.id) AS count
+       FROM positions p
+       JOIN position_batches pb ON pb.position_id = p.id
+       WHERE p.category_name = ?
+         AND pb.remaining_quantity > 0`,
+      [target.categoryName]
+    );
+    return Number(row?.count || 0);
+  }
+
+  if (target.level === "object") {
+    const row = await db.get(
+      `SELECT COUNT(DISTINCT p.id) AS count
+       FROM positions p
+       JOIN position_batches pb ON pb.position_id = p.id
+       WHERE p.category_name = ?
+         AND p.object_name = ?
+         AND pb.remaining_quantity > 0`,
+      [target.categoryName, target.objectName]
+    );
+    return Number(row?.count || 0);
+  }
+
+  const row = await db.get(
+    `SELECT COUNT(DISTINCT p.id) AS count
+     FROM positions p
+     JOIN position_batches pb ON pb.position_id = p.id
+     WHERE p.category_name = ?
+       AND p.object_name = ?
+       AND COALESCE(p.variant_name, '') = ?
+       AND pb.remaining_quantity > 0`,
+    [target.categoryName, target.objectName, target.variantName]
+  );
+  return Number(row?.count || 0);
+};
+
+export const formatOpenPositionArchiveBlockMessage = (count: number) =>
+  `仍有 ${count} 个未平仓位引用该主数据，请先平仓或调仓后再归档。`;

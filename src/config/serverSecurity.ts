@@ -19,6 +19,8 @@ export interface ServerSecurityConfig {
   trustProxy: false | "loopback";
   authMode: ServerAuthMode;
   identityHeader: string | null;
+  proxyAuthHeader: string | null;
+  proxySharedSecret: string | null;
   sessionAuth: SessionAuthCredentials | null;
 }
 
@@ -96,6 +98,29 @@ const parseIdentityHeader = (value: string | undefined) => {
     throw new ServerSecurityConfigError("Remote deployment requires a valid AUTH_IDENTITY_HEADER");
   }
   return normalized;
+};
+
+const parseProxyAuthHeader = (value: string | undefined) => {
+  const normalized = String(value || "x-price-dashboard-proxy-secret").trim().toLowerCase();
+  if (!normalized || !/^[a-z0-9-]+$/.test(normalized)) {
+    throw new ServerSecurityConfigError("AUTH_PROXY_SECRET_HEADER must be a valid header name");
+  }
+  return normalized;
+};
+
+const parseProxySharedSecret = (value: string | undefined) => {
+  const secret = String(value || "").trim();
+  if (secret.length < 32) {
+    throw new ServerSecurityConfigError(
+      "trusted_reverse_proxy requires AUTH_PROXY_SHARED_SECRET with at least 32 characters"
+    );
+  }
+  return secret;
+};
+
+const allowsUnauthenticatedLocal = (env: NodeJS.ProcessEnv) => {
+  const value = String(env.ALLOW_UNAUTHENTICATED_LOCAL || "").trim().toLowerCase();
+  return value === "1" || value === "true" || value === "yes";
 };
 
 const parseSessionAuthCredentials = (
@@ -184,6 +209,11 @@ export const resolveServerSecurityConfig = (
         "Local mode SERVER_AUTH_MODE must be none or session"
       );
     }
+    if (isProduction && requestedAuthMode !== "session" && !allowsUnauthenticatedLocal(env)) {
+      throw new ServerSecurityConfigError(
+        "Local production mode requires SERVER_AUTH_MODE=session (or explicit ALLOW_UNAUTHENTICATED_LOCAL=true)"
+      );
+    }
     if (requestedAuthMode === "session") {
       return {
         nodeEnv,
@@ -194,6 +224,8 @@ export const resolveServerSecurityConfig = (
         trustProxy: false,
         authMode: "session",
         identityHeader: null,
+        proxyAuthHeader: null,
+        proxySharedSecret: null,
         sessionAuth: parseSessionAuthCredentials(env, false)
       };
     }
@@ -206,6 +238,8 @@ export const resolveServerSecurityConfig = (
       trustProxy: false,
       authMode: "none",
       identityHeader: null,
+      proxyAuthHeader: null,
+      proxySharedSecret: null,
       sessionAuth: null
     };
   }
@@ -224,6 +258,7 @@ export const resolveServerSecurityConfig = (
 
   assertRemoteCorsOriginsUseHttps(env.CORS_ORIGINS);
   const authMode = requestedAuthMode as Exclude<ServerAuthMode, "none">;
+  const useProxyAuth = authMode === "trusted_reverse_proxy";
   return {
     nodeEnv,
     deploymentMode,
@@ -232,8 +267,14 @@ export const resolveServerSecurityConfig = (
     publicBaseUrl: parseHttpsPublicBaseUrl(env.PUBLIC_BASE_URL),
     trustProxy: "loopback",
     authMode,
-    identityHeader: authMode === "trusted_reverse_proxy"
+    identityHeader: useProxyAuth
       ? parseIdentityHeader(env.AUTH_IDENTITY_HEADER)
+      : null,
+    proxyAuthHeader: useProxyAuth
+      ? parseProxyAuthHeader(env.AUTH_PROXY_SECRET_HEADER)
+      : null,
+    proxySharedSecret: useProxyAuth
+      ? parseProxySharedSecret(env.AUTH_PROXY_SHARED_SECRET)
       : null,
     sessionAuth: authMode === "session"
       ? parseSessionAuthCredentials(env, true)
@@ -293,6 +334,15 @@ export const createRemoteAuthenticationMiddleware = (
     if (!enforceRemoteRequestBoundary(req, res, config)) return;
 
     if (config.authMode === "trusted_reverse_proxy") {
+      const proxySecret = String(req.get(config.proxyAuthHeader as string) || "").trim();
+      if (!proxySecret || proxySecret !== config.proxySharedSecret) {
+        res.status(401).json({
+          status: "error",
+          code: "authentication_required",
+          message: "Authentication required"
+        });
+        return;
+      }
       const identity = String(req.get(config.identityHeader as string) || "").trim();
       if (!identity) {
         res.status(401).json({

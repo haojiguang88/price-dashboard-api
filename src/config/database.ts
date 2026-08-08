@@ -11,7 +11,13 @@ import {
   validateExistingBusinessDatabase
 } from "./databaseValidation";
 
-// 初始化数据库表结构
+/**
+ * Base schema bootstrap (legacy dual-track with migrations).
+ *
+ * FREEZE: Do NOT add new CREATE TABLE / ALTER TABLE / ensureColumn for new features here.
+ * Put new DDL and data backfills in src/migrations/index.ts (see docs/migration-howto.md).
+ * tests/database-init-freeze.test.ts locks the CREATE TABLE set in this file.
+ */
 const initDatabase = async (db: Database) => {
   await db.exec("PRAGMA foreign_keys = ON;");
   await ensureBusinessDatabaseMetadata(db);

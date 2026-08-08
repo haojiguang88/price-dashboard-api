@@ -37,19 +37,43 @@ router.get('/realized-top', async (req, res) => {
   try {
     const db = await getDb();
     
-    // 聚合计算每个品类/对象/变体的盈亏数据
+    const includeArchived = ['1', 'true'].includes(String(req.query.include_archived || '').toLowerCase());
+    const activeMasterFilter = `
+      EXISTS (
+        SELECT 1
+        FROM categories c
+        JOIN objects o ON o.category_id = c.id
+        WHERE c.name = sr.category_name
+          AND o.name = sr.object_name
+          AND COALESCE(c.is_archived, 0) = 0
+          AND COALESCE(o.is_archived, 0) = 0
+          AND (
+            COALESCE(sr.variant_name, '') = ''
+            OR EXISTS (
+              SELECT 1
+              FROM variants v
+              WHERE v.object_id = o.id
+                AND v.name = sr.variant_name
+                AND COALESCE(v.is_archived, 0) = 0
+            )
+          )
+      )
+    `;
+
+    // 聚合计算每个品类/对象/变体的盈亏数据（默认排除已归档主数据）
     const realizedData = await db.all(`
       SELECT 
-        category_name, 
-        object_name, 
-        COALESCE(variant_name, '') as variant_name, 
-        SUM(quantity) as total_quantity, 
-        SUM(amount) as total_amount, 
-        SUM(cost) as total_cost, 
-        SUM(profit) as total_profit
-      FROM sell_records
-      GROUP BY category_name, object_name, COALESCE(variant_name, '')
-      HAVING SUM(profit) IS NOT NULL
+        sr.category_name, 
+        sr.object_name, 
+        COALESCE(sr.variant_name, '') as variant_name, 
+        SUM(sr.quantity) as total_quantity, 
+        SUM(sr.amount) as total_amount, 
+        SUM(sr.cost) as total_cost, 
+        SUM(sr.profit) as total_profit
+      FROM sell_records sr
+      WHERE ${includeArchived ? '1 = 1' : activeMasterFilter}
+      GROUP BY sr.category_name, sr.object_name, COALESCE(sr.variant_name, '')
+      HAVING SUM(sr.profit) IS NOT NULL
     `);
     
     // 按盈亏排序，提取 TOP 10

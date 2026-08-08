@@ -82,6 +82,21 @@ test("remote mode requires HTTPS reverse proxy and server-side identity", () => 
     /SERVER_AUTH_MODE/
   );
 
+  assert.throws(
+    () => resolveServerSecurityConfig({
+      NODE_ENV: "production",
+      DEPLOYMENT_MODE: "remote",
+      HOST: "127.0.0.1",
+      PORT: "3001",
+      CORS_ORIGINS: "https://business.example.com",
+      PUBLIC_BASE_URL: "https://business.example.com",
+      TRUST_PROXY: "loopback",
+      SERVER_AUTH_MODE: "trusted_reverse_proxy",
+      AUTH_IDENTITY_HEADER: "X-Authenticated-User"
+    }),
+    /AUTH_PROXY_SHARED_SECRET/
+  );
+
   const config = resolveServerSecurityConfig({
     NODE_ENV: "production",
     DEPLOYMENT_MODE: "remote",
@@ -91,12 +106,35 @@ test("remote mode requires HTTPS reverse proxy and server-side identity", () => 
     PUBLIC_BASE_URL: "https://business.example.com",
     TRUST_PROXY: "loopback",
     SERVER_AUTH_MODE: "trusted_reverse_proxy",
-    AUTH_IDENTITY_HEADER: "X-Authenticated-User"
+    AUTH_IDENTITY_HEADER: "X-Authenticated-User",
+    AUTH_PROXY_SHARED_SECRET: "proxy-shared-secret-at-least-32-chars!!"
   });
   assert.equal(config.authMode, "trusted_reverse_proxy");
   assert.equal(config.identityHeader, "x-authenticated-user");
+  assert.equal(config.proxyAuthHeader, "x-price-dashboard-proxy-secret");
   assert.equal(config.publicBaseUrl, "https://business.example.com");
   assert.equal(resolveAllowedCorsOrigins(config, ["https://business.example.com"]).has("http://localhost:5173"), false);
+});
+
+test("local production forbids unauthenticated authMode unless explicitly allowed", () => {
+  assert.throws(
+    () => resolveServerSecurityConfig({
+      NODE_ENV: "production",
+      DEPLOYMENT_MODE: "local",
+      HOST: "127.0.0.1",
+      PORT: "3001"
+    }),
+    /ALLOW_UNAUTHENTICATED_LOCAL|SERVER_AUTH_MODE=session/
+  );
+
+  const allowed = resolveServerSecurityConfig({
+    NODE_ENV: "production",
+    DEPLOYMENT_MODE: "local",
+    HOST: "127.0.0.1",
+    PORT: "3001",
+    ALLOW_UNAUTHENTICATED_LOCAL: "true"
+  });
+  assert.equal(allowed.authMode, "none");
 });
 
 test("remote session mode fails closed when server credentials are missing", () => {
@@ -125,7 +163,8 @@ test("remote middleware rejects direct or anonymous access and accepts proxy ide
     PUBLIC_BASE_URL: "https://business.example.com",
     TRUST_PROXY: "loopback",
     SERVER_AUTH_MODE: "trusted_reverse_proxy",
-    AUTH_IDENTITY_HEADER: "X-Authenticated-User"
+    AUTH_IDENTITY_HEADER: "X-Authenticated-User",
+    AUTH_PROXY_SHARED_SECRET: "proxy-shared-secret-at-least-32-chars!!"
   });
   const app = express();
   applyServerSecurity(app, config);
@@ -152,11 +191,21 @@ test("remote middleware rejects direct or anonymous access and accepts proxy ide
     });
     assert.equal(anonymousProxyResponse.status, 401);
 
-    const authenticatedResponse = await fetch(url, {
+    const forgedIdentityOnlyResponse = await fetch(url, {
       headers: {
         "X-Forwarded-Proto": "https",
         "X-Forwarded-For": "203.0.113.10",
         "X-Authenticated-User": "verified-user"
+      }
+    });
+    assert.equal(forgedIdentityOnlyResponse.status, 401);
+
+    const authenticatedResponse = await fetch(url, {
+      headers: {
+        "X-Forwarded-Proto": "https",
+        "X-Forwarded-For": "203.0.113.10",
+        "X-Authenticated-User": "verified-user",
+        "X-Price-Dashboard-Proxy-Secret": "proxy-shared-secret-at-least-32-chars!!"
       }
     });
     assert.equal(authenticatedResponse.status, 200);

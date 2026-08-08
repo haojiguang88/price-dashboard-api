@@ -21,6 +21,7 @@ interface PositionInsightRow {
   category_id: number | null;
   object_id: number | null;
   variant_id: number | null;
+  master_archived: boolean;
 }
 
 interface PositionInsightItem extends PositionInsightRow {
@@ -335,7 +336,14 @@ router.get("/positions", async (req, res) => {
         CASE WHEN pr.price IS NOT NULL AND SUM(pb.batch_price * pb.remaining_quantity) > 0 
           THEN ((pr.price * SUM(pb.remaining_quantity)) - SUM(pb.batch_price * pb.remaining_quantity)) / SUM(pb.batch_price * pb.remaining_quantity) * 100 
           ELSE NULL 
-        END as profit_rate, 
+        END as profit_rate,
+        CASE
+          WHEN c.id IS NULL OR o.id IS NULL THEN 1
+          WHEN COALESCE(c.is_archived, 0) = 1 OR COALESCE(o.is_archived, 0) = 1 THEN 1
+          WHEN COALESCE(p.variant_name, '') <> ''
+            AND (v.id IS NULL OR COALESCE(v.is_archived, 0) = 1) THEN 1
+          ELSE 0
+        END as master_archived,
         p.created_at, 
         p.updated_at 
       FROM positions p 
@@ -359,16 +367,23 @@ router.get("/positions", async (req, res) => {
         ) as latest_prices 
         WHERE rn = 1 
       ) as pr ON p.category_name = pr.category AND p.object_name = pr.object_name AND COALESCE(p.variant_name, '') = pr.variant 
-      JOIN categories c ON c.name = p.category_name AND COALESCE(c.is_archived, 0) = 0
-      JOIN objects o ON o.category_id = c.id AND o.name = p.object_name AND COALESCE(o.is_archived, 0) = 0
-      LEFT JOIN variants v ON v.object_id = o.id AND v.name = COALESCE(p.variant_name, '') AND COALESCE(p.variant_name, '') <> '' AND COALESCE(v.is_archived, 0) = 0
-      WHERE COALESCE(p.variant_name, '') = '' OR v.id IS NOT NULL
+      LEFT JOIN categories c ON c.name = p.category_name
+      LEFT JOIN objects o ON o.category_id = c.id AND o.name = p.object_name
+      LEFT JOIN variants v ON v.object_id = o.id
+        AND v.name = COALESCE(p.variant_name, '')
+        AND COALESCE(p.variant_name, '') <> ''
       GROUP BY 
         p.id, 
         p.category_name, 
         p.object_name, 
         p.variant_name, 
-        pr.price, 
+        pr.price,
+        c.id,
+        o.id,
+        v.id,
+        c.is_archived,
+        o.is_archived,
+        v.is_archived,
         p.created_at, 
         p.updated_at 
       HAVING SUM(pb.remaining_quantity) > 0 
@@ -441,7 +456,14 @@ router.get("/positions/insights", async (req, res) => {
         lp.date as latest_price_date,
         c.id as category_id,
         o.id as object_id,
-        v.id as variant_id
+        v.id as variant_id,
+        CASE
+          WHEN c.id IS NULL OR o.id IS NULL THEN 1
+          WHEN COALESCE(c.is_archived, 0) = 1 OR COALESCE(o.is_archived, 0) = 1 THEN 1
+          WHEN ps.variant_name <> ''
+            AND (v.id IS NULL OR COALESCE(v.is_archived, 0) = 1) THEN 1
+          ELSE 0
+        END as master_archived
       FROM position_summary ps
       LEFT JOIN latest_prices lp
         ON ps.category_name = lp.category
@@ -450,9 +472,6 @@ router.get("/positions/insights", async (req, res) => {
       LEFT JOIN categories c ON c.name = ps.category_name
       LEFT JOIN objects o ON o.category_id = c.id AND o.name = ps.object_name
       LEFT JOIN variants v ON v.object_id = o.id AND v.name = ps.variant_name AND ps.variant_name <> ''
-      WHERE COALESCE(c.is_archived, 0) = 0
-        AND COALESCE(o.is_archived, 0) = 0
-        AND (ps.variant_name = '' OR COALESCE(v.is_archived, 0) = 0)
       ORDER BY ps.total_cost DESC, ps.id DESC
     `),
       db.get('SELECT MAX(date) as latest_date FROM price_records')
@@ -467,6 +486,7 @@ router.get("/positions/insights", async (req, res) => {
       total_cost: toFiniteNumber(row.total_cost),
       avg_price: toFiniteNumber(row.avg_price),
       current_price: row.current_price === null || row.current_price === undefined ? null : toFiniteNumber(row.current_price),
+      master_archived: Number(row.master_archived) === 1,
       latest_price_date: row.latest_price_date || null,
       first_buy_date: row.first_buy_date || null,
       last_buy_date: row.last_buy_date || null,
