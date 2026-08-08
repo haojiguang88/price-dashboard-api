@@ -542,41 +542,50 @@ async function runPreciousMetalMarketUpdate(config: any, timeoutMs: number, task
 }
 
 async function runIphonePriceUpdate(config: any, timeoutMs: number, taskName: string): Promise<BusinessTaskRunResult> {
-  const args = [
+  const category = String(config.category || '苹果手机');
+  const primarySourceName = getTaskSourceName(config, '潮收汇苹果备用报价');
+  const legacySourceName = getTaskSourceName(config, '德璜小程序档口报价');
+
+  const legacyArgs = [
     '--db',
     getDatabasePath(),
     '--category',
-    String(config.category || '苹果手机'),
+    category,
     '--source-name',
-    getTaskSourceName(config, '德璜小程序档口报价')
+    legacySourceName
   ];
-  if (config.dry_run) args.push('--dry-run');
+
+  if (config.dry_run) legacyArgs.push('--dry-run');
 
   let parsed: any;
   try {
-    parsed = await runPythonJsonScript(config, 'iphone.py', args, '苹果手机价格更新失败', timeoutMs, taskName);
+    parsed = await runBackupPriceUpdate(config, category, timeoutMs, taskName);
   } catch (error) {
-    if (config.use_backup_source === false || config.backup_on_failure === false) throw error;
-    const backupParsed = await runBackupPriceUpdate(config, String(config.category || '苹果手机'), timeoutMs, taskName);
-    return buildBackupSuccessResult(null, backupParsed, '主源失败', '苹果手机价格更新', (error as Error).message);
+    if (config.use_backup_source === false || config.backup_on_failure === false) {
+      throw error;
+    }
+
+    let legacyParsed: any;
+    try {
+      legacyParsed = await runPythonJsonScript(config, 'iphone.py', legacyArgs, '德璜小程序苹果源更新失败', timeoutMs, taskName);
+    } catch {
+      throw error;
+    }
+
+    return {
+      message: `苹果手机价格更新：${primarySourceName}失败：${(error as Error).message}；已回退${legacySourceName}`,
+      data: {
+        primary_error: (error as Error).message,
+        primary_source: primarySourceName,
+        fallback_source: legacySourceName,
+        primary: null,
+        fallback: legacyParsed,
+      },
+      status: getTaskCompletionStatus(legacyParsed)
+    };
   }
 
-  const backupReason = getBackupSourceReason(config, parsed);
-  if (!backupReason) {
-    return buildTaskResult(parsed, '苹果手机价格更新完成');
-  }
-
-  try {
-    const backupParsed = await runBackupPriceUpdate(config, String(config.category || '苹果手机'), timeoutMs, taskName);
-    return buildBackupSuccessResult(parsed, backupParsed, backupReason, parsed.message || '苹果手机价格更新完成');
-  } catch (error) {
-    return buildPrimaryWithBackupFailureResult(
-      parsed,
-      backupReason,
-      parsed.message || '苹果手机价格更新完成',
-      (error as Error).message
-    );
-  }
+  return buildTaskResult(parsed, `苹果手机价格更新完成（${primarySourceName}）`);
 }
 
 async function runVideoGameMachinePriceUpdate(config: any, timeoutMs: number, taskName: string): Promise<BusinessTaskRunResult> {
