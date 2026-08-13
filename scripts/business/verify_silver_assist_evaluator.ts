@@ -156,6 +156,9 @@ const main = async () => {
       assertRuleHits(evaluation, sample.shouldMiss, "miss");
     }
 
+    const weekendReplay = evaluateSilverSwingRules(points, rules, "2025-12-07");
+    assert.equal(weekendReplay.date, "2025-12-05", "Non-trading replay date should use the nearest previous trading day");
+
     const extremeClusters = clusterRuleHits(allEvaluations, "extreme_volatility", 2)
       .map(({ start, end }) => ({ start, end }));
     assert.deepStrictEqual(

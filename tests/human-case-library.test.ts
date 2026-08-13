@@ -227,3 +227,150 @@ test("stores an immutable source snapshot and prevents duplicate active distilla
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("seeds the Situational Awareness case as leverage and liquidity risk evidence", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "situational-awareness-case-"));
+  const filename = path.join(directory, "human-case.db");
+  const manager = new DatabaseManager({
+    filename,
+    allowCreate: true,
+    initialize: initializeBusinessBaseSchema
+  });
+
+  try {
+    await manager.getDb();
+    await runMigrations(filename);
+    const db = await manager.getDb();
+    const behaviorCase = await db.get(
+      `SELECT id, origin_type, evidence_level, action_quality, outcome_type,
+              evidence_role, self_response, note
+       FROM behavior_cases
+       WHERE title = ? AND is_deleted = 0`,
+      ["Situational Awareness：看对大势却失去等待资格"]
+    );
+
+    assert.ok(behaviorCase);
+    assert.equal(behaviorCase.origin_type, "public");
+    assert.equal(behaviorCase.evidence_level, "documented");
+    assert.equal(behaviorCase.action_quality, "flawed");
+    assert.equal(behaviorCase.outcome_type, "loss");
+    assert.equal(behaviorCase.evidence_role, "negative");
+    assert.match(behaviorCase.self_response, /保证金剥夺等待权/);
+    assert.match(behaviorCase.note, /“被围剿”缺少充分证据/);
+
+    const links = await db.all(
+      `SELECT p.name, l.role
+       FROM behavior_case_pattern_links l
+       JOIN behavior_patterns p ON p.id = l.pattern_id
+       WHERE l.case_id = ?
+       ORDER BY CASE l.role WHEN 'primary' THEN 0 ELSE 1 END, p.name`,
+      [behaviorCase.id]
+    );
+    assert.deepEqual(links, [
+      { name: "过度下注", role: "primary" },
+      { name: "暴涨后崩跌", role: "secondary" },
+      { name: "连续盈利后的自信膨胀", role: "secondary" }
+    ]);
+
+    await db.run(
+      "DELETE FROM migrations WHERE id = ?",
+      ["20260812_001_add_situational_awareness_risk_case"]
+    );
+    await runMigrations(filename);
+    const duplicateCheck = await db.get(
+      `SELECT COUNT(*) AS total
+       FROM behavior_cases
+       WHERE title = ? AND is_deleted = 0`,
+      ["Situational Awareness：看对大势却失去等待资格"]
+    );
+    assert.equal(Number(duplicateCheck.total), 1);
+  } finally {
+    await manager.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("merges the Android miss into one second-order supply-chain case", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "android-supply-chain-case-"));
+  const filename = path.join(directory, "human-case.db");
+  const manager = new DatabaseManager({
+    filename,
+    allowCreate: true,
+    initialize: initializeBusinessBaseSchema
+  });
+
+  try {
+    await manager.getDb();
+    await runMigrations(filename);
+    const db = await manager.getDb();
+    const review = await db.get(
+      `SELECT id, title, miss_type, exposed_problem, short_lesson
+       FROM missed_projects
+       WHERE title = ? AND is_deleted = 0`,
+      ["安卓机器：产业链推演只走一半，起飞后不追"]
+    );
+    assert.ok(review);
+    assert.match(review.miss_type, /前期推演不足/);
+    assert.match(review.exposed_problem, /产能挤占/);
+    assert.match(review.short_lesson, /第二阶、第三阶/);
+
+    const behaviorCase = await db.get(
+      `SELECT id, action_quality, outcome_type, evidence_role, self_response,
+              linked_rule_refs_json
+       FROM behavior_cases
+       WHERE source_type = 'missed_project' AND source_id = ? AND is_deleted = 0`,
+      [String(review.id)]
+    );
+    assert.ok(behaviorCase);
+    assert.equal(behaviorCase.action_quality, "mixed");
+    assert.equal(behaviorCase.outcome_type, "mixed");
+    assert.equal(behaviorCase.evidence_role, "boundary");
+    assert.match(behaviorCase.self_response, /八问模板/);
+    assert.deepEqual(JSON.parse(behaviorCase.linked_rule_refs_json), [
+      "大趋势只是入口，真正的机会往往藏在趋势造成的第二阶、第三阶供需变化里",
+      "先把因果链验证完整；价格起飞后仍不追高"
+    ]);
+
+    const links = await db.all(
+      `SELECT p.name, l.role
+       FROM behavior_case_pattern_links l
+       JOIN behavior_patterns p ON p.id = l.pattern_id
+       WHERE l.case_id = ?
+       ORDER BY CASE l.role WHEN 'primary' THEN 0 ELSE 1 END, p.name`,
+      [behaviorCase.id]
+    );
+    assert.deepEqual(links, [
+      { name: "推演链条过短", role: "primary" },
+      { name: "产能挤占与二三阶传导", role: "secondary" },
+      { name: "恐惧与过度防守", role: "secondary" }
+    ]);
+
+    const rule = await db.get(
+      `SELECT summary_conclusion, note
+       FROM rule_experiences
+       WHERE title = ? AND is_deleted = 0`,
+      ["大趋势要继续推演产能挤占和二三阶供需变化"]
+    );
+    assert.match(rule?.summary_conclusion || "", /大趋势只是入口/);
+    assert.match(rule?.note || "", /不自动生成操作结论/);
+
+    await db.run(
+      "DELETE FROM migrations WHERE id = ?",
+      ["20260812_002_merge_android_ai_supply_chain_case"]
+    );
+    await runMigrations(filename);
+    const duplicateCheck = await db.get(
+      `SELECT
+         (SELECT COUNT(*) FROM missed_projects
+          WHERE title = ? AND is_deleted = 0) AS review_total,
+         (SELECT COUNT(*) FROM behavior_cases
+          WHERE source_type = 'missed_project' AND source_id = ? AND is_deleted = 0) AS case_total`,
+      ["安卓机器：产业链推演只走一半，起飞后不追", String(review.id)]
+    );
+    assert.equal(Number(duplicateCheck.review_total), 1);
+    assert.equal(Number(duplicateCheck.case_total), 1);
+  } finally {
+    await manager.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});

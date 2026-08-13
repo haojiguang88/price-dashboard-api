@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildGoldSilverRatioSummary } from "../src/services/goldSilverRatioService";
+import { buildGoldSilverRatioSummary, loadGoldSilverRatioSummary } from "../src/services/goldSilverRatioService";
 
 const dateAt = (offset: number) => {
   const date = new Date(Date.UTC(2026, 0, 1 + offset));
@@ -60,4 +60,22 @@ test("gold silver ratio rejects stale FX carry-forward data", () => {
 
   assert.equal(summary.value, null);
   assert.equal(summary.sample_count, 0);
+});
+
+test("gold silver ratio database loader applies the as-of boundary to every input", async () => {
+  const calls: Array<{ sql: string; params: unknown[] }> = [];
+  const db = {
+    all: async (sql: string, params: unknown[]) => {
+      calls.push({ sql, params });
+      return [];
+    }
+  };
+
+  await loadGoldSilverRatioSummary(db, { asOfDate: "2025-12-01" });
+
+  assert.equal(calls.length, 3);
+  calls.forEach(call => {
+    assert.match(call.sql, /trade_date <= \?/);
+    assert.equal(call.params.at(-1), "2025-12-01");
+  });
 });

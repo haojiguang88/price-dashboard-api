@@ -6594,6 +6594,522 @@ const migrations: Migration[] = [
            )`
       );
     }
+  },
+  {
+    id: '20260812_001_add_situational_awareness_risk_case',
+    name: 'Add Situational Awareness leverage and liquidity risk case',
+    run: async (db: any) => {
+      if (!(await migrationTableExists(db, 'behavior_cases'))) return;
+      if (!(await migrationTableExists(db, 'behavior_patterns'))) return;
+      if (!(await migrationTableExists(db, 'behavior_case_pattern_links'))) return;
+
+      const title = 'Situational Awareness：看对大势却失去等待资格';
+      let behaviorCase = await dbGet<{ id: number }>(
+        db,
+        `SELECT id
+         FROM behavior_cases
+         WHERE title = ? AND is_deleted = 0
+         ORDER BY id
+         LIMIT 1`,
+        [title]
+      );
+
+      if (!behaviorCase) {
+        await dbRun(
+          db,
+          `INSERT INTO behavior_cases
+            (title, origin_type, subject_alias, source_note, evidence_level, case_date,
+             track, project_name, background, visible_information, pressure_context,
+             action_taken, result, action_quality, outcome_type, evidence_role,
+             self_response, learn_to_keep, learn_to_avoid, applicability_boundary,
+             linked_rule_refs_json, source_type, source_id, source_snapshot_json,
+             note, is_deleted, created_at, updated_at)
+           VALUES (?, 'public', ?, ?, 'documented', '2026-07-30',
+                   'AI基础设施/公开股票', 'Situational Awareness基金', ?, ?, ?,
+                   ?, ?, 'flawed', 'loss', 'negative',
+                   ?, ?, ?, ?, ?, '', '', '{}', ?, 0,
+                   CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [
+            title,
+            'Leopold Aschenbrenner（利奥波德·阿申布伦纳）',
+            '公开报道：Reuters、Axios，2026-07-30。关于“华尔街联合围剿”及 Citadel 后续具体获利的说法未作为已证实事实写入。',
+            '基金把“AI发展将持续推高芯片、存储、数据中心和电力需求”的宏观判断，直接转化为高度集中的AI基础设施公开股票组合。前期收益和规模快速上升，随后又提高了风险暴露。',
+            '公开报道确认：AI相关股票剧烈下跌后，基金遭遇严重损失和保证金压力；其公开股票组合中由经纪商杠杆融资的部分被转让，公开股票组合的大部分最终出售给 Citadel。大方向是否长期失效，当时并未得到证明。',
+            '前期极高收益、规模膨胀和“提前看懂AI大趋势”的明星光环，容易把认知优势误当成仓位与杠杆也同样正确；而集中持仓同步回撤时，流动性和保证金要求迅速压缩等待时间。',
+            '在高集中度基础上使用显著杠杆放大AI基础设施方向的风险暴露；回撤和保证金压力出现后，被迫快速去杠杆并出售大部分公开股票组合。',
+            '基金失去了继续持有公开股票、等待长期逻辑兑现的主动权。这个结果不等于AI基础设施长期判断必然错误，却证明正确方向也可能被错误的仓位、杠杆和资金结构提前终结。',
+            '即使我对大势高度确信，也不使用会被保证金剥夺等待权的杠杆；仓位必须允许核心判断暂时逆风，现金流必须允许我活到逻辑兑现。',
+            '吸收其把AI宏观趋势拆到芯片、存储、数据中心和电力等“卖铲子”环节的结构化认知；同时把产业判断与组合生存能力分开评价。',
+            '避免把认知优势当成风险管理的替代品，避免在连续暴利后提高集中度和杠杆，避免让融资期限短于逻辑兑现周期。',
+            '适用于杠杆、集中持仓、融资库存及所有“方向可能对但时间等不起”的场景；不用于否定无杠杆、现金流可承受且退出边界清楚的集中研究。具体杠杆倍数不是本案例成立的必要条件。',
+            JSON.stringify([
+              '认知优势不能替代风险管理',
+              '看对大势只能决定有没有机会；仓位、杠杆和现金流决定有没有资格等到兑现'
+            ]),
+            '核心结论：方向正确不等于能够活到方向兑现。所谓“被围剿”缺少充分证据，本案例只记录公开可核对的集中、杠杆、回撤、保证金压力与被迫出售链条。'
+          ]
+        );
+        behaviorCase = await dbGet<{ id: number }>(
+          db,
+          `SELECT id
+           FROM behavior_cases
+           WHERE title = ? AND is_deleted = 0
+           ORDER BY id
+           LIMIT 1`,
+          [title]
+        );
+      }
+
+      if (!behaviorCase) {
+        throw new Error('Situational Awareness case could not be created');
+      }
+
+      const existingLinks = await dbGet<{ total: number }>(
+        db,
+        `SELECT COUNT(*) AS total
+         FROM behavior_case_pattern_links
+         WHERE case_id = ?`,
+        [behaviorCase.id]
+      );
+      if (Number(existingLinks?.total || 0) === 0) {
+        const patternLinks = [
+          { name: '过度下注', role: 'primary' },
+          { name: '暴涨后崩跌', role: 'secondary' },
+          { name: '连续盈利后的自信膨胀', role: 'secondary' }
+        ];
+
+        for (const link of patternLinks) {
+          const pattern = await dbGet<{ id: number }>(
+            db,
+            `SELECT id
+             FROM behavior_patterns
+             WHERE name = ? AND is_deleted = 0 AND status = 'active'
+             ORDER BY id
+             LIMIT 1`,
+            [link.name]
+          );
+          if (!pattern) {
+            throw new Error(`Required behavior pattern is missing: ${link.name}`);
+          }
+          await dbRun(
+            db,
+            `INSERT OR IGNORE INTO behavior_case_pattern_links
+              (case_id, pattern_id, role, note, created_at, updated_at)
+             VALUES (?, ?, ?, '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+            [behaviorCase.id, pattern.id, link.role]
+          );
+        }
+      }
+
+      if (await migrationTableExists(db, 'audit_logs')) {
+        await dbRun(
+          db,
+          `INSERT OR IGNORE INTO audit_logs
+            (id, timestamp, module, action, target, status, detail, entity_id,
+             path, domain, workspace, created_at, updated_at)
+           VALUES ('audit-human-case-situational-awareness-20260812', CURRENT_TIMESTAMP,
+                   '人因案例库', 'create', ?, 'success', ?, ?, '/review/human-cases',
+                   'business', 'business', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [
+            title,
+            JSON.stringify({
+              originType: 'public',
+              actionQuality: 'flawed',
+              outcomeType: 'loss',
+              primaryPattern: '过度下注'
+            }),
+            String(behaviorCase.id)
+          ]
+        );
+      }
+    }
+  },
+  {
+    id: '20260812_002_merge_android_ai_supply_chain_case',
+    name: 'Merge Android miss review with AI capacity crowding insight',
+    run: async (db: any) => {
+      if (!(await migrationTableExists(db, 'behavior_patterns'))) return;
+
+      await dbRun(
+        db,
+        `INSERT OR IGNORE INTO behavior_patterns
+          (name, axis, category, summary, trigger_phrases_json, observable_actions_json,
+           mechanism, risk_chain, counter_question, protective_action, positive_counterpart,
+           maturity, status, sort_order, note, is_deleted, created_at, updated_at)
+         VALUES ('产能挤占与二三阶传导', 'market', 'market_structure', ?, ?, ?, ?, ?, ?, ?, ?,
+                 'candidate', 'active', 60, '', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+        [
+          '高利润的新需求抢占有限产能，即使相邻市场的需求没有增加，也可能因供给被挤出而短缺涨价，并继续向零部件、整机、渠道和二级市场传导。',
+          JSON.stringify(['高利润需求抢产能', '厂商调整产能或资本开支', '渠道库存下降', '终端成本开始抬升']),
+          JSON.stringify(['只看直接受益者', '把所有相关零部件当成同一逻辑', '看到终端涨价就反推单一原因']),
+          '市场通常先关注新增需求本身，容易忽略厂商会把有限产能转向利润更高的产品；被挤出的相邻市场可能在需求不变时出现供给收缩。',
+          '大趋势新增需求 → 高利润环节抢产能 → 相邻产品供给弹性下降 → 零部件涨价或短缺 → 整机成本与渠道库存变化 → 终端和二级市场反应',
+          '这条链里哪些产能真正共享，谁被挤出，终端变化又有哪些独立证据？',
+          '逐层验证需求、产能分配、现货价格、渠道库存和终端成交；同时排除汇率、官方调价、换代、关税、库存释放和渠道炒作。',
+          '沿供需关系寻找二阶、三阶机会，并保留反证'
+        ]
+      );
+      await dbRun(
+        db,
+        `UPDATE behavior_patterns
+         SET summary = ?, trigger_phrases_json = ?, observable_actions_json = ?,
+             mechanism = ?, risk_chain = ?, counter_question = ?, protective_action = ?,
+             positive_counterpart = ?, updated_at = CURRENT_TIMESTAMP
+         WHERE axis = 'market'
+           AND name = '产能挤占与二三阶传导'
+           AND is_deleted = 0`,
+        [
+          '高利润的新需求抢占有限产能，即使相邻市场的需求没有增加，也可能因供给被挤出而短缺涨价，并继续向零部件、整机、渠道和二级市场传导。',
+          JSON.stringify(['高利润需求抢产能', '厂商调整产能或资本开支', '渠道库存下降', '终端成本开始抬升']),
+          JSON.stringify(['只看直接受益者', '把所有相关零部件当成同一逻辑', '看到终端涨价就反推单一原因']),
+          '市场通常先关注新增需求本身，容易忽略厂商会把有限产能转向利润更高的产品；被挤出的相邻市场可能在需求不变时出现供给收缩。',
+          '大趋势新增需求 → 高利润环节抢产能 → 相邻产品供给弹性下降 → 零部件涨价或短缺 → 整机成本与渠道库存变化 → 终端和二级市场反应',
+          '这条链里哪些产能真正共享，谁被挤出，终端变化又有哪些独立证据？',
+          '逐层验证需求、产能分配、现货价格、渠道库存和终端成交；同时排除汇率、官方调价、换代、关税、库存释放和渠道炒作。',
+          '沿供需关系寻找二阶、三阶机会，并保留反证'
+        ]
+      );
+
+      await dbRun(
+        db,
+        `INSERT OR IGNORE INTO behavior_patterns
+          (name, axis, category, summary, trigger_phrases_json, observable_actions_json,
+           mechanism, risk_chain, counter_question, protective_action, positive_counterpart,
+           maturity, status, sort_order, note, is_deleted, created_at, updated_at)
+         VALUES ('推演链条过短', 'human', 'execution_error', ?, ?, ?, ?, ?, ?, ?, ?,
+                 'candidate', 'active', 260, '', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+        [
+          '已经识别大趋势，却只推到直接需求，没有继续追踪产能挤占、供给瓶颈和二阶、三阶价格传导，直到机会在终端价格上变得明显。',
+          JSON.stringify(['大方向已经看懂', '只研究直接受益者', '等终端涨价后才发现传导']),
+          JSON.stringify(['推演停在第一层', '没有建立传导观察链', '机会起飞后才回头解释']),
+          '直接需求最醒目、最容易理解，而供给重分配和跨环节传导更慢、更隐蔽，容易被风险记忆或研究边界提前截断。',
+          '看见大趋势 → 只推直接需求 → 漏掉产能挤占 → 二三阶短缺逐步兑现 → 终端价格已经起飞 → 只能踏空或冒险追高',
+          '如果这个趋势会消耗稀缺资源，谁得到更多产能，谁会被挤出，短缺最终会传到哪里？',
+          '发现大趋势后用八问模板继续推演并进入观察层；逐层补证据，价格起飞后仍重新计算赔率，不用事后逻辑追高。',
+          '完整推演、提前观察、起飞后守纪律'
+        ]
+      );
+      await dbRun(
+        db,
+        `UPDATE behavior_patterns
+         SET summary = ?, trigger_phrases_json = ?, observable_actions_json = ?,
+             mechanism = ?, risk_chain = ?, counter_question = ?, protective_action = ?,
+             positive_counterpart = ?, updated_at = CURRENT_TIMESTAMP
+         WHERE axis = 'human'
+           AND name = '推演链条过短'
+           AND is_deleted = 0`,
+        [
+          '已经识别大趋势，却只推到直接需求，没有继续追踪产能挤占、供给瓶颈和二阶、三阶价格传导，直到机会在终端价格上变得明显。',
+          JSON.stringify(['大方向已经看懂', '只研究直接受益者', '等终端涨价后才发现传导']),
+          JSON.stringify(['推演停在第一层', '没有建立传导观察链', '机会起飞后才回头解释']),
+          '直接需求最醒目、最容易理解，而供给重分配和跨环节传导更慢、更隐蔽，容易被风险记忆或研究边界提前截断。',
+          '看见大趋势 → 只推直接需求 → 漏掉产能挤占 → 二三阶短缺逐步兑现 → 终端价格已经起飞 → 只能踏空或冒险追高',
+          '如果这个趋势会消耗稀缺资源，谁得到更多产能，谁会被挤出，短缺最终会传到哪里？',
+          '发现大趋势后用八问模板继续推演并进入观察层；逐层补证据，价格起飞后仍重新计算赔率，不用事后逻辑追高。',
+          '完整推演、提前观察、起飞后守纪律'
+        ]
+      );
+
+      const reviewTitle = '安卓机器：产业链推演只走一半，起飞后不追';
+      let missedReview: { id: number } | undefined;
+      if (await migrationTableExists(db, 'missed_projects')) {
+        missedReview = await dbGet<{ id: number }>(
+          db,
+          `SELECT id
+           FROM missed_projects
+           WHERE COALESCE(is_deleted, 0) = 0
+             AND (title IN (?, ?) OR project_name = '安卓机器')
+           ORDER BY CASE WHEN title = ? THEN 0 WHEN title = ? THEN 1 ELSE 2 END, id
+           LIMIT 1`,
+          [reviewTitle, '安卓机器主动放弃复盘', reviewTitle, '安卓机器主动放弃复盘']
+        );
+        if (!missedReview) {
+          await dbRun(
+            db,
+            `INSERT INTO missed_projects
+              (title, track, project_name, source, review_date, miss_type, signal, reason,
+               trend, exposed_problem, extracted_lesson, summary_conclusion, short_lesson,
+               note, is_deleted, created_at, updated_at)
+             VALUES (?, '电子产品', '安卓机器/消费级存储与整机', '本人复盘/产业链推演',
+                     '2026-04-18', '前期推演不足；起飞后主动放弃', ?, ?, ?, ?, ?, ?, ?, ?,
+                     0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+            [
+              reviewTitle,
+              '年前已判断AI会大量消耗算力、内存和存储；随后消费级存储、安卓手机等终端价格出现上行线索。',
+              '推演只停在AI直接需要什么，没有继续追踪高利润需求如何挤占有限产能、消费级供给如何收缩以及价格如何向整机和二级市场传导；同时以前被安卓机器反撸的经历提高了参与门槛。',
+              '二阶、三阶传导逐步被市场看见，早期低赔率窗口已经错过；价格起飞后选择不追，避免把认知踏空继续变成高位接盘。',
+              '产业链推演能力只走了一半：看到了大趋势，却没有把“产能挤占 → 相邻供给收缩 → 终端涨价”变成持续观察链。',
+              '大趋势出现后连续追问直接需求、上游依赖、最慢供给、产能挤出、短缺传导、最终标的、预期定价和风险边界；先进入观察，不因单点逻辑直接下结论。',
+              '前期漏掉的是推演深度，后期守住的是不追高纪律；两件事要分开评价。',
+              '大趋势只是入口，真正的机会往往藏在趋势造成的第二阶、第三阶供需变化里。',
+              '2026-08-12合并原“安卓机器主动放弃复盘”和AI存储产能挤占复盘。CPU、GPU、HBM、DRAM、NAND的约束不同，不能统称AI抢产能；终端涨价还需排除汇率、官方调价、换代、关税、库存和炒作。'
+            ]
+          );
+          missedReview = await dbGet<{ id: number }>(
+            db,
+            'SELECT id FROM missed_projects WHERE title = ? AND COALESCE(is_deleted, 0) = 0 ORDER BY id LIMIT 1',
+            [reviewTitle]
+          );
+        } else {
+          await dbRun(
+            db,
+            `UPDATE missed_projects
+             SET title = ?, track = '电子产品', project_name = '安卓机器/消费级存储与整机',
+                 source = '本人复盘/产业链推演', miss_type = '前期推演不足；起飞后主动放弃',
+                 signal = ?, reason = ?, trend = ?, exposed_problem = ?, extracted_lesson = ?,
+                 summary_conclusion = ?, short_lesson = ?, note = ?, updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?`,
+            [
+              reviewTitle,
+              '年前已判断AI会大量消耗算力、内存和存储；随后消费级存储、安卓手机等终端价格出现上行线索。',
+              '推演只停在AI直接需要什么，没有继续追踪高利润需求如何挤占有限产能、消费级供给如何收缩以及价格如何向整机和二级市场传导；同时以前被安卓机器反撸的经历提高了参与门槛。',
+              '二阶、三阶传导逐步被市场看见，早期低赔率窗口已经错过；价格起飞后选择不追，避免把认知踏空继续变成高位接盘。',
+              '产业链推演能力只走了一半：看到了大趋势，却没有把“产能挤占 → 相邻供给收缩 → 终端涨价”变成持续观察链。',
+              '大趋势出现后连续追问直接需求、上游依赖、最慢供给、产能挤出、短缺传导、最终标的、预期定价和风险边界；先进入观察，不因单点逻辑直接下结论。',
+              '前期漏掉的是推演深度，后期守住的是不追高纪律；两件事要分开评价。',
+              '大趋势只是入口，真正的机会往往藏在趋势造成的第二阶、第三阶供需变化里。',
+              '2026-08-12合并原“安卓机器主动放弃复盘”和AI存储产能挤占复盘。CPU、GPU、HBM、DRAM、NAND的约束不同，不能统称AI抢产能；终端涨价还需排除汇率、官方调价、换代、关税、库存和炒作。',
+              missedReview.id
+            ]
+          );
+        }
+      }
+
+      if (missedReview && await migrationTableExists(db, 'behavior_cases')) {
+        const legacyCaseTitle = '安卓机器：看懂也不追，纪律优先';
+        const mergedCaseTitle = '安卓机器：大趋势只推演一半，起飞后仍不追';
+        let behaviorCase = await dbGet<{ id: number }>(
+          db,
+          `SELECT id
+           FROM behavior_cases
+           WHERE is_deleted = 0
+             AND ((source_type = 'missed_project' AND source_id = ?) OR title IN (?, ?))
+           ORDER BY CASE WHEN source_type = 'missed_project' AND source_id = ? THEN 0 ELSE 1 END, id
+           LIMIT 1`,
+          [String(missedReview.id), mergedCaseTitle, legacyCaseTitle, String(missedReview.id)]
+        );
+
+        if (!behaviorCase) {
+          const sourceSnapshot = JSON.stringify({
+            sourceType: 'missed_project',
+            sourceId: String(missedReview.id),
+            sourceModule: '错过复盘',
+            sourceTitle: reviewTitle,
+            sourceDate: '2026-04-18',
+            sourcePath: `/review/missed?recordId=${missedReview.id}`,
+            capturedBy: 'migration-20260812_002'
+          });
+          await dbRun(
+            db,
+            `INSERT INTO behavior_cases
+              (title, origin_type, subject_alias, source_note, evidence_level, case_date,
+               track, project_name, background, visible_information, pressure_context,
+               action_taken, result, action_quality, outcome_type, evidence_role,
+               self_response, learn_to_keep, learn_to_avoid, applicability_boundary,
+               linked_rule_refs_json, source_type, source_id, source_snapshot_json,
+               note, is_deleted, created_at, updated_at)
+             VALUES (?, 'self', '本人', ?, 'first_hand', '2026-04-18',
+                     '电子产品', '安卓机器/消费级存储与整机', ?, ?, ?, ?, ?,
+                     'mixed', 'mixed', 'boundary', ?, ?, ?, ?, ?,
+                     'missed_project', ?, ?, ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+            [
+              mergedCaseTitle,
+              `合并自错过复盘#${missedReview.id}；2026-08-12补充产业链二三阶推演。`,
+              '年前已经识别AI会大量消耗算力、内存和存储，但产业链推演停在直接需求，没有继续研究高利润产品挤占产能后，消费级存储和整机市场会发生什么。过去被安卓机器反撸的经历又提高了行动门槛。',
+              '可见的第一层是AI服务器需要HBM、服务器级DRAM、NAND和更多基础设施；需要继续验证的后续链是产能与资本开支倾斜、消费级供给弹性下降、零部件现货变化、整机BOM与渠道库存变化，最终才是安卓手机、PC、游戏机等终端价格。',
+              '旧亏损带来的防守心态，与终端行情逐步起飞后的错失感同时存在。最容易犯的错是：前期没有继续研究，后期又用“我早就看对AI”给追高找理由。',
+              '前期没有建立产能挤占和终端传导观察链；等安卓机器行情已经明显后，选择不追高。',
+              '错过了早期较舒服的研究和参与窗口，但守住了起飞后不追的纪律。后续终端涨价不能全部归因于AI，还需逐项排除汇率、官方调价、型号切换、关税、渠道库存和炒作。',
+              '以后发现大趋势，先用八问模板把直接需求、上游依赖、供给瓶颈、产能挤出、短缺传导、最终标的、预期定价和风险边界走完，并进入观察层；如果等价格已经起飞，仍按当下赔率决定，不拿早期判断给追高开绿灯。',
+              '保留对大趋势和上游变化的敏感度，也保留错过后不追高的纪律。',
+              '避免推演只走第一层，避免把CPU、GPU、HBM、DRAM、NAND混成同一个供给逻辑，也避免用终端上涨事后反推单一原因。',
+              '适用于大趋势造成供给重分配的跨品类机会；每条链都必须有共享产能、供给变化、渠道库存和真实成交证据。未经验证只进观察层，不自动形成买入结论。',
+              JSON.stringify([
+                '大趋势只是入口，真正的机会往往藏在趋势造成的第二阶、第三阶供需变化里',
+                '先把因果链验证完整；价格起飞后仍不追高'
+              ]),
+              String(missedReview.id),
+              sourceSnapshot,
+              '合并原安卓主动放弃案例与AI存储传导复盘；前期能力缺口和后期正确纪律分开评价，不用事后涨幅否定当时不追高。'
+            ]
+          );
+          behaviorCase = await dbGet<{ id: number }>(
+            db,
+            `SELECT id
+             FROM behavior_cases
+             WHERE source_type = 'missed_project' AND source_id = ? AND is_deleted = 0
+             ORDER BY id LIMIT 1`,
+            [String(missedReview.id)]
+          );
+        } else {
+          await dbRun(
+            db,
+            `UPDATE behavior_cases
+             SET title = ?, origin_type = 'self', subject_alias = '本人', source_note = ?,
+                 evidence_level = 'first_hand', case_date = '2026-04-18', track = '电子产品',
+                 project_name = '安卓机器/消费级存储与整机', background = ?,
+                 visible_information = ?, pressure_context = ?, action_taken = ?, result = ?,
+                 action_quality = 'mixed', outcome_type = 'mixed', evidence_role = 'boundary',
+                 self_response = ?, learn_to_keep = ?, learn_to_avoid = ?,
+                 applicability_boundary = ?, linked_rule_refs_json = ?,
+                 source_type = 'missed_project', source_id = ?, note = ?,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?`,
+            [
+              mergedCaseTitle,
+              `合并自错过复盘#${missedReview.id}；2026-08-12补充产业链二三阶推演。`,
+              '年前已经识别AI会大量消耗算力、内存和存储，但产业链推演停在直接需求，没有继续研究高利润产品挤占产能后，消费级存储和整机市场会发生什么。过去被安卓机器反撸的经历又提高了行动门槛。',
+              '可见的第一层是AI服务器需要HBM、服务器级DRAM、NAND和更多基础设施；需要继续验证的后续链是产能与资本开支倾斜、消费级供给弹性下降、零部件现货变化、整机BOM与渠道库存变化，最终才是安卓手机、PC、游戏机等终端价格。',
+              '旧亏损带来的防守心态，与终端行情逐步起飞后的错失感同时存在。最容易犯的错是：前期没有继续研究，后期又用“我早就看对AI”给追高找理由。',
+              '前期没有建立产能挤占和终端传导观察链；等安卓机器行情已经明显后，选择不追高。',
+              '错过了早期较舒服的研究和参与窗口，但守住了起飞后不追的纪律。后续终端涨价不能全部归因于AI，还需逐项排除汇率、官方调价、型号切换、关税、渠道库存和炒作。',
+              '以后发现大趋势，先用八问模板把直接需求、上游依赖、供给瓶颈、产能挤出、短缺传导、最终标的、预期定价和风险边界走完，并进入观察层；如果等价格已经起飞，仍按当下赔率决定，不拿早期判断给追高开绿灯。',
+              '保留对大趋势和上游变化的敏感度，也保留错过后不追高的纪律。',
+              '避免推演只走第一层，避免把CPU、GPU、HBM、DRAM、NAND混成同一个供给逻辑，也避免用终端上涨事后反推单一原因。',
+              '适用于大趋势造成供给重分配的跨品类机会；每条链都必须有共享产能、供给变化、渠道库存和真实成交证据。未经验证只进观察层，不自动形成买入结论。',
+              JSON.stringify([
+                '大趋势只是入口，真正的机会往往藏在趋势造成的第二阶、第三阶供需变化里',
+                '先把因果链验证完整；价格起飞后仍不追高'
+              ]),
+              String(missedReview.id),
+              '合并原安卓主动放弃案例与AI存储传导复盘；前期能力缺口和后期正确纪律分开评价，不用事后涨幅否定当时不追高。',
+              behaviorCase.id
+            ]
+          );
+        }
+
+        if (!behaviorCase) {
+          throw new Error('Merged Android supply-chain case could not be created');
+        }
+
+        await dbRun(db, 'DELETE FROM behavior_case_pattern_links WHERE case_id = ?', [behaviorCase.id]);
+        const patternLinks = [
+          { name: '推演链条过短', role: 'primary' },
+          { name: '产能挤占与二三阶传导', role: 'secondary' },
+          { name: '恐惧与过度防守', role: 'secondary' }
+        ];
+        for (const link of patternLinks) {
+          const pattern = await dbGet<{ id: number }>(
+            db,
+            `SELECT id
+             FROM behavior_patterns
+             WHERE name = ? AND is_deleted = 0 AND status = 'active'
+             ORDER BY id LIMIT 1`,
+            [link.name]
+          );
+          if (!pattern) throw new Error(`Required behavior pattern is missing: ${link.name}`);
+          await dbRun(
+            db,
+            `INSERT INTO behavior_case_pattern_links
+              (case_id, pattern_id, role, note, created_at, updated_at)
+             VALUES (?, ?, ?, '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+            [behaviorCase.id, pattern.id, link.role]
+          );
+        }
+
+        if (await migrationTableExists(db, 'audit_logs')) {
+          await dbRun(
+            db,
+            `INSERT OR IGNORE INTO audit_logs
+              (id, timestamp, module, action, target, status, detail, entity_id,
+               path, domain, workspace, created_at, updated_at)
+             VALUES ('audit-human-case-android-ai-transmission-20260812', CURRENT_TIMESTAMP,
+                     '人因案例库', 'update', ?, 'success', ?, ?, '/review/human-cases',
+                     'business', 'business', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+            [
+              mergedCaseTitle,
+              JSON.stringify({
+                merged: true,
+                actionQuality: 'mixed',
+                outcomeType: 'mixed',
+                primaryPattern: '推演链条过短'
+              }),
+              String(behaviorCase.id)
+            ]
+          );
+        }
+      }
+
+      if (await migrationTableExists(db, 'event_records')) {
+        await dbRun(
+          db,
+          `UPDATE event_records
+           SET description = ?, impact = ?, note = ?, updated_at = CURRENT_TIMESTAMP
+           WHERE title = 'AI需求推动存储价格上涨并向整机传导'
+             AND COALESCE(is_deleted, 0) = 0`,
+          [
+            'AI需求不只直接增加算力、存储和电力消耗，还可能通过高利润产品抢占有限产能：产能和资本开支向HBM、服务器级DRAM等环节倾斜后，消费级DRAM/NAND的供给弹性可能下降，再向内存、SSD、整机BOM、渠道库存和二级价格传导。',
+            '真正需要追踪的是“产能挤占 → 相邻供给收缩 → 零部件现货变化 → 整机和二级成交”的证据链，而不是看到AI上涨就直接购买所有相关商品。',
+            '该事件已与“安卓机器：产业链推演只走一半，起飞后不追”合并提炼。CPU、GPU、HBM、DRAM、NAND约束不同；终端变化还需排除汇率、官方调价、型号切换、关税、库存释放和渠道炒作。'
+          ]
+        );
+      }
+
+      if (await migrationTableExists(db, 'rule_experiences')) {
+        const ruleTitle = '大趋势要继续推演产能挤占和二三阶供需变化';
+        const oldRuleTitle = '电子产品上游成本冲击不能只按迭代贬值看';
+        let rule = await dbGet<{ id: number }>(
+          db,
+          `SELECT id
+           FROM rule_experiences
+           WHERE title IN (?, ?) AND COALESCE(is_deleted, 0) = 0
+           ORDER BY CASE WHEN title = ? THEN 0 ELSE 1 END, id
+           LIMIT 1`,
+          [ruleTitle, oldRuleTitle, ruleTitle]
+        );
+        if (!rule) {
+          await dbRun(
+            db,
+            `INSERT INTO rule_experiences
+              (title, type, track, source_case, core_content, summary_conclusion, note,
+               is_deleted, created_at, updated_at)
+             VALUES (?, '产业传导/机会推演规则', '跨品类/电子产品', ?, ?, ?, ?,
+                     0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+            [
+              ruleTitle,
+              '安卓机器产业链推演踏空；AI需求推动存储价格上涨并向整机传导',
+              '发现大趋势后依次追问八层：1.直接需要什么；2.这些东西又需要什么；3.哪里供给扩张最慢；4.产能倾斜后谁会被挤出；5.被挤出的市场是否短缺涨价；6.最终传到什么商品、公司或资产；7.预期是否已被价格打满；8.当前是否符合风险体系。',
+              '大趋势只是入口，真正的机会往往藏在趋势造成的第二阶、第三阶供需变化里。',
+              '模板只负责进入观察和补证据，不自动生成操作结论。必须验证共享产能和真实传导，并排除汇率、官方调价、型号切换、关税、渠道库存及炒作；价格已经起飞后仍重新计算赔率。'
+            ]
+          );
+        } else {
+          await dbRun(
+            db,
+            `UPDATE rule_experiences
+             SET title = ?, type = '产业传导/机会推演规则', track = '跨品类/电子产品',
+                 source_case = ?, core_content = ?, summary_conclusion = ?, note = ?,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?`,
+            [
+              ruleTitle,
+              '安卓机器产业链推演踏空；AI需求推动存储价格上涨并向整机传导',
+              '发现大趋势后依次追问八层：1.直接需要什么；2.这些东西又需要什么；3.哪里供给扩张最慢；4.产能倾斜后谁会被挤出；5.被挤出的市场是否短缺涨价；6.最终传到什么商品、公司或资产；7.预期是否已被价格打满；8.当前是否符合风险体系。',
+              '大趋势只是入口，真正的机会往往藏在趋势造成的第二阶、第三阶供需变化里。',
+              '模板只负责进入观察和补证据，不自动生成操作结论。必须验证共享产能和真实传导，并排除汇率、官方调价、型号切换、关税、渠道库存及炒作；价格已经起飞后仍重新计算赔率。',
+              rule.id
+            ]
+          );
+        }
+      }
+
+      if (await migrationTableExists(db, 'speculation_cycle_records')) {
+        await dbRun(
+          db,
+          `UPDATE speculation_cycle_records
+           SET cycle_pattern = '大趋势 - 产能挤占 - 二三阶供需传导型',
+               rise_nature = 'AI高利润需求争夺有限产能，消费级供给弹性下降后再向零部件、整机和二级市场传导',
+               final_result = '已观察到存储零部件和部分终端价格变化；安卓案例证明前期推演不足会踏空，但每个终端的真实因果仍需逐项验证。',
+               future_action_rule = '用八问模板向外推演并先进入观察层；确认共享产能、供给变化、渠道库存和真实成交后再评估机会，价格起飞后不追。',
+               summary = '大趋势的直接受益通常最先被市场看见，更隐蔽的机会可能来自高利润需求挤占产能后，对相邻市场造成的二阶、三阶供需变化。',
+               lesson = '年前看到了AI吃算力、内存和存储，却没有继续追踪产能挤占、消费级供给变化和终端传导。能力缺口是推演深度，不是事后应该追高。',
+               note = '关联案例：安卓机器产业链推演踏空。该记录只提供观察框架，不自动影响交易或生意决策。',
+               updated_at = CURRENT_TIMESTAMP
+           WHERE category_name = '电子产品'
+             AND object_name = '存储/整机传导'`
+        );
+      }
+    }
   }
 
 ];

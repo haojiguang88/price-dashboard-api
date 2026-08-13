@@ -185,11 +185,18 @@ export const calculateSilverSwingMetrics = (
     throw new Error("No market price points to evaluate");
   }
 
-  const index = targetDate
-    ? points.findIndex(point => point.date === targetDate)
-    : points.length - 1;
+  let index = points.length - 1;
+  if (targetDate) {
+    index = -1;
+    for (let cursor = points.length - 1; cursor >= 0; cursor -= 1) {
+      if (points[cursor].date <= targetDate) {
+        index = cursor;
+        break;
+      }
+    }
+  }
   if (index < 0) {
-    throw new Error(`Target date not found: ${targetDate}`);
+    throw new Error(`No market price point on or before target date: ${targetDate}`);
   }
 
   const point = points[index];

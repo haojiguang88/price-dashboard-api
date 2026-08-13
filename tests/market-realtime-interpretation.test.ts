@@ -154,3 +154,35 @@ test("confirmed healthy pullback maps to P3 without a gold risk override", () =>
   assert.equal(result.buy_permission, "small_batch");
   assert.equal(result.repair_quality.key, "confirmed_repair");
 });
+
+test("historical replay ignores price bars after the evaluated date", () => {
+  const replayEvaluation = {
+    ...evaluation(["slow_rise"], {
+      dailyReturnPercent: 1,
+      return5dPercent: 5,
+      closeVsMa20Percent: 2
+    }),
+    date: "2026-07-29",
+    close: 14.2
+  };
+  const result = buildSilverRealtimeInterpretation({
+    evaluation: replayEvaluation,
+    pricePoints: [
+      { trade_date: "2026-07-28", high: 14.1, low: 13.8, close: 14, volume: 100 },
+      { trade_date: "2026-07-29", high: 14.3, low: 14, close: 14.2, volume: 110 },
+      { trade_date: "2026-07-30", high: 30, low: 5, close: 6, volume: 999999 }
+    ],
+    primaryState: {
+      key: "slow_rise",
+      label: "慢涨观察",
+      tone: "opportunity"
+    },
+    historicalReplay: true,
+    requestedAsOfDate: "2026-07-29"
+  });
+
+  assert.ok(result.evidence.some(item => item.includes("日内区间约 66.7%")));
+  assert.ok(result.evidence.some(item => item.includes("成交量较前一日 +10.0%")));
+  assert.equal(result.evidence.some(item => item.includes("+908990.0%")), false);
+  assert.match(result.data_notes.join(" "), /未使用后续行情/);
+});

@@ -65,6 +65,19 @@ const parseJsonValue = (value: unknown) => {
 
 const normalizeText = (value: unknown) => String(value ?? "").trim();
 
+const parseOptionalAsOfDate = (value: unknown) => {
+  const text = normalizeText(value);
+  if (!text) return null;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) {
+    throw new Error("as_of 必须使用 YYYY-MM-DD 格式");
+  }
+  const timestamp = Date.parse(`${text}T00:00:00Z`);
+  if (!Number.isFinite(timestamp) || new Date(timestamp).toISOString().slice(0, 10) !== text) {
+    throw new Error("as_of 不是有效日期");
+  }
+  return text;
+};
+
 const parseOptionalNumber = (value: unknown) => {
   if (value === null || value === undefined || value === "") return null;
   const numberValue = Number(value);
@@ -257,32 +270,39 @@ const writeMarketCycleAuditLog = async (db: any, record: { cycle_state: string; 
   ).catch(() => undefined);
 };
 
-const loadMainQuoteSummaries = async (db: any) => {
+const loadMainQuoteSummaries = async (db: any, asOfDate: string | null = null) => {
   const summaries = [];
 
   for (const config of MAIN_PRICE_SYMBOLS) {
-    const row = await db.get(
+    const asOfClause = asOfDate ? "AND trade_date <= ?" : "";
+    const whereParams = asOfDate
+      ? [config.symbol, config.source, asOfDate]
+      : [config.symbol, config.source];
+    const [row, latestRows] = await Promise.all([
+      db.get(
       `SELECT COUNT(1) AS total_count,
               MIN(trade_date) AS min_date,
               MAX(trade_date) AS max_date,
               MAX(name) AS name,
-              MAX(source_label) AS source_label,
-              (SELECT close FROM market_anchor_daily_prices WHERE symbol = ? AND source = ? ORDER BY trade_date DESC, id DESC LIMIT 1) AS latest_close,
-              (SELECT trade_date FROM market_anchor_daily_prices WHERE symbol = ? AND source = ? ORDER BY trade_date DESC, id DESC LIMIT 1) AS latest_date,
-              (SELECT close FROM market_anchor_daily_prices WHERE symbol = ? AND source = ? ORDER BY trade_date DESC, id DESC LIMIT 1 OFFSET 1) AS previous_close
+              MAX(source_label) AS source_label
        FROM market_anchor_daily_prices
-       WHERE symbol = ? AND source = ?`,
-      [
-        config.symbol,
-        config.source,
-        config.symbol,
-        config.source,
-        config.symbol,
-        config.source,
-        config.symbol,
-        config.source
-      ]
-    );
+       WHERE symbol = ? AND source = ?
+         ${asOfClause}`,
+        whereParams
+      ),
+      db.all(
+        `SELECT trade_date, close
+         FROM market_anchor_daily_prices
+         WHERE symbol = ? AND source = ?
+           AND close IS NOT NULL
+           ${asOfClause}
+         ORDER BY trade_date DESC, id DESC
+         LIMIT 2`,
+        whereParams
+      )
+    ]);
+    const latest = latestRows[0] || null;
+    const previous = latestRows[1] || null;
     summaries.push({
       ...config,
       name: row?.name || config.label,
@@ -290,10 +310,10 @@ const loadMainQuoteSummaries = async (db: any) => {
       count: Number(row?.total_count || 0),
       min_date: row?.min_date || "",
       max_date: row?.max_date || "",
-      latest_date: row?.latest_date || "",
-      latest_close: row?.latest_close ?? null,
-      previous_close: row?.previous_close ?? null,
-      latest_change_percent: percentChange(row?.latest_close, row?.previous_close)
+      latest_date: latest?.trade_date || "",
+      latest_close: latest?.close ?? null,
+      previous_close: previous?.close ?? null,
+      latest_change_percent: percentChange(latest?.close, previous?.close)
     });
   }
 
@@ -872,7 +892,11 @@ const buildCurrentSignalPayload = (
   goldContext: {
     evaluation: SilverSwingEvaluation;
     latestPoint?: MarketOhlcvPoint | null;
-  } | null = null
+  } | null = null,
+  replayContext: {
+    isHistoricalReplay: boolean;
+    requestedAsOfDate: string | null;
+  } = { isHistoricalReplay: false, requestedAsOfDate: null }
 ) => {
   const primaryState = pickPrimaryState(evaluation);
   const baseActionBias = ruleGroup === "precious_metal_plan" || symbolConfig.symbol === "XAUUSD"
@@ -883,7 +907,9 @@ const buildCurrentSignalPayload = (
       evaluation,
       pricePoints,
       primaryState,
-      goldContext
+      goldContext,
+      historicalReplay: replayContext.isHistoricalReplay,
+      requestedAsOfDate: replayContext.requestedAsOfDate || ""
     })
     : null;
   const actionBias = realtimeInterpretation
@@ -916,6 +942,13 @@ const buildCurrentSignalPayload = (
     symbol: symbolConfig,
     evaluator_version: getEvaluatorVersion(symbolConfig.symbol, ruleGroup),
     generated_at: new Date().toISOString(),
+    mode: replayContext.isHistoricalReplay ? "historical_replay" : "latest",
+    requested_as_of_date: replayContext.requestedAsOfDate,
+    effective_as_of_date: evaluation.date,
+    uses_future_data: false,
+    rule_replay_note: replayContext.isHistoricalReplay
+      ? "按当前启用规则回放历史，只使用截止日及以前行情；不代表当时系统曾给出同一结论。"
+      : "按最新入库行情和当前启用规则计算。",
     trade_date: evaluation.date,
     close: evaluation.close,
     primary_state: primaryState,
@@ -931,11 +964,13 @@ const buildCurrentSignalPayload = (
   };
 };
 
-router.get("/precious-metal-market/overview", async (_req, res) => {
+router.get("/precious-metal-market/overview", async (req, res) => {
   try {
     const db = await getDb();
+    const asOfDate = parseOptionalAsOfDate(req.query.as_of);
+    const asOfClause = asOfDate ? "AND trade_date <= ?" : "";
     const [mainQuotes, coverageRows, latestTask, marketCycle, goldSilverRatio] = await Promise.all([
-      loadMainQuoteSummaries(db),
+      loadMainQuoteSummaries(db, asOfDate),
       db.all(
         `SELECT symbol,
                 MAX(name) AS name,
@@ -946,8 +981,10 @@ router.get("/precious-metal-market/overview", async (_req, res) => {
                 MAX(trade_date) AS max_date
          FROM market_anchor_daily_prices
          WHERE symbol IN ('XAUUSD', 'SGE_AGTD', 'USDCNH')
+           ${asOfClause}
          GROUP BY symbol, source
-         ORDER BY CASE symbol WHEN 'XAUUSD' THEN 1 WHEN 'SGE_AGTD' THEN 2 WHEN 'USDCNH' THEN 3 ELSE 99 END`
+         ORDER BY CASE symbol WHEN 'XAUUSD' THEN 1 WHEN 'SGE_AGTD' THEN 2 WHEN 'USDCNH' THEN 3 ELSE 99 END`,
+        asOfDate ? [asOfDate] : []
       ),
       db.get(
         `SELECT last_status, last_message, last_run_at
@@ -956,7 +993,7 @@ router.get("/precious-metal-market/overview", async (_req, res) => {
          LIMIT 1`
       ),
       loadMarketCyclePreference(db),
-      loadGoldSilverRatioSummary(db)
+      loadGoldSilverRatioSummary(db, { asOfDate })
     ]);
 
     const layerCoverages = coverageRows.map((row: any) => ({
@@ -972,6 +1009,8 @@ router.get("/precious-metal-market/overview", async (_req, res) => {
       success: true,
       data: {
         generated_at: new Date().toISOString(),
+        requested_as_of_date: asOfDate,
+        mode: asOfDate ? "historical_replay" : "latest",
         main_quotes: mainQuotes,
         layer_coverages: layerCoverages,
         latest_actions: [],
@@ -1141,23 +1180,34 @@ router.get("/precious-metal-market/physical-observations", async (req, res) => {
     const symbolConfig = MAIN_PRICE_SYMBOLS.find(item => item.symbol === requestedSymbol) || MAIN_PRICE_SYMBOLS[1];
     const requestedLimit = Number(req.query.limit || 8);
     const limit = Number.isFinite(requestedLimit) ? Math.min(Math.max(Math.floor(requestedLimit), 1), 30) : 8;
+    const requestedAsOfDate = parseOptionalAsOfDate(req.query.as_of);
+    const asOfClause = requestedAsOfDate
+      ? "AND observation_date <= ? AND datetime(created_at) < datetime(?, '+1 day')"
+      : "";
     const rows = await db.all(
       `SELECT *
        FROM market_physical_observations
        WHERE asset_symbol = ?
+         ${asOfClause}
        ORDER BY observation_date DESC, id DESC
        LIMIT ?`,
-      [symbolConfig.symbol, limit]
+      requestedAsOfDate
+        ? [symbolConfig.symbol, requestedAsOfDate, requestedAsOfDate, limit]
+        : [symbolConfig.symbol, limit]
     );
+    const marketAsOfClause = requestedAsOfDate ? "AND trade_date <= ?" : "";
     const latestMarket = await db.get(
       `SELECT trade_date, close
        FROM market_anchor_daily_prices
        WHERE symbol = ?
          AND source = ?
          AND close IS NOT NULL
+         ${marketAsOfClause}
        ORDER BY trade_date DESC, id DESC
        LIMIT 1`,
-      [symbolConfig.symbol, symbolConfig.source]
+      requestedAsOfDate
+        ? [symbolConfig.symbol, symbolConfig.source, requestedAsOfDate]
+        : [symbolConfig.symbol, symbolConfig.source]
     );
     const items = rows.map(serializePhysicalObservation);
     const latest = items[0] || null;
@@ -1171,6 +1221,8 @@ router.get("/precious-metal-market/physical-observations", async (req, res) => {
           : null,
         latest,
         guidance: buildPhysicalGuidance(latest),
+        requested_as_of_date: requestedAsOfDate,
+        mode: requestedAsOfDate ? "historical_replay" : "latest",
         items
       }
     });
@@ -1196,9 +1248,10 @@ router.post("/precious-metal-market/physical-observations", async (req, res) => 
        WHERE symbol = ?
          AND source = ?
          AND close IS NOT NULL
+         AND trade_date <= ?
        ORDER BY trade_date DESC, id DESC
        LIMIT 1`,
-      [symbolConfig.symbol, symbolConfig.source]
+      [symbolConfig.symbol, symbolConfig.source, observationDate]
     );
     const referenceClose = parseOptionalNumber(body.reference_close) ?? (
       latestMarket?.close === null || latestMarket?.close === undefined ? null : Number(latestMarket.close)
@@ -1274,14 +1327,20 @@ router.get("/precious-metal-market/current-signal", async (req, res) => {
     const symbolConfig = MAIN_PRICE_SYMBOLS.find(item => item.symbol === requestedSymbol) || MAIN_PRICE_SYMBOLS[1];
     const defaultRuleGroup = symbolConfig.symbol === "XAUUSD" ? "precious_metal_plan" : "silver_swing_plan";
     const ruleGroup = String(req.query.rule_group || defaultRuleGroup).trim();
+    const requestedAsOfDate = parseOptionalAsOfDate(req.query.as_of);
+    const asOfClause = requestedAsOfDate ? "AND trade_date <= ?" : "";
+    const pointParams = requestedAsOfDate
+      ? [symbolConfig.symbol, symbolConfig.source, requestedAsOfDate]
+      : [symbolConfig.symbol, symbolConfig.source];
     const points = await db.all(
       `SELECT trade_date, open, high, low, close, volume, updated_at
        FROM market_anchor_daily_prices
        WHERE symbol = ?
          AND source = ?
          AND close IS NOT NULL
+         ${asOfClause}
        ORDER BY trade_date ASC`,
-      [symbolConfig.symbol, symbolConfig.source]
+      pointParams
     ) as Array<MarketPricePoint & MarketOhlcvPoint>;
     const rules = await db.all(
       `SELECT rule_key, rule_type, threshold_json, status, display_order
@@ -1309,6 +1368,13 @@ router.get("/precious-metal-market/current-signal", async (req, res) => {
           symbol: symbolConfig,
           evaluator_version: getEvaluatorVersion(symbolConfig.symbol, ruleGroup),
           generated_at: new Date().toISOString(),
+          mode: requestedAsOfDate ? "historical_replay" : "latest",
+          requested_as_of_date: requestedAsOfDate,
+          effective_as_of_date: "",
+          uses_future_data: false,
+          rule_replay_note: requestedAsOfDate
+            ? "截止日以前没有足够行情可供当前规则回放。"
+            : "暂无足够数据或规则。",
           trade_date: "",
           close: null,
           primary_state: { key: "unconfigured", label: "未配置", tone: "neutral" },
@@ -1347,8 +1413,11 @@ router.get("/precious-metal-market/current-signal", async (req, res) => {
              WHERE symbol = ?
                AND source = ?
                AND close IS NOT NULL
+               ${asOfClause}
              ORDER BY trade_date ASC`,
-            [goldConfig.symbol, goldConfig.source]
+            requestedAsOfDate
+              ? [goldConfig.symbol, goldConfig.source, requestedAsOfDate]
+              : [goldConfig.symbol, goldConfig.source]
           ) as Promise<Array<MarketPricePoint & MarketOhlcvPoint>>,
           db.all(
             `SELECT rule_key, rule_type, threshold_json, status, display_order
@@ -1377,7 +1446,11 @@ router.get("/precious-metal-market/current-signal", async (req, res) => {
         ruleGroup,
         recentEvaluations,
         points,
-        goldContext
+        goldContext,
+        {
+          isHistoricalReplay: Boolean(requestedAsOfDate),
+          requestedAsOfDate
+        }
       )
     });
   } catch (error) {
@@ -1437,11 +1510,28 @@ router.get("/precious-metal-market/prices", async (req, res) => {
     const requestedSymbol = String(req.query.symbol || "SGE_AGTD").trim().toUpperCase();
     const symbolConfig = MAIN_PRICE_SYMBOLS.find(item => item.symbol === requestedSymbol) || MAIN_PRICE_SYMBOLS[1];
     const rangeDays = parseRangeDays(req.query.range);
+    const requestedAsOfDate = parseOptionalAsOfDate(req.query.as_of);
+    const anchorDateExpression = requestedAsOfDate
+      ? "(SELECT MAX(trade_date) FROM market_anchor_daily_prices WHERE symbol = ? AND source = ? AND trade_date <= ?)"
+      : "(SELECT MAX(trade_date) FROM market_anchor_daily_prices WHERE symbol = ? AND source = ?)";
     const params = rangeDays
-      ? [symbolConfig.symbol, symbolConfig.source, symbolConfig.symbol, symbolConfig.source, `-${rangeDays} day`]
-      : [symbolConfig.symbol, symbolConfig.source];
+      ? requestedAsOfDate
+        ? [
+          symbolConfig.symbol,
+          symbolConfig.source,
+          requestedAsOfDate,
+          symbolConfig.symbol,
+          symbolConfig.source,
+          requestedAsOfDate,
+          `-${rangeDays} day`
+        ]
+        : [symbolConfig.symbol, symbolConfig.source, symbolConfig.symbol, symbolConfig.source, `-${rangeDays} day`]
+      : requestedAsOfDate
+        ? [symbolConfig.symbol, symbolConfig.source, requestedAsOfDate]
+        : [symbolConfig.symbol, symbolConfig.source];
+    const asOfDateClause = requestedAsOfDate ? "AND trade_date <= ?" : "";
     const rangeDateClause = rangeDays
-      ? "AND trade_date >= date((SELECT MAX(trade_date) FROM market_anchor_daily_prices WHERE symbol = ? AND source = ?), ?)"
+      ? `AND trade_date >= date(${anchorDateExpression}, ?)`
       : "";
 
     const rows = await db.all(
@@ -1449,11 +1539,23 @@ router.get("/precious-metal-market/prices", async (req, res) => {
        FROM market_anchor_daily_prices
        WHERE symbol = ?
          AND source = ?
+         ${asOfDateClause}
          ${rangeDateClause}
        ORDER BY trade_date ASC`,
       params
     );
-    res.json({ success: true, data: { symbol: symbolConfig, rows } });
+    const effectiveAsOfDate = rows.length ? String(rows[rows.length - 1].trade_date || "") : "";
+    res.json({
+      success: true,
+      data: {
+        symbol: symbolConfig,
+        rows,
+        requested_as_of_date: requestedAsOfDate,
+        effective_as_of_date: effectiveAsOfDate,
+        mode: requestedAsOfDate ? "historical_replay" : "latest",
+        uses_future_data: false
+      }
+    });
   } catch (error) {
     res.status(200).json({
       success: false,

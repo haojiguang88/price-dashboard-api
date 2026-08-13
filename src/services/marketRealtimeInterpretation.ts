@@ -212,14 +212,19 @@ export const buildSilverRealtimeInterpretation = ({
   evaluation,
   pricePoints,
   primaryState,
-  goldContext
+  goldContext,
+  historicalReplay = false,
+  requestedAsOfDate = ""
 }: {
   evaluation: SilverSwingEvaluation;
   pricePoints: MarketOhlcvPoint[];
   primaryState: PrimaryStateInput;
   goldContext?: GoldContextInput | null;
+  historicalReplay?: boolean;
+  requestedAsOfDate?: string;
 }): MarketRealtimeInterpretation => {
-  const points = normalizePoints(pricePoints);
+  // The interpretation must never inspect bars after the evaluated date.
+  const points = normalizePoints(pricePoints).filter(point => point.date <= evaluation.date);
   const latest = points.length ? points[points.length - 1] : null;
   const previous = points.length > 1 ? points[points.length - 2] : null;
   const beforePrevious = points.length > 2 ? points[points.length - 3] : null;
@@ -343,10 +348,17 @@ export const buildSilverRealtimeInterpretation = ({
   }
   invalidationConditions.push("重新命中快速下跌、飞刀或高波动时，按更高风险权限执行");
 
-  const dataNotes: string[] = [
-    "盘面研判按最新入库日线动态计算，不替代实物端回收价、溢价、货源和真实热度。"
-  ];
+  const dataNotes: string[] = historicalReplay
+    ? [
+      `当前规则历史回放：请求截止 ${requestedAsOfDate || evaluation.date}，实际按 ${evaluation.date} 及以前的日线计算，未使用后续行情。`,
+      "历史回放不替代当时未记录的实物端回收价、溢价、货源和真实热度。"
+    ]
+    : [
+      "盘面研判按最新入库日线动态计算，不替代实物端回收价、溢价、货源和真实热度。"
+    ];
   if (
+    !historicalReplay
+    &&
     goldContext?.latestPoint
     && String(goldContext.latestPoint.trade_date || goldContext.latestPoint.date || "") === evaluation.date
   ) {

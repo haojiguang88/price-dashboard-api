@@ -217,14 +217,20 @@ export const buildGoldSilverRatioSummary = (input: GoldSilverRatioInput): GoldSi
   };
 };
 
-export const loadGoldSilverRatioSummary = async (db: any): Promise<GoldSilverRatioSummary> => {
+export const loadGoldSilverRatioSummary = async (
+  db: any,
+  options: { asOfDate?: string | null } = {}
+): Promise<GoldSilverRatioSummary> => {
+  const asOfDate = String(options.asOfDate || "").trim();
+  const asOfClause = asOfDate ? "AND trade_date <= ?" : "";
   const loadRows = (symbol: string, source: string) => db.all(
     `SELECT trade_date, close
      FROM market_anchor_daily_prices
      WHERE symbol = ? AND source = ? AND close IS NOT NULL AND close > 0
+       ${asOfClause}
      ORDER BY trade_date DESC, id DESC
      LIMIT 180`,
-    [symbol, source]
+    asOfDate ? [symbol, source, asOfDate] : [symbol, source]
   );
   const [goldRows, silverRows, fxRows] = await Promise.all([
     loadRows("XAUUSD", "twelvedata"),
