@@ -13,6 +13,11 @@ export interface MarketOhlcvPoint {
 
 export type MarketPermissionLayer = "P0" | "P1" | "P2" | "P3" | "P4" | "P5";
 
+export interface SilverPermissionHistoryPoint {
+  evaluation: SilverSwingEvaluation;
+  goldEvaluation?: SilverSwingEvaluation | null;
+}
+
 interface PrimaryStateInput {
   key: string;
   label: string;
@@ -58,6 +63,12 @@ export interface MarketRealtimeInterpretation {
     tone: string;
     summary: string;
   } | null;
+  normal_plan_state: {
+    active: boolean;
+    entered_on: string | null;
+    support_floor: number | null;
+    entry_reason: string;
+  };
   data_notes: string[];
 }
 
@@ -124,11 +135,157 @@ const resolveBasePermissionLayer = (evaluation: SilverSwingEvaluation): MarketPe
   return "P1";
 };
 
+const isGoldRiskEvaluation = (evaluation?: SilverSwingEvaluation | null) => {
+  if (!evaluation) return false;
+  const hits = new Set(evaluation.hitRuleKeys);
+  return hits.has("extreme_volatility")
+    || hits.has("high_volatility")
+    || hits.has("falling_knife")
+    || hits.has("fast_drop")
+    || hits.has("slow_decline");
+};
+
 const downgradePermission = (layer: MarketPermissionLayer): MarketPermissionLayer => {
   if (layer === "P4") return "P3";
   if (layer === "P3") return "P2";
   if (layer === "P2") return "P1";
   return layer;
+};
+
+interface NormalPlanPermissionState {
+  layer: MarketPermissionLayer;
+  active: boolean;
+  enteredOn: string | null;
+  supportFloor: number | null;
+  entryReason: string;
+  recentOpportunityDays: number;
+  currentFiveDayLow: number | null;
+  previousFiveDayLow: number | null;
+  currentTenDayLow: number | null;
+  previousTenDayLow: number | null;
+}
+
+const minimumClose = (items: SilverPermissionHistoryPoint[]) => {
+  if (!items.length) return null;
+  return Math.min(...items.map(item => item.evaluation.close));
+};
+
+const isSilverPermissionBlocker = (evaluation: SilverSwingEvaluation) => {
+  const hits = new Set(evaluation.hitRuleKeys);
+  return hits.has("extreme_volatility")
+    || hits.has("high_volatility")
+    || hits.has("falling_knife")
+    || hits.has("fast_drop")
+    || hits.has("slow_decline")
+    || hits.has("overheat_rise")
+    || hits.has("fast_rise")
+    || hits.has("ma250_stretch")
+    || hits.has("extreme_buy_lock")
+    || hits.has("extreme_crash_guard")
+    || hits.has("extreme_sell_ladder");
+};
+
+const buildNormalPlanPermissionState = (
+  historyInput: SilverPermissionHistoryPoint[]
+): NormalPlanPermissionState => {
+  const history = [...historyInput]
+    .filter(item => item?.evaluation?.date)
+    .sort((a, b) => a.evaluation.date.localeCompare(b.evaluation.date));
+  let active = false;
+  let enteredOn: string | null = null;
+  let supportFloor: number | null = null;
+  let entryReason = "";
+  let latestState: NormalPlanPermissionState = {
+    layer: "P1",
+    active: false,
+    enteredOn: null,
+    supportFloor: null,
+    entryReason: "",
+    recentOpportunityDays: 0,
+    currentFiveDayLow: null,
+    previousFiveDayLow: null,
+    currentTenDayLow: null,
+    previousTenDayLow: null
+  };
+
+  history.forEach((item, index) => {
+    const evaluation = item.evaluation;
+    const hits = new Set(evaluation.hitRuleKeys);
+    const baseLayer = resolveBasePermissionLayer(evaluation);
+    const goldRisk = isGoldRiskEvaluation(item.goldEvaluation);
+    const recentSeven = history.slice(Math.max(0, index - 6), index + 1);
+    const recentOpportunityDays = recentSeven.filter(recentItem => {
+      const recentLayer = resolveBasePermissionLayer(recentItem.evaluation);
+      return ["P2", "P3"].includes(recentLayer)
+        && !isGoldRiskEvaluation(recentItem.goldEvaluation);
+    }).length;
+    const currentFiveDayLow = minimumClose(history.slice(Math.max(0, index - 4), index + 1));
+    const previousFiveDayLow = index >= 9
+      ? minimumClose(history.slice(index - 9, index - 4))
+      : null;
+    const currentTenDayLow = minimumClose(history.slice(Math.max(0, index - 9), index + 1));
+    const previousTenDayLow = index >= 19
+      ? minimumClose(history.slice(index - 19, index - 9))
+      : null;
+    const metrics = evaluation.metrics;
+    const platformStructure = hits.has("medium_sideways") || hits.has("healthy_pullback");
+    const higherFiveDayLow = currentFiveDayLow !== null
+      && previousFiveDayLow !== null
+      && currentFiveDayLow > previousFiveDayLow;
+    const higherTenDayLow = currentTenDayLow !== null
+      && previousTenDayLow !== null
+      && currentTenDayLow > previousTenDayLow;
+    const aboveKeyAverages = metrics.closeVsMa20Percent !== null
+      && metrics.closeVsMa20Percent >= 0
+      && metrics.closeVsMa60Percent !== null
+      && metrics.closeVsMa60Percent >= 0;
+    const entryCandidate = ["P2", "P3"].includes(baseLayer)
+      && !goldRisk
+      && platformStructure
+      && recentOpportunityDays >= 5
+      && higherFiveDayLow
+      && higherTenDayLow
+      && aboveKeyAverages;
+
+    if (active) {
+      const supportBroken = supportFloor !== null && evaluation.close < supportFloor;
+      if (isSilverPermissionBlocker(evaluation) || supportBroken) {
+        active = false;
+        enteredOn = null;
+        supportFloor = null;
+        entryReason = "";
+      } else if (entryCandidate && currentTenDayLow !== null) {
+        supportFloor = supportFloor === null
+          ? currentTenDayLow
+          : Math.max(supportFloor, currentTenDayLow);
+      }
+    } else if (entryCandidate) {
+      active = true;
+      enteredOn = evaluation.date;
+      supportFloor = currentTenDayLow;
+      entryReason = "P2/P3观察充分，5日与10日低点同步抬高，且重新站稳MA20/MA60";
+    }
+
+    let layer = active ? "P4" as MarketPermissionLayer : baseLayer;
+    if (goldRisk && ["P2", "P3", "P4"].includes(layer)) {
+      layer = downgradePermission(layer);
+    }
+
+    latestState = {
+      layer,
+      active,
+      enteredOn,
+      supportFloor,
+      entryReason,
+      recentOpportunityDays,
+      currentFiveDayLow,
+      previousFiveDayLow,
+      currentTenDayLow,
+      previousTenDayLow
+    };
+  });
+
+  return latestState;
 };
 
 const permissionCopy = (layer: MarketPermissionLayer) => {
@@ -176,11 +333,7 @@ const buildGoldContext = (goldContext?: GoldContextInput | null) => {
   if (!goldContext) return null;
   const hits = new Set(goldContext.evaluation.hitRuleKeys);
   const metrics = goldContext.evaluation.metrics;
-  const riskHit = hits.has("extreme_volatility")
-    || hits.has("high_volatility")
-    || hits.has("falling_knife")
-    || hits.has("fast_drop")
-    || hits.has("slow_decline");
+  const riskHit = isGoldRiskEvaluation(goldContext.evaluation);
   const belowMa20 = metrics.closeVsMa20Percent !== null && metrics.closeVsMa20Percent < 0;
   const weakFiveDays = metrics.return5dPercent !== null && metrics.return5dPercent < 0;
 
@@ -213,6 +366,7 @@ export const buildSilverRealtimeInterpretation = ({
   pricePoints,
   primaryState,
   goldContext,
+  permissionHistory = [],
   historicalReplay = false,
   requestedAsOfDate = ""
 }: {
@@ -220,6 +374,7 @@ export const buildSilverRealtimeInterpretation = ({
   pricePoints: MarketOhlcvPoint[];
   primaryState: PrimaryStateInput;
   goldContext?: GoldContextInput | null;
+  permissionHistory?: SilverPermissionHistoryPoint[];
   historicalReplay?: boolean;
   requestedAsOfDate?: string;
 }): MarketRealtimeInterpretation => {
@@ -259,10 +414,17 @@ export const buildSilverRealtimeInterpretation = ({
       : null;
   const gold = buildGoldContext(goldContext);
 
-  let permissionLayer = resolveBasePermissionLayer(evaluation);
-  if (gold?.risk && ["P2", "P3", "P4"].includes(permissionLayer)) {
-    permissionLayer = downgradePermission(permissionLayer);
+  const normalizedPermissionHistory = permissionHistory.length
+    ? permissionHistory.filter(item => item.evaluation.date <= evaluation.date)
+    : [{ evaluation, goldEvaluation: goldContext?.evaluation || null }];
+  if (!normalizedPermissionHistory.some(item => item.evaluation.date === evaluation.date)) {
+    normalizedPermissionHistory.push({
+      evaluation,
+      goldEvaluation: goldContext?.evaluation || null
+    });
   }
+  const normalPlanState = buildNormalPlanPermissionState(normalizedPermissionHistory);
+  const permissionLayer = normalPlanState.layer;
   const permission = permissionCopy(permissionLayer);
 
   const reboundAfterDrop = previousReturn !== null
@@ -286,6 +448,8 @@ export const buildSilverRealtimeInterpretation = ({
     repairQuality = { key: "fragile_repair", label: "承接出现，修复偏弱", tone: "watch" };
   } else if (hits.has("healthy_pullback")) {
     repairQuality = { key: "confirmed_repair", label: "修复证据成立", tone: "opportunity" };
+  } else if (permissionLayer === "P4") {
+    repairQuality = { key: "normal_plan_confirmed", label: "正常计划确认", tone: "opportunity" };
   } else if (hits.has("medium_sideways")) {
     repairQuality = { key: "medium_sideways", label: "中期横盘确认", tone: "opportunity" };
   } else if (hits.has("sideways")) {
@@ -315,10 +479,33 @@ export const buildSilverRealtimeInterpretation = ({
     metrics.closeVsMa250Percent !== null ? `MA250 ${formatSignedPercent(metrics.closeVsMa250Percent)}` : ""
   ].filter(Boolean);
   if (maEvidence.length) evidence.push(`均线位置：${maEvidence.join("，")}`);
+  if (normalPlanState.active && normalPlanState.enteredOn) {
+    const supportText = normalPlanState.supportFloor !== null
+      ? `，当前结构支撑 ${formatPrice(normalPlanState.supportFloor)}`
+      : "";
+    evidence.push(
+      permissionLayer === "P4"
+        ? `正常计划自 ${normalPlanState.enteredOn} 生效${supportText}`
+        : `正常计划结构自 ${normalPlanState.enteredOn} 成立，当前因黄金背景风险临时降权${supportText}`
+    );
+  }
+  if (permissionLayer === "P4") {
+    if (
+      normalPlanState.currentTenDayLow !== null
+      && normalPlanState.previousTenDayLow !== null
+    ) {
+      evidence.push(
+        `10日低点 ${formatPrice(normalPlanState.currentTenDayLow)}，高于此前10日低点 ${formatPrice(normalPlanState.previousTenDayLow)}`
+      );
+    }
+    evidence.push(`最近7个交易日有 ${normalPlanState.recentOpportunityDays} 日处于P2/P3结构`);
+  }
 
   let summary = `机械状态为“${primaryState.label}”，盘面修复质量仍需继续确认。`;
   if (fragileRecovery) {
     summary = `机械状态虽为“${primaryState.label}”，但这是前一日下跌后的首次修复：有承接，收复幅度和量能尚不足以确认反转。`;
+  } else if (permissionLayer === "P4") {
+    summary = `平台经过回踩不破、低点抬高和关键均线确认，正常分层计划权限成立；这不是全仓许可。`;
   } else if (repairQuality.key === "confirmed_repair" || repairQuality.key === "medium_sideways") {
     summary = `机械状态与盘面修复相互印证，允许进入小批次计划复核，但仍不代表可以放大仓位。`;
   } else if (permissionLayer === "P0") {
@@ -341,6 +528,12 @@ export const buildSilverRealtimeInterpretation = ({
   } else if (permissionLayer === "P2" || permissionLayer === "P3") {
     upgradeConditions.push("波动继续收敛，回踩不破关键均线或前低");
     upgradeConditions.push("实物端轻微溢价或无溢价、货源充足，可以从容买到");
+  } else if (permissionLayer === "P4") {
+    upgradeConditions.push("保持分层执行，不因权限升级一次打满");
+    upgradeConditions.push("实物端只作低权重执行参考，不单独决定权限");
+  }
+  if (permissionLayer === "P4" && normalPlanState.supportFloor !== null) {
+    invalidationConditions.push(`收盘跌破结构支撑（${formatPrice(normalPlanState.supportFloor)}）则P4失效`);
   }
   if (latest && previous && latest.low !== null && previous.low !== null) {
     const recentLow = Math.min(latest.low, previous.low);
@@ -366,7 +559,7 @@ export const buildSilverRealtimeInterpretation = ({
   }
 
   return {
-    version: "silver-live-context-v1.0",
+    version: "silver-live-context-v1.1",
     raw_state: {
       key: primaryState.key,
       label: primaryState.label
@@ -387,6 +580,12 @@ export const buildSilverRealtimeInterpretation = ({
         summary: gold.summary
       }
       : null,
+    normal_plan_state: {
+      active: normalPlanState.active,
+      entered_on: normalPlanState.enteredOn,
+      support_floor: normalPlanState.supportFloor,
+      entry_reason: normalPlanState.entryReason
+    },
     data_notes: dataNotes
   };
 };

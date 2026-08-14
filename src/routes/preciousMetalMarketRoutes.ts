@@ -12,7 +12,8 @@ import {
 } from "../services/marketAssistEvaluator";
 import {
   buildSilverRealtimeInterpretation,
-  type MarketOhlcvPoint
+  type MarketOhlcvPoint,
+  type SilverPermissionHistoryPoint
 } from "../services/marketRealtimeInterpretation";
 
 const router = express.Router();
@@ -893,6 +894,10 @@ const buildCurrentSignalPayload = (
     evaluation: SilverSwingEvaluation;
     latestPoint?: MarketOhlcvPoint | null;
   } | null = null,
+  permissionHistory: SilverPermissionHistoryPoint[] = recentEvaluations.map(evaluationItem => ({
+    evaluation: evaluationItem,
+    goldEvaluation: null
+  })),
   replayContext: {
     isHistoricalReplay: boolean;
     requestedAsOfDate: string | null;
@@ -908,6 +913,7 @@ const buildCurrentSignalPayload = (
       pricePoints,
       primaryState,
       goldContext,
+      permissionHistory,
       historicalReplay: replayContext.isHistoricalReplay,
       requestedAsOfDate: replayContext.requestedAsOfDate || ""
     })
@@ -1395,10 +1401,14 @@ router.get("/precious-metal-market/current-signal", async (req, res) => {
     }
 
     const evaluation = evaluateSilverSwingRules(points, rules);
-    const recentTargetDates = points.slice(-45).map(point => String(point.trade_date || point.date || ""));
+    const recentTargetDates = points.slice(-120).map(point => String(point.trade_date || point.date || ""));
     const recentEvaluations = recentTargetDates
       .filter(Boolean)
       .map(date => evaluateSilverSwingRules(points, rules, date));
+    let permissionHistory: SilverPermissionHistoryPoint[] = recentEvaluations.map(evaluationItem => ({
+      evaluation: evaluationItem,
+      goldEvaluation: null
+    }));
     let goldContext: {
       evaluation: SilverSwingEvaluation;
       latestPoint?: MarketOhlcvPoint | null;
@@ -1430,10 +1440,26 @@ router.get("/precious-metal-market/current-signal", async (req, res) => {
           ) as Promise<MarketAssistRuleInput[]>
         ]);
         if (goldPoints.length && goldRules.length) {
+          const goldEvaluation = evaluateSilverSwingRules(
+            goldPoints,
+            goldRules,
+            evaluation.date
+          );
+          const latestGoldPoint = [...goldPoints]
+            .reverse()
+            .find(point => String(point.trade_date || point.date || "") <= evaluation.date) || null;
           goldContext = {
-            evaluation: evaluateSilverSwingRules(goldPoints, goldRules),
-            latestPoint: goldPoints[goldPoints.length - 1] || null
+            evaluation: goldEvaluation,
+            latestPoint: latestGoldPoint
           };
+          permissionHistory = recentEvaluations.map(evaluationItem => ({
+            evaluation: evaluationItem,
+            goldEvaluation: evaluateSilverSwingRules(
+              goldPoints,
+              goldRules,
+              evaluationItem.date
+            )
+          }));
         }
       }
     }
@@ -1447,6 +1473,7 @@ router.get("/precious-metal-market/current-signal", async (req, res) => {
         recentEvaluations,
         points,
         goldContext,
+        permissionHistory,
         {
           isHistoricalReplay: Boolean(requestedAsOfDate),
           requestedAsOfDate

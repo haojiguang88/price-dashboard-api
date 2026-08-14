@@ -48,6 +48,53 @@ const evaluation = (
   hitRuleKeys
 });
 
+const datedEvaluation = (
+  date: string,
+  close: number,
+  hitRuleKeys: string[],
+  metricOverrides: Partial<SilverSwingMetrics> = {}
+): SilverSwingEvaluation => ({
+  ...evaluation(hitRuleKeys, metricOverrides),
+  date,
+  close
+});
+
+const stableGoldEvaluation = (date: string) => datedEvaluation(
+  date,
+  2050,
+  ["medium_sideways"],
+  {
+    return5dPercent: 0.5,
+    closeVsMa20Percent: 0.4,
+    closeVsMa60Percent: 1.2
+  }
+);
+
+const normalPlanHistory = () => Array.from({ length: 20 }, (_, index) => {
+  const day = String(index + 1).padStart(2, "0");
+  const close = index < 10
+    ? 5.7 + (index * 0.005)
+    : index < 15
+      ? 5.8 + ((index - 10) * 0.005)
+      : 5.9 + ((index - 15) * 0.01);
+  const hitRuleKeys = index >= 15 ? ["medium_sideways"] : [];
+  const currentEvaluation = datedEvaluation(
+    `2024-02-${day}`,
+    close,
+    hitRuleKeys,
+    {
+      closeVsMa20Percent: index >= 15 ? 0.8 : -0.4,
+      closeVsMa60Percent: index >= 15 ? 0.2 : -0.6,
+      return20dPercent: 1.2,
+      range20dPercent: 4.1
+    }
+  );
+  return {
+    evaluation: currentEvaluation,
+    goldEvaluation: stableGoldEvaluation(currentEvaluation.date)
+  };
+});
+
 const recentBars: MarketOhlcvPoint[] = [
   {
     trade_date: "2026-07-27",
@@ -153,6 +200,164 @@ test("confirmed healthy pullback maps to P3 without a gold risk override", () =>
   assert.equal(result.permission_layer, "P3");
   assert.equal(result.buy_permission, "small_batch");
   assert.equal(result.repair_quality.key, "confirmed_repair");
+});
+
+test("a mature platform with rising lows and recovered averages upgrades to P4", () => {
+  const permissionHistory = normalPlanHistory();
+  const currentEvaluation = permissionHistory[permissionHistory.length - 1].evaluation;
+  const result = buildSilverRealtimeInterpretation({
+    evaluation: currentEvaluation,
+    pricePoints: permissionHistory.map(item => ({
+      trade_date: item.evaluation.date,
+      close: item.evaluation.close
+    })),
+    primaryState: {
+      key: "sideways",
+      label: "横盘观察",
+      tone: "neutral"
+    },
+    goldContext: {
+      evaluation: stableGoldEvaluation(currentEvaluation.date)
+    },
+    permissionHistory
+  });
+
+  assert.equal(result.permission_layer, "P4");
+  assert.equal(result.buy_permission, "normal");
+  assert.equal(result.normal_plan_state.active, true);
+  assert.equal(result.normal_plan_state.entered_on, currentEvaluation.date);
+  assert.match(result.summary, /不是全仓许可/);
+  assert.ok(result.evidence.some(item => item.includes(`正常计划自 ${currentEvaluation.date} 生效`)));
+});
+
+test("P4 persists through a neutral day and closes on a fast drop", () => {
+  const permissionHistory = normalPlanHistory();
+  const neutralEvaluation = datedEvaluation(
+    "2024-02-21",
+    6.02,
+    [],
+    {
+      closeVsMa20Percent: 1.4,
+      closeVsMa60Percent: 0.9
+    }
+  );
+  const neutralHistory = [
+    ...permissionHistory,
+    {
+      evaluation: neutralEvaluation,
+      goldEvaluation: stableGoldEvaluation(neutralEvaluation.date)
+    }
+  ];
+  const neutralResult = buildSilverRealtimeInterpretation({
+    evaluation: neutralEvaluation,
+    pricePoints: neutralHistory.map(item => ({
+      trade_date: item.evaluation.date,
+      close: item.evaluation.close
+    })),
+    primaryState: { key: "neutral", label: "中性观察", tone: "neutral" },
+    permissionHistory: neutralHistory
+  });
+
+  assert.equal(neutralResult.permission_layer, "P4");
+  assert.equal(neutralResult.normal_plan_state.entered_on, "2024-02-20");
+
+  const fastDropEvaluation = datedEvaluation(
+    "2024-02-22",
+    5.72,
+    ["fast_drop"],
+    {
+      dailyReturnPercent: -5.1,
+      return5dPercent: -12.2,
+      closeVsMa20Percent: -4.2,
+      closeVsMa60Percent: -3.1
+    }
+  );
+  const stoppedHistory = [
+    ...neutralHistory,
+    {
+      evaluation: fastDropEvaluation,
+      goldEvaluation: stableGoldEvaluation(fastDropEvaluation.date)
+    }
+  ];
+  const stoppedResult = buildSilverRealtimeInterpretation({
+    evaluation: fastDropEvaluation,
+    pricePoints: stoppedHistory.map(item => ({
+      trade_date: item.evaluation.date,
+      close: item.evaluation.close
+    })),
+    primaryState: { key: "fast_drop", label: "暴跌", tone: "danger" },
+    permissionHistory: stoppedHistory
+  });
+
+  assert.equal(stoppedResult.permission_layer, "P0");
+  assert.equal(stoppedResult.normal_plan_state.active, false);
+  assert.equal(stoppedResult.normal_plan_state.entered_on, null);
+});
+
+test("gold risk only pauses an active P4 and P4 resumes when the background clears", () => {
+  const permissionHistory = normalPlanHistory();
+  const riskDate = "2024-02-21";
+  const riskEvaluation = datedEvaluation(
+    riskDate,
+    6.02,
+    [],
+    {
+      closeVsMa20Percent: 1.4,
+      closeVsMa60Percent: 0.9
+    }
+  );
+  const riskHistory = [
+    ...permissionHistory,
+    {
+      evaluation: riskEvaluation,
+      goldEvaluation: datedEvaluation(riskDate, 1980, ["fast_drop"])
+    }
+  ];
+  const riskResult = buildSilverRealtimeInterpretation({
+    evaluation: riskEvaluation,
+    pricePoints: riskHistory.map(item => ({
+      trade_date: item.evaluation.date,
+      close: item.evaluation.close
+    })),
+    primaryState: { key: "neutral", label: "中性观察", tone: "neutral" },
+    goldContext: { evaluation: riskHistory[riskHistory.length - 1].goldEvaluation },
+    permissionHistory: riskHistory
+  });
+
+  assert.equal(riskResult.permission_layer, "P3");
+  assert.equal(riskResult.normal_plan_state.active, true);
+  assert.match(riskResult.evidence.join(" "), /黄金背景风险临时降权/);
+
+  const resumeDate = "2024-02-22";
+  const resumeEvaluation = datedEvaluation(
+    resumeDate,
+    6.04,
+    [],
+    {
+      closeVsMa20Percent: 1.6,
+      closeVsMa60Percent: 1.1
+    }
+  );
+  const resumeHistory = [
+    ...riskHistory,
+    {
+      evaluation: resumeEvaluation,
+      goldEvaluation: stableGoldEvaluation(resumeDate)
+    }
+  ];
+  const resumeResult = buildSilverRealtimeInterpretation({
+    evaluation: resumeEvaluation,
+    pricePoints: resumeHistory.map(item => ({
+      trade_date: item.evaluation.date,
+      close: item.evaluation.close
+    })),
+    primaryState: { key: "neutral", label: "中性观察", tone: "neutral" },
+    goldContext: { evaluation: stableGoldEvaluation(resumeDate) },
+    permissionHistory: resumeHistory
+  });
+
+  assert.equal(resumeResult.permission_layer, "P4");
+  assert.equal(resumeResult.normal_plan_state.entered_on, "2024-02-20");
 });
 
 test("historical replay ignores price bars after the evaluated date", () => {
