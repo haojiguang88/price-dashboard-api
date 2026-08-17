@@ -1,4 +1,5 @@
 import express from "express";
+import { randomUUID } from "node:crypto";
 import getDb from "../config/database";
 import { isValidDateOnly } from "../utils/dateValidation";
 import { validateActiveMasterTargetByIds, validateActiveMasterTargetByNames } from "../utils/masterData";
@@ -86,6 +87,102 @@ const refreshPositionAggregate = async (db: any, positionId: number | string, no
     "UPDATE positions SET total_quantity = ?, total_cost = ?, avg_price = ?, updated_at = ? WHERE id = ?",
     [totalQuantity, totalCost, avgPrice, now, positionId]
   );
+};
+
+export class PositionBatchDeleteError extends Error {
+  statusCode: number;
+
+  constructor(statusCode: number, message: string) {
+    super(message);
+    this.name = "PositionBatchDeleteError";
+    this.statusCode = statusCode;
+  }
+}
+
+export const deletePositionBatch = async (db: any, batchId: number | string) => {
+  await db.run("BEGIN IMMEDIATE TRANSACTION");
+
+  try {
+    const batch = await db.get(
+      `SELECT pb.*, p.category_name, p.object_name, p.variant_name
+       FROM position_batches pb
+       JOIN positions p ON p.id = pb.position_id
+       WHERE pb.id = ?`,
+      [batchId]
+    );
+    if (!batch) {
+      throw new PositionBatchDeleteError(404, "批次不存在或已被删除");
+    }
+
+    const sellRecordSummary = await db.get(
+      "SELECT COUNT(*) AS count FROM sell_records WHERE batch_id = ?",
+      [String(batchId)]
+    );
+    if (Number(sellRecordSummary?.count || 0) > 0) {
+      throw new PositionBatchDeleteError(409, "该批次已经产生卖出记录，不能删除；可通过备注说明录入问题");
+    }
+
+    await db.run("DELETE FROM position_batches WHERE id = ?", [batchId]);
+
+    const [remainingBatchSummary, positionSellRecordSummary] = await Promise.all([
+      db.get("SELECT COUNT(*) AS count FROM position_batches WHERE position_id = ?", [batch.position_id]),
+      db.get("SELECT COUNT(*) AS count FROM sell_records WHERE position_id = ?", [String(batch.position_id)])
+    ]);
+    const hasRemainingBatches = Number(remainingBatchSummary?.count || 0) > 0;
+    const hasPositionSellRecords = Number(positionSellRecordSummary?.count || 0) > 0;
+    const now = new Date().toISOString();
+    let positionDeleted = false;
+
+    if (!hasRemainingBatches && !hasPositionSellRecords) {
+      await db.run("DELETE FROM positions WHERE id = ?", [batch.position_id]);
+      positionDeleted = true;
+    } else {
+      await refreshPositionAggregate(db, batch.position_id, now);
+    }
+
+    const target = [batch.category_name, batch.object_name, batch.variant_name]
+      .filter(Boolean)
+      .join(" / ");
+    await db.run(
+      `INSERT INTO audit_logs
+        (id, timestamp, module, action, target, status, detail, entity_id, path, domain, workspace, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        `audit-${randomUUID()}`,
+        now,
+        "仓位管理",
+        "删除仓位批次",
+        target,
+        "success",
+        JSON.stringify({
+          batch_id: batch.id,
+          position_id: batch.position_id,
+          batch_date: batch.batch_date,
+          batch_price: batch.batch_price,
+          batch_quantity: batch.batch_quantity,
+          remaining_quantity: batch.remaining_quantity,
+          note: batch.note || ""
+        }),
+        String(batch.id),
+        "/positions/current",
+        "business",
+        "business",
+        now,
+        now
+      ]
+    );
+
+    await db.run("COMMIT");
+
+    return {
+      batchId: Number(batch.id),
+      positionId: Number(batch.position_id),
+      positionDeleted
+    };
+  } catch (error) {
+    await db.run("ROLLBACK").catch(() => undefined);
+    throw error;
+  }
 };
 
 const compactPositionItem = (item: PositionInsightItem) => ({
@@ -744,6 +841,32 @@ router.put("/position-batches/:id", async (req, res) => {
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     res.status(500).json({ status: "error", message: "编辑持仓批次失败", error: errorMessage });
+  }
+});
+
+// 删除误录批次；已有卖出记录的批次必须保留历史链路
+router.delete("/position-batches/:id", async (req, res) => {
+  try {
+    const db = await getDb();
+    const result = await deletePositionBatch(db, req.params.id);
+
+    res.json({
+      status: "success",
+      message: "删除持仓批次成功",
+      data: {
+        batch_id: result.batchId,
+        position_id: result.positionId,
+        position_deleted: result.positionDeleted
+      }
+    });
+  } catch (error) {
+    if (error instanceof PositionBatchDeleteError) {
+      return res.status(error.statusCode).json({ status: "error", message: error.message });
+    }
+
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    console.error("删除持仓批次失败:", errorMessage);
+    res.status(500).json({ status: "error", message: "删除持仓批次失败" });
   }
 });
 
