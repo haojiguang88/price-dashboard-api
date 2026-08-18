@@ -12,9 +12,14 @@ import {
 } from "../services/marketAssistEvaluator";
 import {
   buildSilverRealtimeInterpretation,
+  resolveMarketPrimaryState,
   type MarketOhlcvPoint,
   type SilverPermissionHistoryPoint
 } from "../services/marketRealtimeInterpretation";
+import {
+  buildAnnualEntryOpportunityReport,
+  parseAnnualEntryOpportunityYear
+} from "../services/annualEntryOpportunityService";
 
 const router = express.Router();
 
@@ -634,36 +639,6 @@ const buildVolatilityPhase = (
   };
 };
 
-const pickPrimaryState = (evaluation: SilverSwingEvaluation) => {
-  const hits = new Set(evaluation.hitRuleKeys);
-  if (hits.has("extreme_volatility") && (hits.has("fast_drop") || hits.has("falling_knife"))) {
-    return { key: "extreme_crash", label: "极端高波动 + 飞刀", tone: "danger" };
-  }
-  if (hits.has("extreme_volatility") && (hits.has("overheat_rise") || hits.has("fast_rise"))) {
-    return { key: "extreme_overheat", label: "极端高波动 + 过热", tone: "danger" };
-  }
-  if (hits.has("extreme_volatility")) {
-    return { key: "extreme_volatility", label: "极端高波动", tone: "danger" };
-  }
-  if (hits.has("falling_knife")) return { key: "falling_knife", label: "飞刀", tone: "danger" };
-  if (hits.has("fast_drop")) return { key: "fast_drop", label: "暴跌", tone: "danger" };
-  if (hits.has("overheat_rise")) return { key: "overheat_rise", label: "连续过热", tone: "danger" };
-  if (hits.has("fast_rise")) return { key: "fast_rise", label: "暴涨", tone: "opportunity" };
-  if (hits.has("ma250_stretch")) return { key: "ma250_stretch", label: "远离年线", tone: "watch" };
-  if (hits.has("high_volatility") && hits.has("slow_rise")) {
-    return { key: "high_volatility_slow_rise", label: "高波动 + 慢涨", tone: "watch" };
-  }
-  if (hits.has("high_volatility") && hits.has("slow_decline")) {
-    return { key: "high_volatility_slow_decline", label: "高波动 + 阴跌", tone: "watch" };
-  }
-  if (hits.has("high_volatility")) return { key: "high_volatility", label: "高波动冷却", tone: "watch" };
-  if (hits.has("slow_rise")) return { key: "slow_rise", label: "慢涨观察", tone: "opportunity" };
-  if (hits.has("slow_decline")) return { key: "slow_decline", label: "阴跌", tone: "watch" };
-  if (hits.has("healthy_pullback")) return { key: "healthy_pullback", label: "回踩不破", tone: "opportunity" };
-  if (hits.has("sideways") || hits.has("medium_sideways")) return { key: "sideways", label: "横盘观察", tone: "neutral" };
-  return { key: "neutral", label: "中性观察", tone: "neutral" };
-};
-
 const buildActionBias = (evaluation: SilverSwingEvaluation, rules: any[] = []) => {
   const hits = new Set(evaluation.hitRuleKeys);
   const metrics = evaluation.metrics;
@@ -903,7 +878,7 @@ const buildCurrentSignalPayload = (
     requestedAsOfDate: string | null;
   } = { isHistoricalReplay: false, requestedAsOfDate: null }
 ) => {
-  const primaryState = pickPrimaryState(evaluation);
+  const primaryState = resolveMarketPrimaryState(evaluation);
   const baseActionBias = ruleGroup === "precious_metal_plan" || symbolConfig.symbol === "XAUUSD"
     ? buildGoldAnchorBias(evaluation)
     : buildActionBias(evaluation, rules);
@@ -1484,6 +1459,91 @@ router.get("/precious-metal-market/current-signal", async (req, res) => {
     res.status(200).json({
       success: false,
       message: (error as Error).message || "贵金属动态信号读取失败",
+      data: null
+    });
+  }
+});
+
+router.get("/precious-metal-market/annual-entry-opportunities", async (req, res) => {
+  let year: number;
+  try {
+    year = parseAnnualEntryOpportunityYear(req.query.year);
+  } catch (error) {
+    res.status(400).json({
+      success: false,
+      message: (error as Error).message,
+      data: null
+    });
+    return;
+  }
+
+  try {
+    const db = await getDb();
+    const silverConfig = MAIN_PRICE_SYMBOLS.find(item => item.symbol === "SGE_AGTD")!;
+    const goldConfig = MAIN_PRICE_SYMBOLS.find(item => item.symbol === "XAUUSD")!;
+    const [silverPoints, silverRules, goldPoints, goldRules] = await Promise.all([
+      db.all(
+        `SELECT trade_date, open, high, low, close, volume, updated_at
+         FROM market_anchor_daily_prices
+         WHERE symbol = ?
+           AND source = ?
+           AND close IS NOT NULL
+         ORDER BY trade_date ASC`,
+        [silverConfig.symbol, silverConfig.source]
+      ) as Promise<Array<MarketPricePoint & MarketOhlcvPoint>>,
+      db.all(
+        `SELECT rule_key, rule_type, threshold_json, status, display_order
+         FROM market_assist_rules
+         WHERE asset_symbol = ?
+           AND rule_group = 'silver_swing_plan'
+           AND status = 'active'
+         ORDER BY display_order ASC`,
+        [silverConfig.symbol]
+      ) as Promise<MarketAssistRuleInput[]>,
+      db.all(
+        `SELECT trade_date, open, high, low, close, volume, updated_at
+         FROM market_anchor_daily_prices
+         WHERE symbol = ?
+           AND source = ?
+           AND close IS NOT NULL
+         ORDER BY trade_date ASC`,
+        [goldConfig.symbol, goldConfig.source]
+      ) as Promise<Array<MarketPricePoint & MarketOhlcvPoint>>,
+      db.all(
+        `SELECT rule_key, rule_type, threshold_json, status, display_order
+         FROM market_assist_rules
+         WHERE asset_symbol = ?
+           AND rule_group = 'precious_metal_plan'
+           AND status = 'active'
+         ORDER BY display_order ASC`,
+        [goldConfig.symbol]
+      ) as Promise<MarketAssistRuleInput[]>
+    ]);
+
+    const report = buildAnnualEntryOpportunityReport({
+      year,
+      silverPoints,
+      silverRules,
+      goldPoints,
+      goldRules
+    });
+
+    res.json({
+      success: true,
+      data: {
+        ...report,
+        symbol: silverConfig,
+        evaluator_version: getEvaluatorVersion(silverConfig.symbol, "silver_swing_plan"),
+        mode: "current_rule_historical_replay",
+        uses_future_data: false,
+        note: "P2/P3 归为小仓，P4 归为正式入场；逐交易日只使用当日及以前行情，黄金背景只能降级，不能授予入场。"
+      }
+    });
+  } catch (error) {
+    console.error("Annual entry opportunity replay failed:", error);
+    res.status(500).json({
+      success: false,
+      message: "年度入场机会回放失败",
       data: null
     });
   }

@@ -18,7 +18,7 @@ export interface SilverPermissionHistoryPoint {
   goldEvaluation?: SilverSwingEvaluation | null;
 }
 
-interface PrimaryStateInput {
+export interface MarketPrimaryState {
   key: string;
   label: string;
   tone: string;
@@ -103,6 +103,38 @@ const normalizePoints = (points: MarketOhlcvPoint[]) => points
   }))
   .filter((point): point is NormalizedMarketPoint => Boolean(point.date) && point.close !== null)
   .sort((a, b) => a.date.localeCompare(b.date));
+
+export const resolveMarketPrimaryState = (evaluation: SilverSwingEvaluation): MarketPrimaryState => {
+  const hits = new Set(evaluation.hitRuleKeys);
+  if (hits.has("extreme_volatility") && (hits.has("fast_drop") || hits.has("falling_knife"))) {
+    return { key: "extreme_crash", label: "极端高波动 + 飞刀", tone: "danger" };
+  }
+  if (hits.has("extreme_volatility") && (hits.has("overheat_rise") || hits.has("fast_rise"))) {
+    return { key: "extreme_overheat", label: "极端高波动 + 过热", tone: "danger" };
+  }
+  if (hits.has("extreme_volatility")) {
+    return { key: "extreme_volatility", label: "极端高波动", tone: "danger" };
+  }
+  if (hits.has("falling_knife")) return { key: "falling_knife", label: "飞刀", tone: "danger" };
+  if (hits.has("fast_drop")) return { key: "fast_drop", label: "暴跌", tone: "danger" };
+  if (hits.has("overheat_rise")) return { key: "overheat_rise", label: "连续过热", tone: "danger" };
+  if (hits.has("fast_rise")) return { key: "fast_rise", label: "暴涨", tone: "opportunity" };
+  if (hits.has("ma250_stretch")) return { key: "ma250_stretch", label: "远离年线", tone: "watch" };
+  if (hits.has("high_volatility") && hits.has("slow_rise")) {
+    return { key: "high_volatility_slow_rise", label: "高波动 + 慢涨", tone: "watch" };
+  }
+  if (hits.has("high_volatility") && hits.has("slow_decline")) {
+    return { key: "high_volatility_slow_decline", label: "高波动 + 阴跌", tone: "watch" };
+  }
+  if (hits.has("high_volatility")) return { key: "high_volatility", label: "高波动冷却", tone: "watch" };
+  if (hits.has("slow_rise")) return { key: "slow_rise", label: "慢涨观察", tone: "opportunity" };
+  if (hits.has("slow_decline")) return { key: "slow_decline", label: "阴跌", tone: "watch" };
+  if (hits.has("healthy_pullback")) return { key: "healthy_pullback", label: "回踩不破", tone: "opportunity" };
+  if (hits.has("sideways") || hits.has("medium_sideways")) {
+    return { key: "sideways", label: "横盘观察", tone: "neutral" };
+  }
+  return { key: "neutral", label: "中性观察", tone: "neutral" };
+};
 
 const resolveBasePermissionLayer = (evaluation: SilverSwingEvaluation): MarketPermissionLayer => {
   const hits = new Set(evaluation.hitRuleKeys);
@@ -372,7 +404,7 @@ export const buildSilverRealtimeInterpretation = ({
 }: {
   evaluation: SilverSwingEvaluation;
   pricePoints: MarketOhlcvPoint[];
-  primaryState: PrimaryStateInput;
+  primaryState: MarketPrimaryState;
   goldContext?: GoldContextInput | null;
   permissionHistory?: SilverPermissionHistoryPoint[];
   historicalReplay?: boolean;
