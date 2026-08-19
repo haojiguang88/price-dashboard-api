@@ -27,6 +27,25 @@ test("new temporary business database gains identity, migrations and required ta
     const expectedMigrationIds = getExpectedMigrationIds();
     assert.equal(new Set(expectedMigrationIds).size, expectedMigrationIds.length);
 
+    const db = await manager.getDb();
+    const silverCatchupTask = await db.get(
+      `SELECT task_type, enabled, schedule_time, schedule_days, config_json
+       FROM task_center_tasks
+       WHERE task_key = 'precious_metal_silver_catchup'`
+    );
+    assert.equal(silverCatchupTask?.task_type, 'precious_metal_market_update');
+    assert.equal(silverCatchupTask?.enabled, 1);
+    assert.equal(silverCatchupTask?.schedule_time, '21:10');
+    assert.equal(silverCatchupTask?.schedule_days, 'work_days');
+    assert.deepEqual(JSON.parse(silverCatchupTask?.config_json || '{}'), {
+      symbols: ['SGE_AGTD'],
+      freshness_symbols: ['SGE_AGTD'],
+      require_current_date: true,
+      retry_when_stale: true,
+      retry_after_minutes: 30,
+      task_timeout_minutes: 30
+    });
+
     const identity = await validateExistingBusinessDatabase(filename, { allowEmpty: false });
     assert.equal(identity.identity, "marked");
 

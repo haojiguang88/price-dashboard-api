@@ -9,6 +9,10 @@ import {
 } from '../services/workspaceCenterScopedServices';
 import { getWorkspaceCenterStatusCode } from '../services/workspaceCenterErrors';
 import { summarizeTaskRunPayload } from '../services/workspaceTaskCenterService';
+import {
+  assessPreciousMetalTaskFreshness,
+  formatPreciousMetalFreshness
+} from '../services/preciousMetalTaskFreshness';
 import { buildTaskChildEnv, resolveTaskPython } from '../utils/taskExecutionEnv';
 
 type TaskRow = {
@@ -133,7 +137,12 @@ function getScheduleDueTime(task: TaskRow, now = new Date()) {
 
 function hasRunInScheduleWindow(task: TaskRow, now = new Date()) {
   const todayKey = getDateKey(now);
-  if (lastScheduledRunByTaskWindow.get(task.task_key) === getScheduleWindowKey(task, now)) return true;
+  const config = parseConfig(task.config_json);
+  const retryableSkipped = task.last_status === 'skipped' && config.retry_when_stale === true;
+  if (
+    lastScheduledRunByTaskWindow.get(task.task_key) === getScheduleWindowKey(task, now)
+    && !retryableSkipped
+  ) return true;
   if (!task.last_run_at) return false;
   const lastRunAt = new Date(task.last_run_at);
   if (!Number.isFinite(lastRunAt.getTime())) return false;
@@ -141,8 +150,7 @@ function hasRunInScheduleWindow(task: TaskRow, now = new Date()) {
   const due = getScheduleDueTime(task, now);
   if (!due || lastRunAt < due) return false;
 
-  if (task.last_status === 'error') {
-    const config = parseConfig(task.config_json);
+  if (task.last_status === 'error' || retryableSkipped) {
     const retryAfterMinutes = Math.min(
       Math.max(Number(config.retry_after_minutes || config.retry_interval_minutes || 30), 10),
       180
@@ -516,9 +524,14 @@ async function runCommodityMetalsPriceUpdate(config: any, timeoutMs: number, tas
 }
 
 async function runPreciousMetalMarketUpdate(config: any, timeoutMs: number, taskName: string): Promise<BusinessTaskRunResult> {
-  const symbols = Array.isArray(config.symbols)
-    ? config.symbols.join(',')
-    : String(config.symbols || 'XAUUSD,SGE_AGTD,USDCNH');
+  const configuredSymbols = Array.isArray(config.symbols)
+    ? config.symbols
+    : String(config.symbols || 'XAUUSD,SGE_AGTD,USDCNH').split(',');
+  const symbolList = configuredSymbols
+    .map((value: unknown) => String(value || '').trim().toUpperCase())
+    .filter(Boolean);
+  const effectiveSymbolList = symbolList.length > 0 ? symbolList : ['XAUUSD', 'SGE_AGTD', 'USDCNH'];
+  const symbols = effectiveSymbolList.join(',');
   const args = [
     '--db',
     getDatabasePath(),
@@ -530,8 +543,35 @@ async function runPreciousMetalMarketUpdate(config: any, timeoutMs: number, task
   if (config.dry_run) args.push('--dry-run');
 
   const parsed = await runPythonJsonScript(config, 'precious_metal_market.py', args, '贵金属大盘行情更新失败', timeoutMs, taskName);
+  const configuredFreshnessSymbols = Array.isArray(config.freshness_symbols)
+    ? config.freshness_symbols
+    : typeof config.freshness_symbols === 'string'
+      ? config.freshness_symbols.split(',')
+      : effectiveSymbolList;
+  const freshness = assessPreciousMetalTaskFreshness({
+    expectedDate: getDateKey(),
+    requiredSymbols: configuredFreshnessSymbols,
+    latestDates: parsed.latest_dates
+  });
+  const freshnessText = formatPreciousMetalFreshness(freshness);
+  parsed.freshness = freshness;
+
+  if (config.require_current_date === true && !freshness.is_fresh) {
+    const retryAfterMinutes = Math.min(
+      Math.max(Number(config.retry_after_minutes || config.retry_interval_minutes || 30), 10),
+      180
+    );
+    parsed.status = 'skipped';
+    parsed.message = `${taskName}：来源尚未更新到 ${freshness.expected_date}（${freshnessText}），${retryAfterMinutes}分钟后自动重试`;
+    return {
+      message: parsed.message,
+      data: parsed,
+      status: 'skipped'
+    };
+  }
+
   return {
-    message: parsed.message || '贵金属大盘行情更新完成',
+    message: `${parsed.message || '贵金属大盘行情更新完成'}；数据日期：${freshnessText}`,
     data: parsed,
     status: getTaskCompletionStatus(parsed)
   };
@@ -783,7 +823,9 @@ async function executeTask(task: TaskRow, triggerType: 'manual' | 'schedule') {
        WHERE id = ?`,
       [finalStatus, update.message, now, now, task.id]
     );
-    if (triggerType === 'schedule') {
+    if (triggerType === 'schedule' && finalStatus === 'skipped' && config.retry_when_stale === true) {
+      lastScheduledRunByTaskWindow.delete(task.task_key);
+    } else if (triggerType === 'schedule') {
       lastScheduledRunByTaskWindow.set(task.task_key, getScheduleWindowKey(task));
     }
     return { success: true, message: update.message, data: update.data };

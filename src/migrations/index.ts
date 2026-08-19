@@ -7110,6 +7110,44 @@ const migrations: Migration[] = [
         );
       }
     }
+  },
+  {
+    id: '20260819_001_add_silver_market_late_refresh',
+    name: 'Add late silver market catch-up task',
+    sql: `
+      INSERT INTO task_center_tasks
+        (task_key, name, domain, workspace, task_type, enabled, schedule_time,
+         schedule_days, priority, config_json, last_status, last_message,
+         created_at, updated_at)
+      VALUES
+        (
+          'precious_metal_silver_catchup',
+          '白银大盘晚间补抓',
+          'market',
+          'business',
+          'precious_metal_market_update',
+          1,
+          '21:10',
+          'work_days',
+          35,
+          '{"symbols":["SGE_AGTD"],"freshness_symbols":["SGE_AGTD"],"require_current_date":true,"retry_when_stale":true,"retry_after_minutes":30,"task_timeout_minutes":30}',
+          'pending',
+          '晚间单独检查上金所白银；当天数据尚未发布时每30分钟重试',
+          CURRENT_TIMESTAMP,
+          CURRENT_TIMESTAMP
+        )
+      ON CONFLICT(task_key) DO UPDATE SET
+        name = excluded.name,
+        domain = excluded.domain,
+        workspace = excluded.workspace,
+        task_type = excluded.task_type,
+        enabled = excluded.enabled,
+        schedule_time = excluded.schedule_time,
+        schedule_days = excluded.schedule_days,
+        priority = excluded.priority,
+        config_json = excluded.config_json,
+        updated_at = CURRENT_TIMESTAMP;
+    `
   }
 
 ];
