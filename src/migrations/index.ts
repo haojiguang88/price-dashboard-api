@@ -7148,6 +7148,58 @@ const migrations: Migration[] = [
         config_json = excluded.config_json,
         updated_at = CURRENT_TIMESTAMP;
     `
+  },
+  {
+    id: '20260820_001_normalize_precious_metal_master_data',
+    name: 'Normalize precious metal objects without placeholder variants',
+    sql: `
+      INSERT OR IGNORE INTO categories
+        (name, is_archived, archived_at, created_at, updated_at)
+      VALUES
+        ('贵金属', 0, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+
+      UPDATE categories
+      SET is_archived = 0,
+          archived_at = NULL,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE name = '贵金属';
+
+      INSERT OR IGNORE INTO objects
+        (category_id, name, is_archived, archived_at, created_at, updated_at)
+      SELECT id, '黄金', 0, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+      FROM categories
+      WHERE name = '贵金属';
+
+      INSERT OR IGNORE INTO objects
+        (category_id, name, is_archived, archived_at, created_at, updated_at)
+      SELECT id, '白银', 0, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+      FROM categories
+      WHERE name = '贵金属';
+
+      INSERT OR IGNORE INTO objects
+        (category_id, name, is_archived, archived_at, created_at, updated_at)
+      SELECT id, '其它', 0, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+      FROM categories
+      WHERE name = '贵金属';
+
+      UPDATE objects
+      SET is_archived = CASE WHEN name IN ('黄金', '白银', '其它') THEN 0 ELSE 1 END,
+          archived_at = CASE
+            WHEN name IN ('黄金', '白银', '其它') THEN NULL
+            ELSE COALESCE(archived_at, CURRENT_TIMESTAMP)
+          END,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE category_id = (SELECT id FROM categories WHERE name = '贵金属');
+
+      DELETE FROM variants
+      WHERE object_id IN (
+        SELECT o.id
+        FROM objects o
+        JOIN categories c ON c.id = o.category_id
+        WHERE c.name = '贵金属'
+          AND o.name IN ('黄金', '白银', '其它')
+      );
+    `
   }
 
 ];

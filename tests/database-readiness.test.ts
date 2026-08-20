@@ -46,6 +46,27 @@ test("new temporary business database gains identity, migrations and required ta
       task_timeout_minutes: 30
     });
 
+    const preciousMetalObjects = await db.all(
+      `SELECT o.name
+       FROM objects o
+       JOIN categories c ON c.id = o.category_id
+       WHERE c.name = '贵金属'
+         AND COALESCE(c.is_archived, 0) = 0
+         AND COALESCE(o.is_archived, 0) = 0
+       ORDER BY CASE o.name WHEN '黄金' THEN 1 WHEN '白银' THEN 2 WHEN '其它' THEN 3 ELSE 4 END`
+    );
+    assert.deepEqual(preciousMetalObjects.map(item => item.name), ['黄金', '白银', '其它']);
+
+    const preciousMetalVariantCount = await db.get(
+      `SELECT COUNT(1) AS count
+       FROM variants v
+       JOIN objects o ON o.id = v.object_id
+       JOIN categories c ON c.id = o.category_id
+       WHERE c.name = '贵金属'
+         AND o.name IN ('黄金', '白银', '其它')`
+    );
+    assert.equal(Number(preciousMetalVariantCount?.count || 0), 0);
+
     const identity = await validateExistingBusinessDatabase(filename, { allowEmpty: false });
     assert.equal(identity.identity, "marked");
 
