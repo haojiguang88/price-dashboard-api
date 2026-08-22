@@ -454,7 +454,7 @@ const buildDisplayOnlyStep = (stepKey: string, evaluation: SilverSwingEvaluation
   return {
     active: repairActive,
     action_hint: symbol === "XAUUSD"
-      ? "展示节点：黄金反抽后重新靠近/站回 MA20 或 MA60，且没有继续创新低、波动开始收敛；只提升背景状态，不给黄金实体买入，也不直接放行白银/纪念币。"
+      ? "展示节点：黄金反抽后重新靠近/站回 MA20 或 MA60，且没有继续创新低、波动开始收敛；只提升黄金状态与性价比观察依据，不给实物或实时平台买入许可，也不直接放行白银/纪念币。"
       : "展示节点：反抽后重新靠近/站回 MA20 或 MA60，且没有继续创新低、波动开始收敛；只降低悲观，不直接放行买入。",
     note: `5日 ${formatSignedPercent(return5d)}，距MA20 ${formatSignedPercent(closeVsMa20)}，距MA60 ${formatSignedPercent(closeVsMa60)}，离5日低点 ${formatSignedPercent(recovery5d)}，10日振幅 ${formatSignedPercent(range10d)} / 20日振幅 ${formatSignedPercent(range20d)}。`
   };
@@ -798,63 +798,63 @@ const buildGoldAnchorBias = (evaluation: SilverSwingEvaluation) => {
     return {
       buy_permission: "background_only",
       sell_discipline: "no_execution",
-      position_hint: "黄金进入极端波动天气，只作贵金属大方向风险提示；白银和纪念币计划要提高纪律权重，不能单独触发买卖。",
-      summary: `黄金背景锚进入极端高波动。${metricText}。`
+      position_hint: "黄金自身处在极端高波动，性价比只进入观察，不追也不抄；作为背景时，白银和纪念币计划提高纪律权重。",
+      summary: `黄金观察进入极端高波动。${metricText}。`
     };
   }
   if (hits.has("falling_knife") || hits.has("fast_drop")) {
     return {
       buy_permission: "background_only",
       sell_discipline: "no_execution",
-      position_hint: "黄金快速下杀，说明贵金属背景转冷或事件冲击加剧；只提示背景风险，不直接给买入结论。",
-      summary: `黄金背景锚出现暴跌/飞刀。${metricText}。`
+      position_hint: "黄金自身处在快速下杀/飞刀阶段，跌幅不能直接解释为便宜；继续观察结构修复，同时把贵金属背景按转冷处理。",
+      summary: `黄金观察出现暴跌/飞刀。${metricText}。`
     };
   }
   if (hits.has("overheat_rise") || hits.has("fast_rise")) {
     return {
       buy_permission: "background_only",
       sell_discipline: "no_execution",
-      position_hint: "黄金短线过热，贵金属情绪偏热；白银/纪念币若同步过热，只提高防回吐权重，不单独触发卖出。",
-      summary: `黄金背景锚偏热。${metricText}。`
+      position_hint: "黄金自身短线偏热，当前性价比下降且不追；白银/纪念币若同步过热，只提高防回吐权重，不替它们触发卖出。",
+      summary: `黄金观察偏热。${metricText}。`
     };
   }
   if (hits.has("high_volatility")) {
     return {
       buy_permission: "background_only",
       sell_discipline: "no_execution",
-      position_hint: "黄金处在高波动背景，说明宏观/避险扰动还没冷却；只提高风控敏感度。",
-      summary: `黄金背景锚处于高波动。${metricText}。`
+      position_hint: "黄金自身仍处在高波动阶段，宏观/避险扰动还没冷却；性价比暂不升级，只提高黄金及贵金属背景的风控敏感度。",
+      summary: `黄金观察处于高波动。${metricText}。`
     };
   }
   if (hits.has("slow_decline")) {
     return {
       buy_permission: "background_only",
       sell_discipline: "no_execution",
-      position_hint: "黄金慢跌，贵金属背景偏冷；观察白银是否跟跌或出现背离。",
-      summary: `黄金背景锚阴跌。${metricText}。`
+      position_hint: "黄金自身处在慢跌阶段，不能因为跌得慢就判定有性价比；背景偏冷，并观察白银是否跟跌或出现背离。",
+      summary: `黄金观察处于阴跌。${metricText}。`
     };
   }
   if (hits.has("slow_rise")) {
     return {
       buy_permission: "background_only",
       sell_discipline: "no_execution",
-      position_hint: "黄金慢涨，贵金属背景偏暖；只能作为白银和纪念币大方向的加分项。",
-      summary: `黄金背景锚慢涨。${metricText}。`
+      position_hint: "黄金自身慢涨且结构偏暖，继续评估回撤空间和载体价差；对白银和纪念币只作大方向加分项。",
+      summary: `黄金观察处于慢涨。${metricText}。`
     };
   }
   if (hits.has("sideways") || hits.has("medium_sideways") || hits.has("healthy_pullback")) {
     return {
       buy_permission: "background_only",
       sell_discipline: "no_execution",
-      position_hint: "黄金结构相对平稳，只作为背景锚点观察，不单独触发动作。",
-      summary: `黄金背景锚进入观察区。${metricText}。`
+      position_hint: "黄金结构相对平稳，进入状态与性价比观察区；是否值得参与仍需结合回撤、实物或实时平台价差单独复核。",
+      summary: `黄金观察进入结构观察区。${metricText}。`
     };
   }
   return {
     buy_permission: "background_only",
     sell_discipline: "no_execution",
-    position_hint: "黄金未命中强信号，继续作为贵金属天气预报和白银/纪念币背景参考。",
-    summary: `黄金背景锚中性观察。${metricText}。`
+    position_hint: "黄金未命中强信号，继续独立观察状态与性价比；同时作为白银和纪念币的背景参考。",
+    summary: `黄金处于中性观察。${metricText}。`
   };
 };
 

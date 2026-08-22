@@ -11,6 +11,7 @@ import {
 } from "../services/priceImportService";
 import { assessPriceMove } from "../services/priceAnomalyDetection";
 import { buildQualityAlertRecheckMetadata } from "../services/priceQualityAlertService";
+import { calculatePriceWorkbenchCoinSilverPremium } from "../services/coinSilverPremiumService";
 
 const router = express.Router();
 
@@ -1441,6 +1442,32 @@ router.get("/price-records", async (req, res) => {
       const latest = await db.get(`${baseSelectSql} ORDER BY pr.date DESC, pr.id DESC LIMIT 1`, whereParams);
       const high = await db.get(`${baseSelectSql} ORDER BY CAST(pr.price AS REAL) DESC, pr.date DESC, pr.id DESC LIMIT 1`, whereParams);
       const low = await db.get(`${baseSelectSql} ORDER BY CAST(pr.price AS REAL) ASC, pr.date DESC, pr.id DESC LIMIT 1`, whereParams);
+      let coinSilverPremium = null;
+      if (String(category) === "纪念币") {
+        const localSilverBuyback = await db.get<{
+          price: number;
+          date: string;
+          source: string | null;
+        }>(
+          `SELECT CAST(price AS REAL) AS price, date, source
+           FROM price_records
+           WHERE category = '贵金属'
+             AND object_name = '白银'
+             AND COALESCE(variant, '') = ''
+             AND CAST(price AS REAL) > 0
+           ORDER BY date DESC, id DESC
+           LIMIT 1`
+        );
+        coinSilverPremium = calculatePriceWorkbenchCoinSilverPremium({
+          category_name: String(category),
+          object_name: String(object_name),
+          variant_name: variant === undefined ? "" : String(variant),
+          product_price: latest?.price,
+          silver_buyback_price_per_gram: localSilverBuyback?.price,
+          silver_buyback_date: localSilverBuyback?.date,
+          silver_buyback_source: localSilverBuyback?.source
+        });
+      }
 
       const chartPeriod = String(req.query.chart_period || "30");
       const listWhere = [...where];
@@ -1530,7 +1557,8 @@ router.get("/price-records", async (req, res) => {
           high_price: high?.price ?? null,
           high_date: high?.date ?? null,
           low_price: low?.price ?? null,
-          low_date: low?.date ?? null
+          low_date: low?.date ?? null,
+          coin_silver_premium: coinSilverPremium
         },
         chart_data: chartRecords
       });

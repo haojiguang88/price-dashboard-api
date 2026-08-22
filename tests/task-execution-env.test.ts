@@ -20,6 +20,21 @@ test("task python ignores config.python and prefers TASK_CENTER_PYTHON", () => {
   }
 });
 
+test("task python defaults to the project task virtualenv instead of PATH python3", () => {
+  const previousTaskPython = process.env.TASK_CENTER_PYTHON;
+  const previousPythonBin = process.env.PYTHON_BIN;
+  try {
+    delete process.env.TASK_CENTER_PYTHON;
+    delete process.env.PYTHON_BIN;
+    assert.equal(resolveTaskPython(), ".venv/bin/python");
+  } finally {
+    if (previousTaskPython === undefined) delete process.env.TASK_CENTER_PYTHON;
+    else process.env.TASK_CENTER_PYTHON = previousTaskPython;
+    if (previousPythonBin === undefined) delete process.env.PYTHON_BIN;
+    else process.env.PYTHON_BIN = previousPythonBin;
+  }
+});
+
 test("task child env keeps allowlisted keys and drops secrets outside the list", () => {
   const env = buildTaskChildEnv({
     PATH: "/usr/bin",

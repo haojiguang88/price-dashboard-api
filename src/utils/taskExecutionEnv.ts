@@ -1,4 +1,4 @@
-const DEFAULT_TASK_PYTHON = "python3";
+export const DEFAULT_TASK_PYTHON = ".venv/bin/python";
 
 const TASK_CHILD_ENV_ALLOWLIST = new Set([
   "PATH",

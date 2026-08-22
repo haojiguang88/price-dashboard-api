@@ -10,7 +10,7 @@
     "test": "tsx --test tests/*.test.ts",
     "auth:hash-password": "tsx scripts/generate-auth-password-hash.ts",
     "verify:business-db": "tsx scripts/verify-business-database.ts",
-    "setup:business-tasks": "sh -c '${TASK_CENTER_PYTHON:-python3} -m pip install -r requirements-business-tasks.txt'",
+    "setup:business-tasks": "sh -c 'if [ -z \"${TASK_CENTER_PYTHON:-}\" ] && [ ! -x .venv/bin/python ]; then python3 -m venv .venv; fi; task_python=${TASK_CENTER_PYTHON:-.venv/bin/python}; \"$task_python\" -m pip install -r requirements-business-tasks.txt'",
     "sync:online-prices": "python3 scripts/business/sync_online_price_records.py",
     "test:silver-assist": "tsx scripts/business/verify_silver_assist_evaluator.ts",
     "test:precious-metal-assist": "tsx scripts/business/verify_precious_metal_assist_evaluator.ts",
@@ -18,7 +18,7 @@
     "report:precious-metal-cycle-context": "tsx scripts/business/precious_metal_cycle_context.ts",
     "start": "npm run start:business",
     "start:business": "sh -c 'NODE_ENV=${NODE_ENV:-production} PORT=${PORT:-3001} node dist/index.js'",
-    "restart:local": "sh -c 'port=${PORT:-3001}; pid=$(lsof -tiTCP:$port -sTCP:LISTEN || true); if [ -n \"$pid\" ]; then kill $pid; fi; NODE_ENV=development DEPLOYMENT_MODE=local HOST=127.0.0.1 npm run start:business'"
+    "restart:local": "sh -c 'port=${PORT:-3001}; pid=$(lsof -tiTCP:$port -sTCP:LISTEN || true); if [ -n \"$pid\" ]; then kill $pid; fi; NODE_ENV=development DEPLOYMENT_MODE=local HOST=127.0.0.1 TASK_CENTER_PYTHON=${TASK_CENTER_PYTHON:-$PWD/.venv/bin/python} npm run start:business'"
   },
   "keywords": [
     "price",

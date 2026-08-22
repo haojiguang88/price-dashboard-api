@@ -1,6 +1,7 @@
 import { execFile } from "child_process";
 import path from "path";
 import getDb, { getDatabasePath } from "../config/database";
+import { buildTaskChildEnv, resolveTaskPython } from "../utils/taskExecutionEnv";
 
 const SILVER_ANCHOR = {
   symbol: "SGE_AGTD",
@@ -8,7 +9,6 @@ const SILVER_ANCHOR = {
   label: "白银延期 Ag(T+D)"
 };
 
-const DEFAULT_TASK_PYTHON = "python3";
 const DEFAULT_REFRESH_TIMEOUT_MS = 5 * 60 * 1000;
 const STALE_CHECK_MS = 4 * 60 * 60 * 1000;
 
@@ -298,11 +298,7 @@ const buildSilverTrendSuggestion = (rows: AnchorRow[]): SilverTrendSuggestion =>
   };
 };
 
-const getTaskPython = () => (
-  process.env.TASK_CENTER_PYTHON ||
-  process.env.PYTHON_BIN ||
-  DEFAULT_TASK_PYTHON
-);
+const getTaskPython = () => resolveTaskPython();
 
 const shouldRefresh = (evidence: SilverAnchorEvidence, mode: RefreshMode) => {
   if (mode === "force") return true;
@@ -373,7 +369,7 @@ const runMarketAnchorRefresh = async (timeoutMs = DEFAULT_REFRESH_TIMEOUT_MS): P
   return new Promise((resolve) => {
     execFile(pythonBin, args, {
       cwd: path.join(__dirname, "../.."),
-      env: process.env,
+      env: buildTaskChildEnv(),
       timeout: timeoutMs,
       maxBuffer: 1024 * 1024 * 10
     }, async (error, stdout, stderr) => {

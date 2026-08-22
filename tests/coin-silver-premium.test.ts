@@ -1,11 +1,73 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  calculatePriceWorkbenchCoinSilverPremium,
   calculateHistoricalCoinSilverPremiumSnapshot,
   calculateCoinSilverPremiumSnapshot,
   inferCommemorativeCoinSilverWeight
 } from "../src/services/coinSilverPremiumService";
 import type { SilverAnchorEvidence } from "../src/services/marketAnchorService";
+
+test("商品价格工作台按明确克重和本地白银回收价计算纪念币溢价", () => {
+  const result = calculatePriceWorkbenchCoinSilverPremium({
+    category_name: "纪念币",
+    object_name: "马年银币",
+    variant_name: "15g小马",
+    product_price: 300,
+    silver_buyback_price_per_gram: 14,
+    silver_buyback_date: "2026-08-21",
+    silver_buyback_source: "本地白银回收价"
+  });
+
+  assert.equal(result?.status, "calculated");
+  assert.equal(result?.silver_grams, 15);
+  assert.equal(result?.silver_content_value, 210);
+  assert.equal(result?.premium_percent, 42.9);
+});
+
+test("商品价格工作台对未标明克重的纪念币统一按31克计算", () => {
+  const result = calculatePriceWorkbenchCoinSilverPremium({
+    category_name: "纪念币",
+    object_name: "抗战80周年",
+    variant_name: "普通封装",
+    product_price: 620,
+    silver_buyback_price_per_gram: 10,
+    silver_buyback_date: "2026-08-21"
+  });
+
+  assert.equal(result?.status, "calculated");
+  assert.equal(result?.silver_grams, 31);
+  assert.equal(result?.silver_content_value, 310);
+  assert.equal(result?.premium_percent, 100);
+  assert.match(result?.weight_basis || "", /默认 31g/);
+});
+
+test("商品价格工作台不计算马年银币三同套装的溢价", () => {
+  const result = calculatePriceWorkbenchCoinSilverPremium({
+    category_name: "纪念币",
+    object_name: "马年银币",
+    variant_name: "三同套装",
+    product_price: 1800,
+    silver_buyback_price_per_gram: 14,
+    silver_buyback_date: "2026-08-21"
+  });
+
+  assert.equal(result?.status, "excluded");
+  assert.equal(result?.premium_percent, null);
+  assert.equal(result?.premium_label, "不计算");
+});
+
+test("商品价格工作台不为非纪念币生成溢价结果", () => {
+  const result = calculatePriceWorkbenchCoinSilverPremium({
+    category_name: "泡泡玛特",
+    object_name: "哭娃一代",
+    product_price: 300,
+    silver_buyback_price_per_gram: 14,
+    silver_buyback_date: "2026-08-21"
+  });
+
+  assert.equal(result, null);
+});
 
 const buildAnchor = (overrides: Partial<SilverAnchorEvidence> = {}): SilverAnchorEvidence => ({
   symbol: "SGE_AGTD",

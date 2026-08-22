@@ -281,7 +281,7 @@ type BusinessTaskRunResult = {
 };
 
 function formatPythonTaskError(errorOutput: string, fallbackMessage: string, pythonBin: string) {
-  const missingModule = errorOutput.match(/ModuleNotFoundError:\s+No module named ['"]([^'"]+)['"]/);
+  const missingModule = errorOutput.match(/(?:ModuleNotFoundError:\s+)?No module named ['"]([^'"]+)['"]/);
   if (missingModule?.[1]) {
     return `任务中心 Python 依赖缺失：${missingModule[1]}。当前 Python：${pythonBin}。请先设置 TASK_CENTER_PYTHON 指向任务运行时 Python，并执行 npm run setup:business-tasks。`;
   }
@@ -369,7 +369,11 @@ async function runPythonJsonScript(
     throw new Error(`${fallbackMessage}：Python脚本未返回有效JSON${errorOutput ? `；输出：${errorOutput}` : ''}`);
   }
   if (parsed.success === false) {
-    throw new Error(parsed.message || stderr || fallbackMessage);
+    throw new Error(formatPythonTaskError(
+      String(parsed.message || stderr || ""),
+      fallbackMessage,
+      pythonBin
+    ));
   }
   return parsed;
 }

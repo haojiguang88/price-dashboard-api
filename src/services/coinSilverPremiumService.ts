@@ -87,6 +87,23 @@ export type HistoricalCoinSilverPremiumSnapshot = {
   calculation_note: string;
 };
 
+export type PriceWorkbenchCoinSilverPremiumSnapshot = {
+  version: "workbench-local-buyback-v1";
+  status: "calculated" | "excluded" | "unavailable";
+  product_price: number | null;
+  silver_grams: number | null;
+  weight_basis: string;
+  silver_buyback_price_per_gram: number | null;
+  silver_buyback_date: string;
+  silver_buyback_source: string;
+  silver_content_value: number | null;
+  premium_amount: number | null;
+  premium_percent: number | null;
+  premium_band: CoinSilverPremiumBand | null;
+  premium_label: string;
+  note: string;
+};
+
 type OriginalPriceRow = {
   id: number;
   object_name?: string | null;
@@ -204,6 +221,92 @@ export const inferCommemorativeCoinSilverWeight = (
   return {
     grams: null,
     basis: "本地记录未识别含银重量，需要手动填写"
+  };
+};
+
+export const calculatePriceWorkbenchCoinSilverPremium = (input: {
+  category_name?: string | null;
+  object_name?: string | null;
+  variant_name?: string | null;
+  product_price?: number | null;
+  silver_buyback_price_per_gram?: number | null;
+  silver_buyback_date?: string | null;
+  silver_buyback_source?: string | null;
+}): PriceWorkbenchCoinSilverPremiumSnapshot | null => {
+  const categoryName = normalizeText(input.category_name);
+  if (categoryName !== "纪念币") return null;
+
+  const objectName = normalizeText(input.object_name);
+  const variantName = normalizeText(input.variant_name);
+  const productPrice = positiveNumber(input.product_price);
+  const silverBuybackPrice = positiveNumber(input.silver_buyback_price_per_gram);
+  const silverBuybackDate = normalizeText(input.silver_buyback_date).slice(0, 10);
+  const silverBuybackSource = normalizeText(input.silver_buyback_source);
+
+  if (objectName === "马年银币" && variantName === "三同套装") {
+    return {
+      version: "workbench-local-buyback-v1",
+      status: "excluded",
+      product_price: productPrice,
+      silver_grams: null,
+      weight_basis: "三同套装不使用统一克重口径",
+      silver_buyback_price_per_gram: silverBuybackPrice,
+      silver_buyback_date: silverBuybackDate,
+      silver_buyback_source: silverBuybackSource,
+      silver_content_value: null,
+      premium_amount: null,
+      premium_percent: null,
+      premium_band: null,
+      premium_label: "不计算",
+      note: "马年银币三同套装按约定不计算白银回收价溢价率。"
+    };
+  }
+
+  const inferredWeight = inferCommemorativeCoinSilverWeight(objectName, variantName);
+  const silverGrams = inferredWeight.grams ?? 31;
+  const weightBasis = inferredWeight.grams !== null
+    ? inferredWeight.basis
+    : "名称未标明具体克重，按商品价格工作台默认 31g 计算";
+
+  if (productPrice === null || silverBuybackPrice === null || !silverBuybackDate) {
+    return {
+      version: "workbench-local-buyback-v1",
+      status: "unavailable",
+      product_price: productPrice,
+      silver_grams: silverGrams,
+      weight_basis: weightBasis,
+      silver_buyback_price_per_gram: silverBuybackPrice,
+      silver_buyback_date: silverBuybackDate,
+      silver_buyback_source: silverBuybackSource,
+      silver_content_value: null,
+      premium_amount: null,
+      premium_percent: null,
+      premium_band: null,
+      premium_label: "暂无法计算",
+      note: productPrice === null ? "当前商品价格缺失。" : "本地白银回收价缺失。"
+    };
+  }
+
+  const silverContentValue = silverGrams * silverBuybackPrice;
+  const premiumAmount = productPrice - silverContentValue;
+  const premiumPercent = (productPrice / silverContentValue - 1) * 100;
+  const premium = getPremiumBand(premiumPercent);
+
+  return {
+    version: "workbench-local-buyback-v1",
+    status: "calculated",
+    product_price: round(productPrice),
+    silver_grams: round(silverGrams, 3),
+    weight_basis: weightBasis,
+    silver_buyback_price_per_gram: round(silverBuybackPrice, 3),
+    silver_buyback_date: silverBuybackDate,
+    silver_buyback_source: silverBuybackSource,
+    silver_content_value: round(silverContentValue),
+    premium_amount: round(premiumAmount),
+    premium_percent: round(premiumPercent, 1),
+    premium_band: premium.band,
+    premium_label: premium.label,
+    note: "按最新商品价与本地最新白银回收价计算，只作商品价格概览。"
   };
 };
 

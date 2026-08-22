@@ -1,5 +1,5 @@
 # Lightweight dependencies for business task-center Python scripts.
 # Install with:
-#   python3 -m pip install -r requirements-business-tasks.txt
+#   .venv/bin/python -m pip install -r requirements-business-tasks.txt
 requests>=2.32,<3
 tushare>=1.4,<2
