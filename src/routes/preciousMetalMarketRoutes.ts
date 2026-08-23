@@ -18,6 +18,8 @@ import {
 } from "../services/marketRealtimeInterpretation";
 import {
   buildAnnualEntryOpportunityReport,
+  buildGoldAnnualObservationReport,
+  parseAnnualOpportunityAsset,
   parseAnnualEntryOpportunityYear
 } from "../services/annualEntryOpportunityService";
 
@@ -1466,8 +1468,10 @@ router.get("/precious-metal-market/current-signal", async (req, res) => {
 
 router.get("/precious-metal-market/annual-entry-opportunities", async (req, res) => {
   let year: number;
+  let asset: ReturnType<typeof parseAnnualOpportunityAsset>;
   try {
     year = parseAnnualEntryOpportunityYear(req.query.year);
+    asset = parseAnnualOpportunityAsset(req.query.asset);
   } catch (error) {
     res.status(400).json({
       success: false,
@@ -1520,23 +1524,29 @@ router.get("/precious-metal-market/annual-entry-opportunities", async (req, res)
       ) as Promise<MarketAssistRuleInput[]>
     ]);
 
-    const report = buildAnnualEntryOpportunityReport({
-      year,
-      silverPoints,
-      silverRules,
-      goldPoints,
-      goldRules
-    });
+    const report = asset === "gold"
+      ? buildGoldAnnualObservationReport({ year, goldPoints, goldRules })
+      : buildAnnualEntryOpportunityReport({
+        year,
+        silverPoints,
+        silverRules,
+        goldPoints,
+        goldRules
+      });
+    const symbolConfig = asset === "gold" ? goldConfig : silverConfig;
+    const ruleGroup = asset === "gold" ? "precious_metal_plan" : "silver_swing_plan";
 
     res.json({
       success: true,
       data: {
         ...report,
-        symbol: silverConfig,
-        evaluator_version: getEvaluatorVersion(silverConfig.symbol, "silver_swing_plan"),
+        symbol: symbolConfig,
+        evaluator_version: getEvaluatorVersion(symbolConfig.symbol, ruleGroup),
         mode: "current_rule_historical_replay",
         uses_future_data: false,
-        note: "P2/P3 归为小仓，P4 归为正式入场；逐交易日只使用当日及以前行情，黄金背景只能降级，不能授予入场。"
+        note: asset === "gold"
+          ? "黄金只回放状态与性价比观察：牛市健康回踩与深度回撤修复分别判断，后续破坏结构会记录撤销轨迹；性价比改善不是买入许可，进入候选池后仍需复核实物或实时平台价差、费用与流动性。逐交易日只使用当日及以前行情。"
+          : "P2/P3 归为小仓，P4 归为正式入场；逐交易日只使用当日及以前行情，黄金背景只能降级，不能授予入场。"
       }
     });
   } catch (error) {
