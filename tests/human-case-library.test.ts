@@ -25,6 +25,18 @@ test("normalizes a real case while keeping action quality separate from outcome"
     outcomeType: "sold_early",
     evidenceRole: "positive",
     selfResponse: "以后仍按计划退出，不用最高价倒推当时决策。",
+    pricingAnalysis: {
+      basePriceLabel: "普通品",
+      basePrice: 1000,
+      observedPriceLabel: "收购报价",
+      observedPriceLow: 17000,
+      priceSignalType: "bid",
+      conditionStack: ["首日", "70分", "首日"],
+      buyerBreadth: "single",
+      keyBuyerDependency: "high",
+      exitLiquidity: "thin",
+      verificationNote: "尚未确认成交"
+    },
     patternLinks: [
       { patternId: 2, role: "secondary" },
       { patternId: 1, role: "primary" },
@@ -35,6 +47,8 @@ test("normalizes a real case while keeping action quality separate from outcome"
   assert.equal(input.actionQuality, "good");
   assert.equal(input.outcomeType, "sold_early");
   assert.equal(input.evidenceRole, "positive");
+  assert.equal(input.pricingAnalysis.observedPriceHigh, 17000);
+  assert.deepEqual(input.pricingAnalysis.conditionStack, ["首日", "70分"]);
   assert.deepEqual(input.patternLinks, [
     { patternId: 2, role: "secondary" },
     { patternId: 1, role: "primary" }
@@ -55,6 +69,17 @@ test("rejects invalid evidence dates and invalid pattern axes", () => {
     axis: "market",
     category: "human_bias"
   }), /市场轴只能使用市场结构分类/);
+
+  assert.throws(() => normalizeHumanCaseInput({
+    title: "价格区间错误",
+    background: "背景",
+    actionTaken: "动作",
+    selfResponse: "我的动作",
+    pricingAnalysis: {
+      observedPriceLow: 17000,
+      observedPriceHigh: 1000
+    }
+  }), /观察价上限不能低于下限/);
 });
 
 test("normalizes manual maturity and defaults case evidence to pending judgment", () => {
@@ -340,7 +365,7 @@ test("merges the Android miss into one second-order supply-chain case", async ()
       [behaviorCase.id]
     );
     assert.deepEqual(links, [
-      { name: "推演链条过短", role: "primary" },
+      { name: "研究与推演停在表层", role: "primary" },
       { name: "产能挤占与二三阶传导", role: "secondary" },
       { name: "恐惧与过度防守", role: "secondary" }
     ]);
@@ -369,6 +394,102 @@ test("merges the Android miss into one second-order supply-chain case", async ()
     );
     assert.equal(Number(duplicateCheck.review_total), 1);
     assert.equal(Number(duplicateCheck.case_total), 1);
+  } finally {
+    await manager.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("seeds collectible scarcity cases with honest quote and liquidity boundaries", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "collectible-pricing-case-"));
+  const filename = path.join(directory, "human-case.db");
+  const manager = new DatabaseManager({
+    filename,
+    allowCreate: true,
+    initialize: initializeBusinessBaseSchema
+  });
+
+  try {
+    await manager.getDb();
+    await runMigrations(filename);
+    const db = await manager.getDb();
+    const luckyCase = await db.get(
+      `SELECT id, action_quality, outcome_type, evidence_role, pricing_analysis_json,
+              self_response, applicability_boundary
+       FROM behavior_cases
+       WHERE title = ? AND is_deleted = 0`,
+      ["工商25龙：首日+70分+如意王的17倍收购观察"]
+    );
+    assert.ok(luckyCase);
+    assert.equal(luckyCase.action_quality, "mixed");
+    assert.equal(luckyCase.outcome_type, "ongoing");
+    assert.equal(luckyCase.evidence_role, "boundary");
+    assert.match(luckyCase.self_response, /组合稀缺/);
+    assert.match(luckyCase.applicability_boundary, /小众收藏品/);
+
+    const luckyPricing = JSON.parse(luckyCase.pricing_analysis_json);
+    assert.equal(luckyPricing.basePrice, 1000);
+    assert.equal(luckyPricing.observedPriceLow, 17000);
+    assert.equal(luckyPricing.priceSignalType, "bid");
+    assert.equal(luckyPricing.buyerBreadth, "single");
+    assert.deepEqual(luckyPricing.conditionStack, ["首日", "评级70分", "如意王"]);
+
+    const luckyLinks = await db.all(
+      `SELECT p.name, l.role
+       FROM behavior_case_pattern_links l
+       JOIN behavior_patterns p ON p.id = l.pattern_id
+       WHERE l.case_id = ?
+       ORDER BY CASE l.role WHEN 'primary' THEN 0 ELSE 1 END, p.name`,
+      [luckyCase.id]
+    );
+    assert.deepEqual(luckyLinks, [
+      { name: "研究与推演停在表层", role: "primary" },
+      { name: "组合稀缺与圈层定价", role: "secondary" },
+      { name: "资金拉盘", role: "secondary" }
+    ]);
+
+    const facaiCase = await db.get(
+      `SELECT id, title, action_quality, pricing_analysis_json
+       FROM behavior_cases
+       WHERE project_name = '发财龙（PMG网红专标）' AND is_deleted = 0`
+    );
+    assert.ok(facaiCase);
+    assert.match(facaiCase.title, /运营制造稀缺/);
+    assert.equal(facaiCase.action_quality, "good");
+    const facaiPricing = JSON.parse(facaiCase.pricing_analysis_json);
+    assert.equal(facaiPricing.basePrice, 670);
+    assert.equal(facaiPricing.observedPriceLow, 6000);
+    assert.equal(facaiPricing.observedPriceHigh, 7000);
+
+    const facaiLinks = await db.all(
+      `SELECT p.name, p.category, l.role
+       FROM behavior_case_pattern_links l
+       JOIN behavior_patterns p ON p.id = l.pattern_id
+       WHERE l.case_id = ?
+       ORDER BY CASE l.role WHEN 'primary' THEN 0 ELSE 1 END, p.name`,
+      [facaiCase.id]
+    );
+    assert.deepEqual(facaiLinks, [
+      { name: "主动放弃与纪律优先", category: "positive_discipline", role: "primary" },
+      { name: "资金拉盘", category: "market_structure", role: "secondary" },
+      { name: "运营制造稀缺", category: "market_structure", role: "secondary" }
+    ]);
+
+    await db.run(
+      "DELETE FROM migrations WHERE id = ?",
+      ["20260822_001_add_case_pricing_analysis_and_collectible_samples"]
+    );
+    await runMigrations(filename);
+    const duplicateCheck = await db.get(
+      `SELECT
+         (SELECT COUNT(*) FROM behavior_cases
+          WHERE title = ? AND is_deleted = 0) AS case_total,
+         (SELECT COUNT(*) FROM behavior_patterns
+          WHERE name = '组合稀缺与圈层定价' AND is_deleted = 0) AS pattern_total`,
+      ["工商25龙：首日+70分+如意王的17倍收购观察"]
+    );
+    assert.equal(Number(duplicateCheck.case_total), 1);
+    assert.equal(Number(duplicateCheck.pattern_total), 1);
   } finally {
     await manager.close();
     await rm(directory, { recursive: true, force: true });

@@ -33,6 +33,28 @@ export const HUMAN_CASE_EVIDENCE_ROLES = [
   "boundary",
   "neutral"
 ] as const;
+export const HUMAN_CASE_PRICE_SIGNAL_TYPES = [
+  "bid",
+  "ask",
+  "transaction",
+  "market_reference",
+  "unconfirmed"
+] as const;
+export const HUMAN_CASE_BUYER_BREADTHS = [
+  "unknown",
+  "single",
+  "concentrated",
+  "multiple",
+  "broad"
+] as const;
+export const HUMAN_CASE_DEPENDENCY_LEVELS = ["unknown", "high", "medium", "low"] as const;
+export const HUMAN_CASE_EXIT_LIQUIDITIES = [
+  "unknown",
+  "thin",
+  "limited",
+  "normal",
+  "deep"
+] as const;
 
 type PatternAxis = typeof HUMAN_CASE_PATTERN_AXES[number];
 type PatternCategory = typeof HUMAN_CASE_PATTERN_CATEGORIES[number];
@@ -43,6 +65,10 @@ type OutcomeType = typeof HUMAN_CASE_OUTCOME_TYPES[number];
 type PatternRole = typeof HUMAN_CASE_PATTERN_ROLES[number];
 type PatternMaturity = typeof HUMAN_CASE_PATTERN_MATURITIES[number];
 type EvidenceRole = typeof HUMAN_CASE_EVIDENCE_ROLES[number];
+type PriceSignalType = typeof HUMAN_CASE_PRICE_SIGNAL_TYPES[number];
+type BuyerBreadth = typeof HUMAN_CASE_BUYER_BREADTHS[number];
+type DependencyLevel = typeof HUMAN_CASE_DEPENDENCY_LEVELS[number];
+type ExitLiquidity = typeof HUMAN_CASE_EXIT_LIQUIDITIES[number];
 
 const MAX_LIST_ITEMS = 20;
 
@@ -106,6 +132,104 @@ const normalizeOptionalId = (value: unknown, label: string) => {
   return normalized;
 };
 
+const normalizeOptionalPositiveNumber = (value: unknown, label: string) => {
+  if (value === null || value === undefined || String(value).trim() === "") return null;
+  const normalized = Number(value);
+  if (!Number.isFinite(normalized) || normalized <= 0 || normalized > 1_000_000_000_000) {
+    throw new Error(`${label}必须是大于 0 的有效数字`);
+  }
+  return Math.round(normalized * 100) / 100;
+};
+
+export interface HumanCasePricingAnalysisInput {
+  basePriceLabel: string;
+  basePrice: number | null;
+  observedPriceLabel: string;
+  observedPriceLow: number | null;
+  observedPriceHigh: number | null;
+  priceSignalType: PriceSignalType;
+  conditionStack: string[];
+  buyerBreadth: BuyerBreadth;
+  keyBuyerDependency: DependencyLevel;
+  exitLiquidity: ExitLiquidity;
+  verificationNote: string;
+}
+
+const normalizeHumanCasePricingAnalysis = (value: unknown): HumanCasePricingAnalysisInput => {
+  const input = value && typeof value === "object" ? value as Record<string, unknown> : {};
+  const basePrice = normalizeOptionalPositiveNumber(
+    input.base_price ?? input.basePrice,
+    "基础品参考价"
+  );
+  const observedPriceLow = normalizeOptionalPositiveNumber(
+    input.observed_price_low ?? input.observedPriceLow,
+    "观察价下限"
+  );
+  let observedPriceHigh = normalizeOptionalPositiveNumber(
+    input.observed_price_high ?? input.observedPriceHigh,
+    "观察价上限"
+  );
+  if (observedPriceLow !== null && observedPriceHigh === null) {
+    observedPriceHigh = observedPriceLow;
+  }
+  if (
+    observedPriceLow !== null
+    && observedPriceHigh !== null
+    && observedPriceHigh < observedPriceLow
+  ) {
+    throw new Error("观察价上限不能低于下限");
+  }
+
+  return {
+    basePriceLabel: normalizeText(
+      input.base_price_label ?? input.basePriceLabel,
+      "基础价口径",
+      160
+    ),
+    basePrice,
+    observedPriceLabel: normalizeText(
+      input.observed_price_label ?? input.observedPriceLabel,
+      "观察价口径",
+      160
+    ),
+    observedPriceLow,
+    observedPriceHigh,
+    priceSignalType: normalizeEnum(
+      input.price_signal_type ?? input.priceSignalType,
+      HUMAN_CASE_PRICE_SIGNAL_TYPES,
+      "价格信号性质",
+      "unconfirmed"
+    ),
+    conditionStack: normalizeTextList(
+      input.condition_stack ?? input.conditionStack,
+      "叠加条件"
+    ),
+    buyerBreadth: normalizeEnum(
+      input.buyer_breadth ?? input.buyerBreadth,
+      HUMAN_CASE_BUYER_BREADTHS,
+      "买盘宽度",
+      "unknown"
+    ),
+    keyBuyerDependency: normalizeEnum(
+      input.key_buyer_dependency ?? input.keyBuyerDependency,
+      HUMAN_CASE_DEPENDENCY_LEVELS,
+      "关键买家依赖",
+      "unknown"
+    ),
+    exitLiquidity: normalizeEnum(
+      input.exit_liquidity ?? input.exitLiquidity,
+      HUMAN_CASE_EXIT_LIQUIDITIES,
+      "退出深度",
+      "unknown"
+    ),
+    verificationNote: normalizeText(
+      input.verification_note ?? input.verificationNote,
+      "价格验证备注",
+      2000
+    )
+  };
+};
+
 export interface HumanCasePatternInput {
   name: string;
   axis: PatternAxis;
@@ -154,6 +278,7 @@ export interface HumanCaseInput {
   sourceType: string;
   sourceId: string;
   note: string;
+  pricingAnalysis: HumanCasePricingAnalysisInput;
   patternLinks: HumanCasePatternLinkInput[];
 }
 
@@ -303,6 +428,9 @@ export const normalizeHumanCaseInput = (value: unknown): HumanCaseInput => {
     sourceType,
     sourceId,
     note: normalizeText(input.note, "备注", 5000),
+    pricingAnalysis: normalizeHumanCasePricingAnalysis(
+      input.pricing_analysis ?? input.pricingAnalysis
+    ),
     patternLinks: deduplicatedLinks
   };
 };

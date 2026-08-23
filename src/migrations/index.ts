@@ -7200,6 +7200,407 @@ const migrations: Migration[] = [
           AND o.name IN ('黄金', '白银', '其它')
       );
     `
+  },
+  {
+    id: '20260822_001_add_case_pricing_analysis_and_collectible_samples',
+    name: 'Add case price formation analysis and collectible scarcity samples',
+    run: async (db: any) => {
+      if (!(await migrationTableExists(db, 'behavior_cases'))) return;
+      if (!(await migrationTableExists(db, 'behavior_patterns'))) return;
+      if (!(await migrationTableExists(db, 'behavior_case_pattern_links'))) return;
+
+      await ensureMigrationColumn(
+        db,
+        'behavior_cases',
+        'pricing_analysis_json',
+        "TEXT NOT NULL DEFAULT '{}'"
+      );
+
+      const oldResearchPattern = await dbGet<{ id: number }>(
+        db,
+        `SELECT id FROM behavior_patterns
+         WHERE axis = 'human' AND name = '推演链条过短' AND is_deleted = 0
+         ORDER BY id LIMIT 1`
+      );
+      const existingResearchPattern = await dbGet<{ id: number }>(
+        db,
+        `SELECT id FROM behavior_patterns
+         WHERE axis = 'human' AND name = '研究与推演停在表层' AND is_deleted = 0
+         ORDER BY id LIMIT 1`
+      );
+
+      let researchPatternId = existingResearchPattern?.id || oldResearchPattern?.id;
+      if (oldResearchPattern && existingResearchPattern && oldResearchPattern.id !== existingResearchPattern.id) {
+        await dbRun(
+          db,
+          `DELETE FROM behavior_case_pattern_links
+           WHERE pattern_id = ?
+             AND EXISTS (
+               SELECT 1 FROM behavior_case_pattern_links canonical
+               WHERE canonical.case_id = behavior_case_pattern_links.case_id
+                 AND canonical.pattern_id = ?
+             )`,
+          [oldResearchPattern.id, existingResearchPattern.id]
+        );
+        await dbRun(
+          db,
+          `UPDATE behavior_case_pattern_links
+           SET pattern_id = ?, updated_at = CURRENT_TIMESTAMP
+           WHERE pattern_id = ?`,
+          [existingResearchPattern.id, oldResearchPattern.id]
+        );
+        await dbRun(
+          db,
+          `UPDATE behavior_patterns
+           SET status = 'archived', is_deleted = 1, updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?`,
+          [oldResearchPattern.id]
+        );
+        researchPatternId = existingResearchPattern.id;
+      }
+
+      if (!researchPatternId) {
+        await dbRun(
+          db,
+          `INSERT INTO behavior_patterns
+            (name, axis, category, summary, trigger_phrases_json, observable_actions_json,
+             mechanism, risk_chain, counter_question, protective_action, positive_counterpart,
+             maturity, status, sort_order, note, is_deleted, created_at, updated_at)
+           VALUES ('研究与推演停在表层', 'human', 'execution_error', '', '[]', '[]', '', '', '', '', '',
+                   'candidate', 'active', 260, '', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+        );
+        const inserted = await dbGet<{ id: number }>(
+          db,
+          `SELECT id FROM behavior_patterns
+           WHERE axis = 'human' AND name = '研究与推演停在表层' AND is_deleted = 0
+           ORDER BY id LIMIT 1`
+        );
+        researchPatternId = inserted?.id;
+      }
+
+      if (!researchPatternId) throw new Error('Research depth behavior pattern could not be created');
+      await dbRun(
+        db,
+        `UPDATE behavior_patterns
+         SET name = '研究与推演停在表层',
+             category = 'execution_error',
+             summary = ?, trigger_phrases_json = ?, observable_actions_json = ?,
+             mechanism = ?, risk_chain = ?, counter_question = ?, protective_action = ?,
+             positive_counterpart = ?, updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`,
+        [
+          '已经看见值得研究的方向，却停在基础价格、直接需求或表面标签，没有继续拆解价值层级、稀缺交集、供给结构和定价者，等高溢价出现后才看见完整机会。',
+          JSON.stringify(['大方向已经看懂', '普通品就这个价', '这些标签应该差不多', '等价格出来再研究']),
+          JSON.stringify(['研究停在第一层', '没有建立关键条件观察表', '机会起飞后才回头补逻辑']),
+          '表层信息最容易取得，也最容易形成“已经理解”的错觉；真正决定赔率的条件交集、供给边界和定价结构没有进入持续观察。',
+          '看见方向或标的 → 只研究基础层 → 漏掉关键条件交集 → 稀缺溢价被市场发现 → 只能踏空或冒险追高',
+          '这个市场的价格由哪几层组成，哪些条件的交集决定稀缺，谁在定价，又由谁提供退出？',
+          '发现方向后继续拆解价值层级、条件交集、真实供给、买家类型、实际成交和退出深度；未经验证先放观察层，价格起飞后仍不追高。',
+          '持续深挖、结构拆解、提前观察、起飞后守纪律',
+          researchPatternId
+        ]
+      );
+
+      const upsertMarketPattern = async (pattern: {
+        name: string;
+        summary: string;
+        triggers: string[];
+        actions: string[];
+        mechanism: string;
+        riskChain: string;
+        counterQuestion: string;
+        protectiveAction: string;
+        positiveCounterpart: string;
+        sortOrder: number;
+      }) => {
+        await dbRun(
+          db,
+          `INSERT OR IGNORE INTO behavior_patterns
+            (name, axis, category, summary, trigger_phrases_json, observable_actions_json,
+             mechanism, risk_chain, counter_question, protective_action, positive_counterpart,
+             maturity, status, sort_order, note, is_deleted, created_at, updated_at)
+           VALUES (?, 'market', 'market_structure', ?, ?, ?, ?, ?, ?, ?, ?,
+                   'candidate', 'active', ?, '', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [
+            pattern.name,
+            pattern.summary,
+            JSON.stringify(pattern.triggers),
+            JSON.stringify(pattern.actions),
+            pattern.mechanism,
+            pattern.riskChain,
+            pattern.counterQuestion,
+            pattern.protectiveAction,
+            pattern.positiveCounterpart,
+            pattern.sortOrder
+          ]
+        );
+        await dbRun(
+          db,
+          `UPDATE behavior_patterns
+           SET category = 'market_structure', summary = ?, trigger_phrases_json = ?,
+               observable_actions_json = ?, mechanism = ?, risk_chain = ?,
+               counter_question = ?, protective_action = ?, positive_counterpart = ?,
+               sort_order = ?, updated_at = CURRENT_TIMESTAMP
+           WHERE axis = 'market' AND name = ? AND is_deleted = 0`,
+          [
+            pattern.summary,
+            JSON.stringify(pattern.triggers),
+            JSON.stringify(pattern.actions),
+            pattern.mechanism,
+            pattern.riskChain,
+            pattern.counterQuestion,
+            pattern.protectiveAction,
+            pattern.positiveCounterpart,
+            pattern.sortOrder,
+            pattern.name
+          ]
+        );
+      };
+
+      await upsertMarketPattern({
+        name: '运营制造稀缺',
+        summary: '通过专标、渠道门槛、粉丝身份和集中传播制造辨识度与稀缺叙事，再由组织化买盘逐级抬高价格。',
+        triggers: ['网红或团队专标', '封闭粉丝渠道', '收货价连续抬高', '普通底货被重新命名'],
+        actions: ['把运营标签当自然稀缺', '用单一团队持续收货证明长期需求', '高位跟随专标故事补票'],
+        mechanism: '标签和流量可以真实改变短期需求，但溢价高度依赖运营方持续传播、收货和组织接力，退出流动性未必独立存在。',
+        riskChain: '专标与渠道造势 → 低价首发 → 集中抬价收货 → 跟风盘进入 → 团队兑现或停止维护 → 买盘骤减',
+        counterQuestion: '去掉专标名称、网红流量和核心团队收货，这件商品还有多少独立买家愿意按当前价接？',
+        protectiveAction: '把运营溢价与底货价值分开；观察核心团队停手后的成交，不因公开高价收货追入。',
+        positiveCounterpart: '识别运营定价、只做能力圈内低位参与',
+        sortOrder: 52
+      });
+      await upsertMarketPattern({
+        name: '组合稀缺与圈层定价',
+        summary: '首日、满分、顶级号码等真实稀缺条件形成极小交集，价格由少数专业买家的边际报价决定，溢价可能非线性放大。',
+        triggers: ['多个稀缺条件同时命中', '普通品与顶级组合价差巨大', '少数专业买家公开高价收货'],
+        actions: ['把条件溢价简单相加', '把单个高价报价当普遍市场价', '忽略关键买家退出后的流动性'],
+        mechanism: '组合交集可能接近孤品，稀缺性可以真实存在；但市场很薄时，一个边际买家也能定义价格，真实稀缺不自动等于稳定流动性。',
+        riskChain: '真实条件交集 → 圈层识别价值 → 集中高价收货 → 报价形成锚点 → 跟风追入 → 核心买家退出后价差扩大',
+        counterQuestion: '稀缺条件是否可核验，有几名互不关联的买家，实际成交和退出深度分别是什么？',
+        protectiveAction: '同时验证稀缺性、买盘宽度和退出深度；单个收购报价只作观察证据，不直接当稳定估值。',
+        positiveCounterpart: '理解组合稀缺，同时尊重薄市场流动性',
+        sortOrder: 54
+      });
+
+      const findPatternId = async (name: string) => {
+        const row = await dbGet<{ id: number }>(
+          db,
+          `SELECT id FROM behavior_patterns
+           WHERE name = ? AND is_deleted = 0 AND status = 'active'
+           ORDER BY id LIMIT 1`,
+          [name]
+        );
+        if (!row) throw new Error(`Required behavior pattern is missing: ${name}`);
+        return row.id;
+      };
+      const replaceCasePatterns = async (
+        caseId: number,
+        links: Array<{ name: string; role: 'primary' | 'secondary' }>
+      ) => {
+        await dbRun(db, 'DELETE FROM behavior_case_pattern_links WHERE case_id = ?', [caseId]);
+        for (const link of links) {
+          await dbRun(
+            db,
+            `INSERT INTO behavior_case_pattern_links
+              (case_id, pattern_id, role, note, created_at, updated_at)
+             VALUES (?, ?, ?, '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+            [caseId, await findPatternId(link.name), link.role]
+          );
+        }
+      };
+
+      const luckyCaseTitle = '工商25龙：首日+70分+如意王的17倍收购观察';
+      const luckyPricingAnalysis = JSON.stringify({
+        basePriceLabel: '工商25龙普通卡当前参考价',
+        basePrice: 1000,
+        observedPriceLabel: '首日+70分+如意王公开收购报价',
+        observedPriceLow: 17000,
+        observedPriceHigh: 17000,
+        priceSignalType: 'bid',
+        conditionStack: ['首日', '评级70分', '如意王'],
+        buyerBreadth: 'single',
+        keyBuyerDependency: 'high',
+        exitLiquidity: 'thin',
+        verificationNote: '目前确认的是有人公开按17000元收购；尚未确认实际成交、独立买家数量以及核心收货人停止后还能否维持该价格。'
+      });
+      let luckyCase = await dbGet<{ id: number }>(
+        db,
+        `SELECT id FROM behavior_cases
+         WHERE title = ? AND is_deleted = 0 ORDER BY id LIMIT 1`,
+        [luckyCaseTitle]
+      );
+      if (!luckyCase) {
+        await dbRun(
+          db,
+          `INSERT INTO behavior_cases
+            (title, origin_type, subject_alias, source_note, evidence_level, case_date,
+             track, project_name, background, visible_information, pressure_context,
+             action_taken, result, action_quality, outcome_type, evidence_role,
+             self_response, learn_to_keep, learn_to_avoid, applicability_boundary,
+             linked_rule_refs_json, source_type, source_id, source_snapshot_json,
+             pricing_analysis_json, note, is_deleted, created_at, updated_at)
+           VALUES (?, 'self', '本人观察', ?, 'first_hand', '2026-08-22',
+                   '纪念币/评级卡', '工商25龙银币智能卡', ?, ?, ?, ?, ?,
+                   'mixed', 'ongoing', 'boundary', ?, ?, ?, ?, ?, '', '', ?, ?, ?,
+                   0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [
+            luckyCaseTitle,
+            '来自本人看到的行业收货信息；17000元是收购报价，不按已成交或普遍市场价记录。评级机构、实际成交和独立买家数量仍待补证。',
+            '工商25龙普通卡当前约1000元。此前主要关注普通品、评级和靓号的单独价值，没有把首日、70分和顶级靓号的条件交集作为独立市场持续研究。',
+            '可见信息是：普通工商25龙约1000元；一张同时满足“首日+评级70分+如意王”的卡有人按17000元收购，约为普通品的17倍。该组合条件本身苛刻，背后同时存在集中收货和抬价力量。',
+            '看见前两个月可能存在低位研究和布局窗口，容易产生后悔，并把当前高价倒推成“当时一定应该买”；公开高价报价也容易制造错失感和价格锚。',
+            '前期没有建立复合条件观察清单；当前看到高价收购后不追入，先把基础品、首日、评级、号码、买盘和退出深度分层记录。',
+            '案例仍在观察。当前只能确认一个17000元收购报价，不能确认广泛成交和稳定退出；后续需要跟踪独立买家、真实成交及核心买盘停手后的价格。',
+            '以后进入小众评级品市场，先建立“底货价值→首日属性→评级分数→号码等级→组合稀缺→买家宽度→退出深度”的观察链；低位只做能力圈内的小参与，价格起飞后不因后悔追高。',
+            '吸收专业玩家对首日、满分、顶级号码交集稀缺的识别能力，并提前维护观察样本。',
+            '避免把单个高价收购当成稳定市价，避免用现在的17倍报价否定当时信息不足下的谨慎，也避免为了补课在高位追入。',
+            '适用于首日、评级、靓号、专属标签等小众收藏品；普通通货和买家广泛的标准品不能照搬。基础品价格只提供底层参照，不直接决定顶级组合价。',
+            JSON.stringify([
+              '稀缺是真的，不等于价格和流动性都稳定',
+              '单个高价收购只能证明一个买盘，不能代表普遍市场价',
+              '研究要拆到价值层级和条件交集，起飞后仍不追高'
+            ]),
+            JSON.stringify({
+              capturedBy: 'migration-20260822_001',
+              observationType: 'market_bid',
+              observedAt: '2026-08-22'
+            }),
+            luckyPricingAnalysis,
+            '首版按观察案例落库。当地普通品和高价收购都存在几十元到更大幅度的市场波动，后续以真实成交补充，不把一次报价固化为估值模型。'
+          ]
+        );
+        luckyCase = await dbGet<{ id: number }>(
+          db,
+          `SELECT id FROM behavior_cases
+           WHERE title = ? AND is_deleted = 0 ORDER BY id LIMIT 1`,
+          [luckyCaseTitle]
+        );
+      } else {
+        await dbRun(
+          db,
+          `UPDATE behavior_cases
+           SET pricing_analysis_json = ?, updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?`,
+          [luckyPricingAnalysis, luckyCase.id]
+        );
+      }
+      if (!luckyCase) throw new Error('ICBC 2025 Longyinbi scarcity case could not be created');
+      await replaceCasePatterns(luckyCase.id, [
+        { name: '研究与推演停在表层', role: 'primary' },
+        { name: '组合稀缺与圈层定价', role: 'secondary' },
+        { name: '资金拉盘', role: 'secondary' }
+      ]);
+
+      let facaiCase = await dbGet<{ id: number }>(
+        db,
+        `SELECT id FROM behavior_cases
+         WHERE is_deleted = 0
+           AND (title = '发财龙网红专标：真成交≠真承接'
+                OR title = '发财龙网红专标：运营制造稀缺，真成交不等于真承接'
+                OR project_name = '发财龙（PMG网红专标）')
+         ORDER BY id LIMIT 1`
+      );
+      if (!facaiCase) {
+        await dbRun(
+          db,
+          `INSERT INTO behavior_cases
+            (title, origin_type, subject_alias, source_note, evidence_level, case_date,
+             track, project_name, background, visible_information, pressure_context,
+             action_taken, result, action_quality, outcome_type, evidence_role,
+             self_response, learn_to_keep, learn_to_avoid, applicability_boundary,
+             linked_rule_refs_json, source_type, source_id, source_snapshot_json,
+             pricing_analysis_json, note, is_deleted, created_at, updated_at)
+           VALUES ('发财龙网红专标：运营制造稀缺，真成交不等于真承接',
+                   'self', '本人', ?, 'first_hand', '2026-07-23',
+                   '纪念钞', '发财龙（PMG网红专标）', ?, '', '', ?, '',
+                   'good', 'ongoing', 'boundary', ?, '', '', '', '[]', '', '', ?,
+                   '{}', '', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [
+            '本人参与过首发资格判断，并持续观察网红专标的成交、抬价收货和后续供给。',
+            '网红专标通过粉丝渠道、集中收货和持续传播形成短期高溢价。',
+            '没有为了粉丝团门槛额外付费入场，价格拉高后也没有追入。',
+            '先拆底货价值、运营溢价和核心团队买盘，再判断是否存在独立承接。',
+            JSON.stringify({
+              capturedBy: 'migration-20260822_001',
+              observationType: 'operated_special_label'
+            })
+          ]
+        );
+        facaiCase = await dbGet<{ id: number }>(
+          db,
+          `SELECT id FROM behavior_cases
+           WHERE project_name = '发财龙（PMG网红专标）' AND is_deleted = 0
+           ORDER BY id LIMIT 1`
+        );
+      }
+      if (facaiCase) {
+        const facaiPricingAnalysis = JSON.stringify({
+          basePriceLabel: '原始发售价',
+          basePrice: 670,
+          observedPriceLabel: '近期市场拉升区间',
+          observedPriceLow: 6000,
+          observedPriceHigh: 7000,
+          priceSignalType: 'market_reference',
+          conditionStack: ['PMG网红专标', '粉丝团渠道', '团队持续抬价收货'],
+          buyerBreadth: 'concentrated',
+          keyBuyerDependency: 'high',
+          exitLiquidity: 'thin',
+          verificationNote: '已有真实成交和持续拉升现象，但独立终端需求、后续13000套供给以及核心团队停手后的承接仍待验证。'
+        });
+        await dbRun(
+          db,
+          `UPDATE behavior_cases
+           SET title = '发财龙网红专标：运营制造稀缺，真成交不等于真承接',
+               background = ?, visible_information = ?, pressure_context = ?,
+               action_taken = ?, result = ?, action_quality = 'good', outcome_type = 'ongoing',
+               evidence_role = 'boundary', self_response = ?, learn_to_keep = ?,
+               learn_to_avoid = ?, applicability_boundary = ?, pricing_analysis_json = ?,
+               note = ?, updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?`,
+          [
+            '团队申请PMG网红专标，借助千万级网红的粉丝影响力首轮按低价或市场价销售，再由一部分人持续在市场加价收货，逐级抬高价格并吸引跟风盘。行业里类似玩法还会更换为如意、比特、中华等不同专标名称。',
+            '原价约670元，早期数日达到约2600元，近期又被推至约6000-7000元；首发约6000套，后续还有约13000套。成交可以真实存在，但价格形成高度依赖团队运营、粉丝渠道和持续抬价收货。',
+            '真实成交、网红光环和连续上涨会让人产生“还有下一棒”的错觉；每个跟随者都容易相信自己不会成为最后接盘的人。',
+            '没有为了粉丝团三级资格额外刷礼物入场；行情拉高后也不补票，转而拆解团队如何造势、抬价、吸引跟风，以及后续供给由谁承接。',
+            '价格已经继续上冲到约6000-7000元，但后续13000套如何释放、核心团队何时停手、独立买家能否承接仍未完成验证。上涨扩大了案例价值，没有证明高位参与安全。',
+            '专标先拆底货价值、运营溢价和核心团队买盘；真成交只证明当下有人换手。没有独立买家宽度和退出深度时，不把运营出来的稀缺价外推，更不在高位补票。',
+            '吸收团队在标签、流量、渠道和价格节奏上的运营能力，同时学会识别谁在创造需求、谁在维持报价。',
+            '避免把专标名称当成自然稀缺，避免因为真实成交和继续上涨就认为后续一定有人接盘。',
+            '适用于网红专标、圈层专标和运营型小众收藏品；不用于否定首日、满分、顶级号码等可核验的真实组合稀缺，两类案例必须分开分析。',
+            facaiPricingAnalysis,
+            '后续重点验证：核心团队停止抬价后是否仍有独立买家，以及约13000套后续供给如何影响成交和价格。',
+            facaiCase.id
+          ]
+        );
+        await replaceCasePatterns(facaiCase.id, [
+          { name: '主动放弃与纪律优先', role: 'primary' },
+          { name: '运营制造稀缺', role: 'secondary' },
+          { name: '资金拉盘', role: 'secondary' }
+        ]);
+      }
+
+      if (await migrationTableExists(db, 'audit_logs')) {
+        await dbRun(
+          db,
+          `INSERT OR IGNORE INTO audit_logs
+            (id, timestamp, module, action, target, status, detail, entity_id,
+             path, domain, workspace, created_at, updated_at)
+           VALUES ('audit-human-case-icbc-2025-scarcity-20260822', CURRENT_TIMESTAMP,
+                   '人因案例库', 'create', ?, 'success', ?, ?, '/review/human-cases',
+                   'business', 'business', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [
+            luckyCaseTitle,
+            JSON.stringify({
+              priceSignalType: 'bid',
+              basePrice: 1000,
+              observedPrice: 17000,
+              primaryPattern: '研究与推演停在表层'
+            }),
+            String(luckyCase.id)
+          ]
+        );
+      }
+    }
   }
 
 ];

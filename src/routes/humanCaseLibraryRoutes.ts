@@ -91,7 +91,7 @@ const caseSelect = `
          evidence_role,
          self_response, learn_to_keep, learn_to_avoid, applicability_boundary,
          linked_rule_refs_json, source_type, source_id, source_snapshot_json,
-         note, created_at, updated_at
+         pricing_analysis_json, note, created_at, updated_at
   FROM behavior_cases
 `;
 
@@ -102,6 +102,38 @@ const parseStoredObject = (value: unknown) => {
   } catch {
     return {};
   }
+};
+
+const serializePricingAnalysis = (value: unknown) => {
+  const stored = parseStoredObject(value) as Record<string, unknown>;
+  const positiveNumber = (input: unknown) => {
+    const number = Number(input);
+    return Number.isFinite(number) && number > 0 ? number : null;
+  };
+  const basePrice = positiveNumber(stored.basePrice);
+  const observedPriceLow = positiveNumber(stored.observedPriceLow);
+  const observedPriceHigh = positiveNumber(stored.observedPriceHigh) ?? observedPriceLow;
+  const multiple = (price: number | null) => (
+    basePrice && price ? Math.round((price / basePrice) * 100) / 100 : null
+  );
+
+  return {
+    basePriceLabel: String(stored.basePriceLabel || ""),
+    basePrice,
+    observedPriceLabel: String(stored.observedPriceLabel || ""),
+    observedPriceLow,
+    observedPriceHigh,
+    priceSignalType: String(stored.priceSignalType || "unconfirmed"),
+    conditionStack: Array.isArray(stored.conditionStack)
+      ? stored.conditionStack.map(item => String(item)).filter(Boolean)
+      : [],
+    buyerBreadth: String(stored.buyerBreadth || "unknown"),
+    keyBuyerDependency: String(stored.keyBuyerDependency || "unknown"),
+    exitLiquidity: String(stored.exitLiquidity || "unknown"),
+    verificationNote: String(stored.verificationNote || ""),
+    premiumMultipleLow: multiple(observedPriceLow),
+    premiumMultipleHigh: multiple(observedPriceHigh)
+  };
 };
 
 const serializePattern = (row: any, linkedRuleRefs: string[] = []) => ({
@@ -174,6 +206,7 @@ const serializeCase = (row: any, patterns: any[] = []) => {
   sourceId: row.source_id || "",
   sourceSnapshot,
   sourceLink,
+  pricingAnalysis: serializePricingAnalysis(row.pricing_analysis_json),
   note: row.note || "",
   patterns,
   createdAt: row.created_at,
@@ -809,8 +842,9 @@ router.get("/behavior-cases", async (req, res, next) => {
         OR c.background LIKE ?
         OR c.action_taken LIKE ?
         OR c.self_response LIKE ?
+        OR c.pricing_analysis_json LIKE ?
       )`);
-      params.push(like, like, like, like, like, like, like);
+      params.push(like, like, like, like, like, like, like, like);
     }
     if (originType) {
       where.push("c.origin_type = ?");
@@ -924,8 +958,9 @@ router.post("/behavior-cases", async (req, res, next) => {
            track, project_name, background, visible_information, pressure_context,
            action_taken, result, action_quality, outcome_type, evidence_role, self_response,
            learn_to_keep, learn_to_avoid, applicability_boundary, linked_rule_refs_json,
-           source_type, source_id, source_snapshot_json, note, is_deleted, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+           source_type, source_id, source_snapshot_json, pricing_analysis_json, note,
+           is_deleted, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
         [
           input.title,
           input.originType,
@@ -951,6 +986,7 @@ router.post("/behavior-cases", async (req, res, next) => {
           input.sourceType,
           input.sourceId,
           sourceSnapshotJson,
+          JSON.stringify(input.pricingAnalysis),
           input.note,
           now,
           now
@@ -964,7 +1000,12 @@ router.post("/behavior-cases", async (req, res, next) => {
         outcomeType: input.outcomeType,
         patternIds: input.patternLinks.map(link => link.patternId),
         sourceType: input.sourceType,
-        sourceId: input.sourceId
+        sourceId: input.sourceId,
+        hasPricingAnalysis: Boolean(
+          input.pricingAnalysis.basePrice
+          || input.pricingAnalysis.observedPriceLow
+          || input.pricingAnalysis.conditionStack.length
+        )
       }, now);
       const created = await loadCase(db, caseId);
       if (!created) throw new Error("案例保存后读取失败");
@@ -1017,7 +1058,7 @@ router.put("/behavior-cases/:id", async (req, res, next) => {
              action_taken = ?, result = ?, action_quality = ?, outcome_type = ?, evidence_role = ?,
              self_response = ?, learn_to_keep = ?, learn_to_avoid = ?,
              applicability_boundary = ?, linked_rule_refs_json = ?,
-             source_type = ?, source_id = ?, note = ?, updated_at = ?
+             source_type = ?, source_id = ?, pricing_analysis_json = ?, note = ?, updated_at = ?
          WHERE id = ?`,
         [
           input.title,
@@ -1043,6 +1084,7 @@ router.put("/behavior-cases/:id", async (req, res, next) => {
           JSON.stringify(input.linkedRuleRefs),
           input.sourceType,
           input.sourceId,
+          JSON.stringify(input.pricingAnalysis),
           input.note,
           now,
           id
@@ -1053,7 +1095,12 @@ router.put("/behavior-cases/:id", async (req, res, next) => {
         originType: input.originType,
         actionQuality: input.actionQuality,
         outcomeType: input.outcomeType,
-        patternIds: input.patternLinks.map(link => link.patternId)
+        patternIds: input.patternLinks.map(link => link.patternId),
+        hasPricingAnalysis: Boolean(
+          input.pricingAnalysis.basePrice
+          || input.pricingAnalysis.observedPriceLow
+          || input.pricingAnalysis.conditionStack.length
+        )
       }, now);
       const updated = await loadCase(db, id);
       if (!updated) throw new Error("案例更新后读取失败");
