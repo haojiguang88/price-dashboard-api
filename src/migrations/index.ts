@@ -7601,8 +7601,292 @@ const migrations: Migration[] = [
         );
       }
     }
-  }
+  },
+  {
+    id: '20260825_001_refine_icbc_lucky_number_circle_pricing_case',
+    name: 'Refine ICBC lucky-number case with circle-specific pricing boundary',
+    run: async (db: any) => {
+      if (!(await migrationTableExists(db, 'behavior_cases'))) return;
+      if (!(await migrationTableExists(db, 'behavior_patterns'))) return;
+      if (!(await migrationTableExists(db, 'behavior_case_pattern_links'))) return;
 
+      const caseTitle = '工商25龙：首日+70分+如意王的17倍收购观察';
+      const behaviorCase = await dbGet<{ id: number }>(
+        db,
+        `SELECT id
+         FROM behavior_cases
+         WHERE title = ? AND is_deleted = 0
+         ORDER BY id LIMIT 1`,
+        [caseTitle]
+      );
+      if (!behaviorCase) {
+        throw new Error('ICBC 2025 lucky-number circle-pricing case is missing');
+      }
+
+      const circlePattern = await dbGet<{ id: number }>(
+        db,
+        `SELECT id
+         FROM behavior_patterns
+         WHERE axis = 'market'
+           AND name = '组合稀缺与圈层定价'
+           AND is_deleted = 0
+         ORDER BY id LIMIT 1`
+      );
+      if (!circlePattern) {
+        throw new Error('Circle-specific collectible pricing pattern is missing');
+      }
+
+      await dbRun(
+        db,
+        `UPDATE behavior_patterns
+         SET summary = ?,
+             trigger_phrases_json = ?,
+             observable_actions_json = ?,
+             mechanism = ?,
+             risk_chain = ?,
+             counter_question = ?,
+             protective_action = ?,
+             positive_counterpart = ?,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`,
+        [
+          '基础稀缺条件只提供入场券，真正放大价格的是特定号码被固定玩家圈层认可并持续收货；同条件下非圈层目标号码可能低很多。',
+          JSON.stringify([
+            '龙头、首日、70分和靓号等条件同时命中',
+            '特定号码被固定圈层反复收货',
+            '同等级不同号码价格差距巨大',
+            '圈内报价显著高于圈外成交'
+          ]),
+          JSON.stringify([
+            '把所有靓号视为同一等级',
+            '把圈内目标号报价外推为普遍市价',
+            '圈外人在价格抬高后追入',
+            '按稀缺倍数而不是买家宽度决定仓位'
+          ]),
+          '龙头、首日、满分和靓号提供可核验的基础稀缺，特定玩家圈层决定真正追逐的号码与边际报价。额外溢价依赖圈层共识和持续承接，并非所有靓号共享；圈层停止收货后，价格可能回落到普通70分或普通靓号价格带。',
+          '基础条件稀缺 → 特定圈层锁定目标号码 → 提前埋伏并持续收货 → 圈内报价抬高 → 圈外跟价追入 → 圈层停收 → 高位买家退出困难',
+          '这个号码是否是圈层长期认可的目标号？有多少互不关联的真实买家？去掉核心圈层收货后，同条件非目标号码实际成交多少？',
+          '圈外只允许前期低价、小量埋伏，把它当研究性参与权；高位不追。只有圈层偏好、真实成交和退出对象同时明确时，才承认额外溢价，仓位按买家宽度而不是稀缺倍数控制。',
+          '提前识别圈层目标号、小量研究性埋伏、先确认退出对象',
+          circlePattern.id
+        ]
+      );
+
+      const pricingAnalysis = JSON.stringify({
+        basePriceLabel: '工商25龙普通卡当前参考价',
+        basePrice: 1000,
+        observedPriceLabel: '首日+70分+圈层目标号“如意王”收购报价',
+        observedPriceLow: 17000,
+        observedPriceHigh: 17000,
+        priceSignalType: 'bid',
+        conditionStack: ['龙头', '首日', '评级70分', '圈层目标号：如意王'],
+        buyerBreadth: 'concentrated',
+        keyBuyerDependency: 'high',
+        exitLiquidity: 'thin',
+        verificationNote: '已确认有一批玩家专门交易特定靓号，17000元是圈层目标号“如意王”的收购报价；同样龙头、70分和靓号条件下，非圈层目标号码价格低很多。仍需继续验证独立买家数量、真实成交以及圈层停止收货后的退出价格。'
+      });
+
+      await dbRun(
+        db,
+        `UPDATE behavior_cases
+         SET source_note = ?,
+             background = ?,
+             visible_information = ?,
+             pressure_context = ?,
+             action_taken = ?,
+             result = ?,
+             self_response = ?,
+             learn_to_keep = ?,
+             learn_to_avoid = ?,
+             applicability_boundary = ?,
+             linked_rule_refs_json = ?,
+             pricing_analysis_json = ?,
+             note = ?,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`,
+        [
+          '来自本人持续观察的行业收货信息。17000元是特定圈层目标号的收购报价，不按普遍市场价记录；同条件非目标靓号价格明显更低，实际成交与圈层停收后的退出深度仍待持续验证。',
+          '工商25龙是龙银币智能卡龙头，普通卡当前约1000元。首日、70分和靓号是基础稀缺条件，但后续确认同样条件下不同号码价格差异巨大；此前没有识别“特定号码玩家圈层”这一层定价结构。',
+          '可见信息是：工商25龙普通卡约1000元；一张同时满足“龙头+首日+评级70分+如意王”的卡有人按17000元收购。行业里有一批玩家专门交易特定靓号，收货和定价集中在他们认可的号码；同样是龙头、70分和靓号，但不是圈层目标号，价格会低很多。',
+          '看见17倍报价和此前可能存在的低位窗口，容易产生错失感，并把“龙头+首日+70分+靓号”误记成机械翻倍公式；连续抬价还会诱使圈外参与者相信自己不会接最后一棒。',
+          '前期没有建立圈层目标号观察清单；当前不追入，改为拆分记录底货、首日、评级、普通靓号、圈层目标号、买家宽度和退出深度。以后圈外只考虑前期低价、小量研究性埋伏。',
+          '案例仍在观察。17000元报价证明特定圈层愿意为目标号给出高价，不证明所有靓号都有同等价值，也不证明高位存在稳定退出；圈层承接停止后，额外溢价可能迅速收缩。',
+          '以后按“底货价值→首日属性→评级分数→号码等级→是否圈层目标号→买家宽度→退出深度”逐层判断。目标号与非目标号必须建立对照样本，圈外高位不追。',
+          '学习识别固定玩家圈层真正认可的号码、收货节奏和退出对象；前期低价时只用小仓收集研究样本。',
+          '避免把龙头+首日+70分+靓号当成翻倍公式，避免把圈内目标号报价外推到所有靓号，更不在圈层抬价后以大仓追入。',
+          '适用于首日、评级、号码等条件共同定价的小众收藏品。只有特定号码偏好、圈层买家和真实退出路径可以核验时，才承认圈层溢价；普通靓号、标准品和买家广泛的通货不能照搬。',
+          JSON.stringify([
+            '龙头+首日+70分+靓号只是稀缺入场券，不是翻倍公式',
+            '特定圈层认可、持续收货和真实成交同时成立，才承认额外溢价',
+            '圈外只做前期低价小量埋伏；高位不追，仓位按买家宽度控制',
+            '圈层停收后，价格可能回落到普通70分或普通靓号价格带'
+          ]),
+          pricingAnalysis,
+          '2026-08-25校准：将案例从泛化的“组合条件自动放大”修正为“特定号码圈层定价”。后续重点对照目标号与非目标号成交，并观察核心圈层停收后的真实退出价格。',
+          behaviorCase.id
+        ]
+      );
+
+      const existingCircleLink = await dbGet<{ case_id: number }>(
+        db,
+        `SELECT case_id
+         FROM behavior_case_pattern_links
+         WHERE case_id = ? AND pattern_id = ?`,
+        [behaviorCase.id, circlePattern.id]
+      );
+      if (existingCircleLink) {
+        await dbRun(
+          db,
+          `UPDATE behavior_case_pattern_links
+           SET role = 'secondary', note = ?, updated_at = CURRENT_TIMESTAMP
+           WHERE case_id = ? AND pattern_id = ?`,
+          [
+            '核心市场结构：额外溢价来自特定号码玩家圈层，不适用于所有靓号。',
+            behaviorCase.id,
+            circlePattern.id
+          ]
+        );
+      } else {
+        await dbRun(
+          db,
+          `INSERT INTO behavior_case_pattern_links
+            (case_id, pattern_id, role, note, created_at, updated_at)
+           VALUES (?, ?, 'secondary', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [
+            behaviorCase.id,
+            circlePattern.id,
+            '核心市场结构：额外溢价来自特定号码玩家圈层，不适用于所有靓号。'
+          ]
+        );
+      }
+
+      if (await migrationTableExists(db, 'audit_logs')) {
+        await dbRun(
+          db,
+          `INSERT OR IGNORE INTO audit_logs
+            (id, timestamp, module, action, target, status, detail, entity_id,
+             path, domain, workspace, created_at, updated_at)
+           VALUES ('audit-human-case-icbc-2025-circle-pricing-20260825', CURRENT_TIMESTAMP,
+                   '人因案例库', 'update', ?, 'success', ?, ?, '/review/human-cases',
+                   'business', 'business', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [
+            caseTitle,
+            JSON.stringify({
+              correction: '特定号码圈层定价，不外推为所有靓号的稳定溢价',
+              priceSignalType: 'bid',
+              observedPrice: 17000,
+              buyerBreadth: 'concentrated',
+              marketPattern: '组合稀缺与圈层定价'
+            }),
+            String(behaviorCase.id)
+          ]
+        );
+      }
+    }
+  },
+  {
+    id: '20260831_001_add_event_transmission_analysis',
+    name: 'Add structured transmission analysis to event records',
+    run: async db => {
+      await ensureMigrationColumn(db, 'event_records', 'transmission_analysis_json', 'TEXT');
+    }
+  },
+  {
+    id: '20260831_002_seed_android_event_transmission',
+    name: 'Connect Android supply-chain event to existing reviews and evidence',
+    run: async db => {
+      if (!(await migrationTableExists(db, 'event_records'))) return;
+
+      const event = await dbGet<{ id: number; transmission_analysis_json?: string | null }>(
+        db,
+        `SELECT id, transmission_analysis_json
+         FROM event_records
+         WHERE title = 'AI需求推动存储价格上涨并向整机传导'
+           AND COALESCE(is_deleted, 0) = 0
+         ORDER BY id LIMIT 1`
+      );
+      if (!event || String(event.transmission_analysis_json || '').trim()) return;
+
+      const missedReview = await dbGet<{ id: number; title: string }>(
+        db,
+        `SELECT id, title
+         FROM missed_projects
+         WHERE COALESCE(is_deleted, 0) = 0
+           AND (title = '安卓机器：产业链推演只走一半，起飞后不追'
+             OR project_name = '安卓机器/消费级存储与整机')
+         ORDER BY id LIMIT 1`
+      );
+      const behaviorCase = missedReview
+        ? await dbGet<{ id: number; title: string }>(
+            db,
+            `SELECT id, title
+             FROM behavior_cases
+             WHERE is_deleted = 0
+               AND source_type = 'missed_project'
+               AND source_id = ?
+             ORDER BY id LIMIT 1`,
+            [String(missedReview.id)]
+          )
+        : undefined;
+      const rule = await dbGet<{ id: number; title: string }>(
+        db,
+        `SELECT id, title
+         FROM rule_experiences
+         WHERE COALESCE(is_deleted, 0) = 0
+           AND title = '大趋势要继续推演产能挤占和二三阶供需变化'
+         ORDER BY id LIMIT 1`
+      );
+
+      const evidenceReferences = [
+        missedReview ? {
+          sourceType: 'missed_project',
+          sourceId: String(missedReview.id),
+          title: missedReview.title,
+          path: `/review/missed?recordId=${missedReview.id}`,
+          relation: '原始复盘'
+        } : null,
+        missedReview && behaviorCase ? {
+          sourceType: 'behavior_case',
+          sourceId: String(behaviorCase.id),
+          title: behaviorCase.title,
+          path: `/review/human-cases?view=cases&sourceType=missed_project&sourceId=${missedReview.id}&mode=distill`,
+          relation: '提炼案例'
+        } : null,
+        rule ? {
+          sourceType: 'rule_experience',
+          sourceId: String(rule.id),
+          title: rule.title,
+          path: `/review/rule?recordId=${rule.id}`,
+          relation: '沉淀规则'
+        } : null
+      ].filter(Boolean);
+
+      const transmissionAnalysis = {
+        status: 'partially_verified',
+        directImpact: 'AI资本开支扩张，HBM、服务器级DRAM和NAND等高利润需求增加。',
+        secondOrderImpact: '存储厂商把更多产能和资本开支转向高利润产品，消费级DRAM和NAND的供给弹性可能下降。',
+        thirdOrderImpact: '内存、SSD的成本和库存变化继续向安卓手机、PC、游戏机等整机及二级市场价格传导。',
+        changedLink: '消费级存储零部件和部分安卓终端已经出现价格上涨或价格支撑。',
+        pendingRepricingLink: '具体安卓SKU、PC和游戏机是否继续传导，仍需按商品价格、库存与回收价分别确认。',
+        expectedLag: '零部件、渠道库存和整机逐级传导，时滞不固定。',
+        validationIndicators: '消费级DRAM/NAND现货价；内存和SSD渠道价；厂商产能配置；安卓手机、PC、游戏机库存、成交价和回收价。',
+        counterEvidence: '消费级供给恢复、库存集中释放，或终端变化主要由汇率、官方调价、型号切换、关税、补贴和渠道炒作解释。',
+        reviewDate: '',
+        validationNote: '已有存储零部件和部分终端价格变化作为阶段证据；安卓机器案例说明前期推演不足会踏空，但每个终端的真实因果仍需逐项验证。',
+        targets: [],
+        evidenceReferences
+      };
+
+      await dbRun(
+        db,
+        `UPDATE event_records
+         SET transmission_analysis_json = ?, updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?
+           AND (transmission_analysis_json IS NULL OR TRIM(transmission_analysis_json) = '')`,
+        [JSON.stringify(transmissionAnalysis), event.id]
+      );
+    }
+  }
 ];
 
 function dbRun(db: any, sql: string, params: any[] = []): Promise<void> {

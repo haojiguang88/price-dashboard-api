@@ -415,7 +415,8 @@ test("seeds collectible scarcity cases with honest quote and liquidity boundarie
     const db = await manager.getDb();
     const luckyCase = await db.get(
       `SELECT id, action_quality, outcome_type, evidence_role, pricing_analysis_json,
-              self_response, applicability_boundary
+              visible_information, self_response, learn_to_keep, learn_to_avoid,
+              applicability_boundary, linked_rule_refs_json
        FROM behavior_cases
        WHERE title = ? AND is_deleted = 0`,
       ["工商25龙：首日+70分+如意王的17倍收购观察"]
@@ -424,15 +425,34 @@ test("seeds collectible scarcity cases with honest quote and liquidity boundarie
     assert.equal(luckyCase.action_quality, "mixed");
     assert.equal(luckyCase.outcome_type, "ongoing");
     assert.equal(luckyCase.evidence_role, "boundary");
-    assert.match(luckyCase.self_response, /组合稀缺/);
+    assert.match(luckyCase.visible_information, /不是圈层目标号，价格会低很多/);
+    assert.match(luckyCase.self_response, /是否圈层目标号/);
+    assert.match(luckyCase.learn_to_keep, /固定玩家圈层/);
+    assert.match(luckyCase.learn_to_avoid, /翻倍公式/);
     assert.match(luckyCase.applicability_boundary, /小众收藏品/);
+    assert.match(luckyCase.applicability_boundary, /普通靓号/);
+
+    const linkedRules = JSON.parse(luckyCase.linked_rule_refs_json);
+    assert.ok(linkedRules.some((item: string) => item.includes("稀缺入场券")));
+    assert.ok(linkedRules.some((item: string) => item.includes("圈外只做前期低价小量埋伏")));
 
     const luckyPricing = JSON.parse(luckyCase.pricing_analysis_json);
     assert.equal(luckyPricing.basePrice, 1000);
     assert.equal(luckyPricing.observedPriceLow, 17000);
     assert.equal(luckyPricing.priceSignalType, "bid");
-    assert.equal(luckyPricing.buyerBreadth, "single");
-    assert.deepEqual(luckyPricing.conditionStack, ["首日", "评级70分", "如意王"]);
+    assert.equal(luckyPricing.buyerBreadth, "concentrated");
+    assert.deepEqual(luckyPricing.conditionStack, ["龙头", "首日", "评级70分", "圈层目标号：如意王"]);
+    assert.match(luckyPricing.verificationNote, /非圈层目标号码价格低很多/);
+
+    const circlePattern = await db.get(
+      `SELECT summary, mechanism, protective_action
+       FROM behavior_patterns
+       WHERE name = '组合稀缺与圈层定价' AND is_deleted = 0`
+    );
+    assert.ok(circlePattern);
+    assert.match(circlePattern.summary, /特定号码/);
+    assert.match(circlePattern.mechanism, /并非所有靓号共享/);
+    assert.match(circlePattern.protective_action, /高位不追/);
 
     const luckyLinks = await db.all(
       `SELECT p.name, l.role

@@ -2,8 +2,27 @@ import express from 'express';
 import getDb from '../config/database';
 import { validateRequiredDateOnly } from '../utils/dateValidation';
 import { normalizeQueryText, parsePagination, toLikePattern } from '../utils/listQuery';
+import {
+  EventTransmissionValidationError,
+  normalizeEventTransmissionInput,
+  parseStoredEventTransmission
+} from '../utils/eventTransmission';
 
 const router = express.Router();
+
+const EVENT_RECORD_SELECT = `
+  id, title, track, event_date, event_type, description, related_object,
+  impact, source, note, transmission_analysis_json, created_at, updated_at
+`;
+
+const serializeEventRecord = (record: any) => {
+  if (!record) return record;
+  const { transmission_analysis_json, ...rest } = record;
+  return {
+    ...rest,
+    transmission_analysis: parseStoredEventTransmission(transmission_analysis_json)
+  };
+};
 
 // 事件记录相关接口
 
@@ -14,6 +33,7 @@ router.post('/events', async (req, res) => {
     const { event_date, event_type, description, related_object, impact, source, note } = req.body;
     const title = normalizeQueryText(req.body?.title);
     const track = normalizeQueryText(req.body?.track);
+    const transmissionAnalysis = normalizeEventTransmissionInput(req.body?.transmission_analysis);
     
     // 校验字段
     if (!title || !track) {
@@ -27,15 +47,35 @@ router.post('/events', async (req, res) => {
     // 插入记录
     const now = new Date().toISOString();
     const result = await db.run(
-      'INSERT INTO event_records (title, track, event_date, event_type, description, related_object, impact, source, note, is_deleted, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [title, track, eventDate.value, event_type, description, related_object, impact, source, note, 0, now, now]
+      `INSERT INTO event_records
+        (title, track, event_date, event_type, description, related_object, impact, source, note,
+         transmission_analysis_json, is_deleted, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        title,
+        track,
+        eventDate.value,
+        event_type,
+        description,
+        related_object,
+        impact,
+        source,
+        note,
+        transmissionAnalysis ? JSON.stringify(transmissionAnalysis) : null,
+        0,
+        now,
+        now
+      ]
     );
     const createdRecord = await db.get(
-      'SELECT id, title, track, event_date, event_type, description, related_object, impact, source, note, created_at, updated_at FROM event_records WHERE id = ? AND is_deleted = 0',
+      `SELECT ${EVENT_RECORD_SELECT} FROM event_records WHERE id = ? AND is_deleted = 0`,
       [result.lastID]
     );
-    res.json({ success: true, data: createdRecord || { id: result.lastID } });
+    res.json({ success: true, data: createdRecord ? serializeEventRecord(createdRecord) : { id: result.lastID } });
   } catch (error) {
+    if (error instanceof EventTransmissionValidationError) {
+      return res.status(400).json({ success: false, message: error.message });
+    }
     console.error('Error creating event record:', error);
     res.status(500).json({ success: false, message: '新增事件记录失败' });
   }
@@ -64,19 +104,44 @@ router.put('/events/:id', async (req, res) => {
     if (!existingRecord) {
       return res.status(404).json({ success: false, message: '事件记录不存在' });
     }
+    const transmissionAnalysis = Object.prototype.hasOwnProperty.call(req.body, 'transmission_analysis')
+      ? normalizeEventTransmissionInput(req.body.transmission_analysis)
+      : parseStoredEventTransmission(existingRecord.transmission_analysis_json);
     
     // 更新记录
     const now = new Date().toISOString();
     const result = await db.run(
-      'UPDATE event_records SET title = ?, track = ?, event_date = ?, event_type = ?, description = ?, related_object = ?, impact = ?, source = ?, note = ?, updated_at = ? WHERE id = ?',
-      [title, track, eventDate.value, event_type, description, related_object, impact, source, note, now, id]
+      `UPDATE event_records
+       SET title = ?, track = ?, event_date = ?, event_type = ?, description = ?, related_object = ?,
+           impact = ?, source = ?, note = ?, transmission_analysis_json = ?, updated_at = ?
+       WHERE id = ?`,
+      [
+        title,
+        track,
+        eventDate.value,
+        event_type,
+        description,
+        related_object,
+        impact,
+        source,
+        note,
+        transmissionAnalysis ? JSON.stringify(transmissionAnalysis) : null,
+        now,
+        id
+      ]
     );
     const updatedRecord = await db.get(
-      'SELECT id, title, track, event_date, event_type, description, related_object, impact, source, note, created_at, updated_at FROM event_records WHERE id = ? AND is_deleted = 0',
+      `SELECT ${EVENT_RECORD_SELECT} FROM event_records WHERE id = ? AND is_deleted = 0`,
       [id]
     );
-    res.json({ success: true, data: updatedRecord ? { ...updatedRecord, changes: result.changes } : { changes: result.changes } });
+    res.json({
+      success: true,
+      data: updatedRecord ? { ...serializeEventRecord(updatedRecord), changes: result.changes } : { changes: result.changes }
+    });
   } catch (error) {
+    if (error instanceof EventTransmissionValidationError) {
+      return res.status(400).json({ success: false, message: error.message });
+    }
     console.error('Error updating event record:', error);
     res.status(500).json({ success: false, message: '编辑事件记录失败' });
   }
@@ -120,9 +185,9 @@ router.get('/events', async (req, res) => {
     
     // 搜索条件
     if (keyword) {
-      whereClause += ' AND (title LIKE ? OR description LIKE ? OR related_object LIKE ? OR impact LIKE ? OR source LIKE ? OR note LIKE ? OR track LIKE ? OR event_type LIKE ?)';
+      whereClause += ' AND (title LIKE ? OR description LIKE ? OR related_object LIKE ? OR impact LIKE ? OR source LIKE ? OR note LIKE ? OR track LIKE ? OR event_type LIKE ? OR transmission_analysis_json LIKE ?)';
       const searchTerm = toLikePattern(keyword);
-      params.push(searchTerm, searchTerm, searchTerm, searchTerm, searchTerm, searchTerm, searchTerm, searchTerm);
+      params.push(searchTerm, searchTerm, searchTerm, searchTerm, searchTerm, searchTerm, searchTerm, searchTerm, searchTerm);
     }
     
     // 精确筛选条件
@@ -143,7 +208,7 @@ router.get('/events', async (req, res) => {
     
     // 获取分页数据
     const dataQuery = `
-      SELECT id, title, track, event_date, event_type, description, related_object, impact, source, note, created_at, updated_at 
+      SELECT ${EVENT_RECORD_SELECT}
       FROM event_records 
       WHERE ${whereClause} 
       ORDER BY event_date DESC, created_at DESC, id DESC 
@@ -151,7 +216,7 @@ router.get('/events', async (req, res) => {
     `;
     
     const dataParams = [...params, pagination.limit, pagination.offset];
-    const items = await db.all(dataQuery, dataParams);
+    const items = (await db.all(dataQuery, dataParams)).map(serializeEventRecord);
     
     // 返回结果
     res.json({
@@ -176,13 +241,16 @@ router.get('/events/:id', async (req, res) => {
     const { id } = req.params;
     
     // 获取记录详情
-    const record = await db.get('SELECT id, title, track, event_date, event_type, description, related_object, impact, source, note, created_at, updated_at FROM event_records WHERE id = ? AND is_deleted = 0', [id]);
+    const record = await db.get(
+      `SELECT ${EVENT_RECORD_SELECT} FROM event_records WHERE id = ? AND is_deleted = 0`,
+      [id]
+    );
     
     if (!record) {
       return res.status(404).json({ success: false, message: '事件记录不存在' });
     }
     
-    res.json({ success: true, data: record });
+    res.json({ success: true, data: serializeEventRecord(record) });
   } catch (error) {
     console.error('Error fetching event record details:', error);
     res.status(500).json({ success: false, message: '获取事件记录详情失败' });
