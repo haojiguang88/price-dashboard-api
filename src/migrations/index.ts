@@ -7886,6 +7886,692 @@ const migrations: Migration[] = [
         [JSON.stringify(transmissionAnalysis), event.id]
       );
     }
+  },
+  {
+    id: '20260903_001_seed_fuyao_trading_survival_case',
+    name: 'Add Fuyao trading survival and discipline rebuilding case',
+    run: async (db: any) => {
+      if (!(await migrationTableExists(db, 'behavior_cases'))) return;
+      if (!(await migrationTableExists(db, 'behavior_patterns'))) return;
+      if (!(await migrationTableExists(db, 'behavior_case_pattern_links'))) return;
+
+      const title = '扶摇聊交易：从反复爆仓到“先不死”的账户重建';
+      let behaviorCase = await dbGet<{ id: number }>(
+        db,
+        `SELECT id
+         FROM behavior_cases
+         WHERE title = ? AND is_deleted = 0
+         ORDER BY id
+         LIMIT 1`,
+        [title]
+      );
+
+      if (!behaviorCase) {
+        await dbRun(
+          db,
+          `INSERT INTO behavior_cases
+            (title, origin_type, subject_alias, source_note, evidence_level, case_date,
+             track, project_name, background, visible_information, pressure_context,
+             action_taken, result, action_quality, outcome_type, evidence_role,
+             self_response, learn_to_keep, learn_to_avoid, applicability_boundary,
+             linked_rule_refs_json, source_type, source_id, source_snapshot_json,
+             pricing_analysis_json, note, is_deleted, created_at, updated_at)
+           VALUES (?, 'public', ?, ?, 'unconfirmed', NULL,
+                   '杠杆交易（期货/外汇未确认）', '账户爆仓与纪律重建', ?, ?, ?,
+                   ?, ?, 'mixed', 'mixed', 'boundary',
+                   ?, ?, ?, ?, ?, '', '', ?, '{}', ?, 0,
+                   CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [
+            title,
+            '扶摇聊交易',
+            '抖音平台本人公开口述，由用户转述。原视频链接尚未保存；具体交易品种、时间线、金额和后续账户结果均未独立核验。',
+            '其自述从约100美元的小账户起步，曾做到接近1万美元。早期盈利强化了暴富想象，随后不断放大仓位和杠杆；具体交易载体可能是期货或外汇，目前未确认。',
+            '账户曾从约100美元快速增长到接近1万美元；随着仓位和情绪同步放大，交易从小额试错变成重仓梭哈。爆仓后没有先缩减风险，而是试图用更重的下一笔把亏损翻回来。',
+            '连续盈利带来自我证明和暴富幻想；爆仓后的回本冲动、债务压力和绝望又激活赌性。后来他从激进摆向过度防守，不敢承受正常浮亏，并在出现浮盈时过早离场。',
+            '1. 小仓尝到甜头后逐步放大仓位，转向高杠杆、重仓和梭哈。\n2. 爆仓后继续加码，亏损越大下一次仓位越重，并开始借钱交易。\n3. 账户只剩约100美元时制定重建计划：不再乱做，只做系统内机会；每笔最多亏3美元；每天最多3单；严格执行止损。\n4. 账户做到约170美元后逐步恢复信心；即使连续亏损10次，仍按规则运行，不再用恐惧或加仓翻本回应。\n5. 后续从姐姐处借入2万元人民币扩大资金，据其自述账户后来约7000美元并逐步恢复盈利。',
+            '前期多次爆仓并最终亏完，据其自述最高负债约47万元人民币。重建阶段，约100美元先做到170美元，后续账户据称达到约7000美元并慢慢恢复盈利。真正发生改变的不是交易载体，而是从“靠一把翻身”转向“先不死、让规则重复”。以上金额与结果均待独立核验。',
+            '如果换成我，不把任何一次盈利当作扩大赌注的许可证。参与前先确定单次最大损失、每日次数、总仓位和停止条件，只做体系内机会；连续亏损时减频复盘，不加码翻本；连续盈利时也不突破仓位边界。借款不用于高杠杆交易，现金流与生存权优先。',
+            '吸收他后期的账户重建能力：承认原来的方式失败，把目标从暴富改成存活；严格止损、限制交易次数、只做系统内机会；连续亏损仍不激活赌性，并先用小账户验证过程。',
+            '避免把小样本盈利当成能力证明；避免亏损后加倍下注、借钱翻本和重仓梭哈；也避免从激进直接摆到畏首畏尾，用恐惧代替规则。',
+            '适用于所有带杠杆、保证金或可快速放大仓位的交易，也可迁移到库存生意和普通投资中的重仓、负债决策。案例不能证明其交易策略本身有效，后期借钱扩大账户也不是可复制的正面动作；可复制的是损失边界和纪律，不是借款或仓位规模。',
+            JSON.stringify([
+              '先不死，保住本金',
+              '单次损失必须事先限定并可承受',
+              '只做交易系统内的机会',
+              '亏损后禁止加码翻本',
+              '连续盈利不得突破仓位边界'
+            ]),
+            JSON.stringify({
+              capturedBy: 'migration-20260903_001',
+              sourcePlatform: '抖音',
+              sourceAccount: '扶摇聊交易',
+              sourceEvidence: 'user_relay_of_public_self_report',
+              capturedAt: '2026-09-03',
+              verificationStatus: 'unconfirmed'
+            }),
+            '核心不是期货或外汇，而是账户从赌性驱动转向生存优先的过程。其“先不死，保住本金”和“从1到10、从10到100没有想象中差距那么大”只记录为本人总结，不作为收益承诺。'
+          ]
+        );
+        behaviorCase = await dbGet<{ id: number }>(
+          db,
+          `SELECT id
+           FROM behavior_cases
+           WHERE title = ? AND is_deleted = 0
+           ORDER BY id
+           LIMIT 1`,
+          [title]
+        );
+      }
+
+      if (!behaviorCase) {
+        throw new Error('Fuyao trading survival case could not be created');
+      }
+
+      const patternLinks = [
+        { name: '过度下注', role: 'primary' },
+        { name: '连续盈利后的自信膨胀', role: 'secondary' },
+        { name: '恐惧与过度防守', role: 'secondary' }
+      ];
+      for (const link of patternLinks) {
+        const pattern = await dbGet<{ id: number }>(
+          db,
+          `SELECT id
+           FROM behavior_patterns
+           WHERE name = ? AND is_deleted = 0 AND status = 'active'
+           ORDER BY id
+           LIMIT 1`,
+          [link.name]
+        );
+        if (!pattern) {
+          throw new Error(`Required behavior pattern is missing: ${link.name}`);
+        }
+        await dbRun(
+          db,
+          `INSERT OR IGNORE INTO behavior_case_pattern_links
+            (case_id, pattern_id, role, note, created_at, updated_at)
+           VALUES (?, ?, ?, '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [behaviorCase.id, pattern.id, link.role]
+        );
+      }
+
+      if (await migrationTableExists(db, 'audit_logs')) {
+        await dbRun(
+          db,
+          `INSERT OR IGNORE INTO audit_logs
+            (id, timestamp, module, action, target, status, detail, entity_id,
+             path, domain, workspace, created_at, updated_at)
+           VALUES ('audit-human-case-fuyao-trading-survival-20260903', CURRENT_TIMESTAMP,
+                   '人因案例库', 'create', ?, 'success', ?, ?, '/review/human-cases',
+                   'business', 'business', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [
+            title,
+            JSON.stringify({
+              originType: 'public',
+              evidenceLevel: 'unconfirmed',
+              actionQuality: 'mixed',
+              outcomeType: 'mixed',
+              primaryPattern: '过度下注'
+            }),
+            String(behaviorCase.id)
+          ]
+        );
+      }
+    }
+  },
+  {
+    id: '20260903_002_seed_creator_audience_pressure_exit_case',
+    name: 'Add creator audience pressure and failed exit discipline case',
+    run: async (db: any) => {
+      if (!(await migrationTableExists(db, 'behavior_cases'))) return;
+      if (!(await migrationTableExists(db, 'behavior_patterns'))) return;
+      if (!(await migrationTableExists(db, 'behavior_case_pattern_links'))) return;
+
+      await dbRun(
+        db,
+        `INSERT OR IGNORE INTO behavior_patterns
+          (name, axis, category, summary, trigger_phrases_json, observable_actions_json,
+           mechanism, risk_chain, counter_question, protective_action, positive_counterpart,
+           maturity, status, sort_order, note, is_deleted, created_at, updated_at)
+         VALUES ('外部评价绑架决策', 'human', 'human_bias', ?, ?, ?, ?, ?, ?, ?, ?,
+                 'candidate', 'active', 170, ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+        [
+          '因为担心粉丝、群体、合作方或旁观者评价，放弃原本符合自身风险边界的决策。',
+          JSON.stringify(['粉丝会骂', '已经公开看多', '现在走显得没格局', '别人会怎么看']),
+          JSON.stringify(['该退出时拖延', '为维持人设继续持有', '让他人情绪替代自己的计划']),
+          '公开表达、身份一致性和声誉压力会提高退出的心理成本，但围观者并不承担账户回撤、债务和机会成本。',
+          '产生退出判断 → 担心外部评价 → 放弃或推迟执行 → 行情反转 → 浮盈大幅回撤 → 用结果继续强化心理压力',
+          '这些评价我的人，会替我承担回撤、债务和错失下一次机会的成本吗？',
+          '公开观点与个人仓位分开；交易只服从事前退出条件，触发后分批执行，不把人设一致性当作持有理由。',
+          '独立决策、按计划分批退出',
+          '这是影响动作的心理机制，不等于所有公开分享者都应忽略对受众的说明责任。'
+        ]
+      );
+
+      const title = '小张小张吃饭用缸：粉丝评价绑架退出，盈利仍大幅回撤';
+      let behaviorCase = await dbGet<{ id: number }>(
+        db,
+        `SELECT id
+         FROM behavior_cases
+         WHERE title = ? AND is_deleted = 0
+         ORDER BY id
+         LIMIT 1`,
+        [title]
+      );
+
+      if (!behaviorCase) {
+        await dbRun(
+          db,
+          `INSERT INTO behavior_cases
+            (title, origin_type, subject_alias, source_note, evidence_level, case_date,
+             track, project_name, background, visible_information, pressure_context,
+             action_taken, result, action_quality, outcome_type, evidence_role,
+             self_response, learn_to_keep, learn_to_avoid, applicability_boundary,
+             linked_rule_refs_json, source_type, source_id, source_snapshot_json,
+             pricing_analysis_json, note, is_deleted, created_at, updated_at)
+           VALUES (?, 'public', ?, ?, 'unconfirmed', NULL,
+                   '科技ETF（具体品种未确认）', '科技局部牛市高位未兑现', ?, ?, ?,
+                   ?, ?, 'flawed', 'profit', 'negative',
+                   ?, ?, ?, ?, ?, '', '', ?, '{}', ?, 0,
+                   CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [
+            title,
+            '小张小张吃饭用缸',
+            '自媒体博主公开经历，由用户转述，未保存原视频或原帖链接。具体ETF、交易流水、500万元本金、1900万元阶段高点和回撤幅度均未独立核验。',
+            '据转述，其以约500万元本金提前布局科技类ETF，随后赶上科技局部牛市。传播口径为阶段最高约1900万元，但该数字究竟指账户总额还是累计盈利尚不明确。',
+            '可以确认的叙事链是：提前入场后获得大幅浮盈；阶段高位本人已经产生退出想法；因为担心自己作为较大博主卖出后被粉丝指责，最终没有执行；7月科技板块大跌后账户出现明显回撤，但总体仍处于盈利。具体持仓、成交和净值曲线不可得。',
+            '公开看多形成的人设一致性、对粉丝评价的担忧，以及“我先走会不会被骂”的责任压力，让本来属于账户风控的退出动作变成了舆论选择。',
+            '1. 用较大本金提前布局科技类ETF，并在局部牛市中持续持有。\n2. 账户出现大幅浮盈后曾想退出，但没有按自己的风险判断分批兑现。\n3. 不退出的关键理由不是市场结构，而是担心自己先走后遭到粉丝指责。\n4. 7月科技板块大跌后，账户大幅回撤，但据转述最终仍保持总体盈利。',
+            '虽然结果仍是盈利，但阶段浮盈发生了显著回撤。这个结果不能证明最高点能够提前判断，却说明一旦把退出权交给粉丝评价，正确的早期布局也可能失去主动兑现窗口。',
+            '如果换成我，末端加速、赔率明显恶化或体系退出条件出现时就分批兑现。我只对自己的本金、现金流和风险边界负责；后面继续上涨就接受卖飞，粉丝是否指责也不能替代退出纪律。',
+            '吸收他提前识别科技机会、敢于在行情启动前布局，并能持有到趋势明显扩张的能力。公开分享可以保持诚实，但观点、仓位和退出节奏必须允许动态变化。',
+            '避免为了维持人设或取悦粉丝放弃退出；避免把“总体仍盈利”当成动作正确的证明；也避免用7月下跌事后倒推阶段最高点一定可精确卖出。',
+            '适用于公开荐股、社群喊单、带货、合伙决策及任何“别人怎么看”开始影响仓位的场景。若涉及代客、跟单或法定受托责任，应另按相应义务处理。本案例只讨论自有账户的决策边界，金额和收益真实性不作为模式成立的前提。',
+            JSON.stringify([
+              '公开表达不能替代退出纪律',
+              '末端加速分批兑现，接受卖飞',
+              '别人不承担我的回撤，不能替我决定仓位'
+            ]),
+            JSON.stringify({
+              capturedBy: 'migration-20260903_002',
+              sourcePlatform: '自媒体平台（具体入口未保存）',
+              sourceAccount: '小张小张吃饭用缸',
+              sourceEvidence: 'user_relay_of_public_self_report',
+              capturedAt: '2026-09-03',
+              verificationStatus: 'unconfirmed'
+            }),
+            '核心不是科技ETF最终涨跌，而是本人已有退出判断时，是否仍能把自己的资金安全放在外部评价之前。500万元、1900万元和回撤幅度均保留为待核验口述数据。'
+          ]
+        );
+        behaviorCase = await dbGet<{ id: number }>(
+          db,
+          `SELECT id
+           FROM behavior_cases
+           WHERE title = ? AND is_deleted = 0
+           ORDER BY id
+           LIMIT 1`,
+          [title]
+        );
+      }
+
+      if (!behaviorCase) {
+        throw new Error('Creator audience pressure exit case could not be created');
+      }
+
+      const patternLinks = [
+        { name: '没有退出机制', role: 'primary' },
+        { name: '外部评价绑架决策', role: 'secondary' },
+        { name: '暴涨后崩跌', role: 'secondary' }
+      ];
+      for (const link of patternLinks) {
+        const pattern = await dbGet<{ id: number }>(
+          db,
+          `SELECT id
+           FROM behavior_patterns
+           WHERE name = ? AND is_deleted = 0 AND status = 'active'
+           ORDER BY id
+           LIMIT 1`,
+          [link.name]
+        );
+        if (!pattern) {
+          throw new Error(`Required behavior pattern is missing: ${link.name}`);
+        }
+        await dbRun(
+          db,
+          `INSERT OR IGNORE INTO behavior_case_pattern_links
+            (case_id, pattern_id, role, note, created_at, updated_at)
+           VALUES (?, ?, ?, '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [behaviorCase.id, pattern.id, link.role]
+        );
+      }
+
+      if (await migrationTableExists(db, 'audit_logs')) {
+        await dbRun(
+          db,
+          `INSERT OR IGNORE INTO audit_logs
+            (id, timestamp, module, action, target, status, detail, entity_id,
+             path, domain, workspace, created_at, updated_at)
+           VALUES ('audit-human-case-creator-audience-pressure-20260903', CURRENT_TIMESTAMP,
+                   '人因案例库', 'create', ?, 'success', ?, ?, '/review/human-cases',
+                   'business', 'business', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [
+            title,
+            JSON.stringify({
+              originType: 'public',
+              evidenceLevel: 'unconfirmed',
+              actionQuality: 'flawed',
+              outcomeType: 'profit',
+              primaryPattern: '没有退出机制',
+              secondaryMechanism: '外部评价绑架决策'
+            }),
+            String(behaviorCase.id)
+          ]
+        );
+      }
+    }
+  },
+  {
+    id: '20260903_003_seed_li_yien_long_term_narrative_boundary_case',
+    name: 'Add Li Yien long-term thesis and late-entry risk boundary case',
+    run: async (db: any) => {
+      if (!(await migrationTableExists(db, 'behavior_cases'))) return;
+      if (!(await migrationTableExists(db, 'behavior_patterns'))) return;
+      if (!(await migrationTableExists(db, 'behavior_case_pattern_links'))) return;
+
+      await dbRun(
+        db,
+        `INSERT OR IGNORE INTO behavior_patterns
+          (name, axis, category, summary, trigger_phrases_json, observable_actions_json,
+           mechanism, risk_chain, counter_question, protective_action, positive_counterpart,
+           maturity, status, sort_order, note, is_deleted, created_at, updated_at)
+         VALUES ('长期叙事替代入场与风控', 'human', 'human_bias', ?, ?, ?, ?, ?, ?, ?, ?,
+                 'candidate', 'active', 180, ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+        [
+          '把长期方向可能正确，误当成任何价格都能参与、任何仓位都能承受且所有人都该继续持有的理由。',
+          JSON.stringify(['时间会证明', '拿着别动', '长期一定没问题', '跌了只是洗盘']),
+          JSON.stringify(['高位补票后照搬低位持有逻辑', '不区分成本和仓位', '用产业逻辑覆盖回撤与退出边界']),
+          '长期产业逻辑无法直接回答当前赔率；低位布局者与高位跟随者的成本、现金流、期限和最大回撤承受力完全不同。',
+          '长期故事成立 → 价格上涨形成权威口号 → 后期追入 → 回撤时继续用长期逻辑解释 → 风险承受能力先于逻辑兑现耗尽',
+          '如果我今天没有仓位，还会按当前价格、当前仓位重新买入，并能承受同样深度和时长的回撤吗？',
+          '把方向、价格、仓位和期限分开判断；未经自身体系确认只进入观察层，长期看好不能取消入场和退出纪律。',
+          '长期逻辑与当下赔率分开',
+          '该模式不否定长期持有本身，只否定脱离成本、仓位和承受力后机械复制“拿着不动”。'
+        ]
+      );
+
+      const title = '李一恩“拿着别动”：长期逻辑不能替代入场与风控';
+      let behaviorCase = await dbGet<{ id: number }>(
+        db,
+        `SELECT id
+         FROM behavior_cases
+         WHERE title = ? AND is_deleted = 0
+         ORDER BY id
+         LIMIT 1`,
+        [title]
+      );
+
+      if (!behaviorCase) {
+        await dbRun(
+          db,
+          `INSERT INTO behavior_cases
+            (title, origin_type, subject_alias, source_note, evidence_level, case_date,
+             track, project_name, background, visible_information, pressure_context,
+             action_taken, result, action_quality, outcome_type, evidence_role,
+             self_response, learn_to_keep, learn_to_avoid, applicability_boundary,
+             linked_rule_refs_json, source_type, source_id, source_snapshot_json,
+             pricing_analysis_json, note, is_deleted, created_at, updated_at)
+           VALUES (?, 'public', ?, ?, 'second_hand', '2026-07-01',
+                   '科技ETF/光模块与算力', '长期逻辑与高位跟随风险', ?, ?, ?,
+                   ?, ?, 'mixed', 'ongoing', 'boundary',
+                   ?, ?, ?, ?, ?, '', '', ?, '{}', ?, 0,
+                   CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [
+            title,
+            '李一恩',
+            '公开表述已有出处：2026-06-26、06-29抖音内容及2026-07-01直播转录均出现“拿着别动/时间会证明光模块和算力”；同一份07-01转录也明确提示位置已高、不要追。后期跟随者高位被套来自用户观察，未取得账户级证据。',
+            '李一恩长期看好光模块与算力，并把“拿着别动，时间会证明光模块和算力”形成了高度传播的表达。该判断可能适合较早完成研究、低位布局且能承受波动的人，但不能自动转化为任何时点的参与许可。',
+            '公开资料能核到两组同时存在的信息：一是反复强调光模块与算力的长期逻辑和持有；二是明确表示当时位置已经较高、上涨后不要追。2026-08-14相关回放摘要也区分了“有仓位持有”和“没仓位不急于追高”。用户观察到部分后期高位跟随者在7月科技回撤后被套，但具体人数、成本和亏损未独立核验。',
+            '一句容易传播的长期口号，会压缩掉入场时间、成本、仓位、期限和回撤承受力。后期参与者既怕错过，也容易借用早期布局者的信念给自己的高位买入寻找安全感。',
+            '1. 早期研究和布局者按长期产业逻辑持有光模块与算力方向。\n2. 公开传播中，“拿着别动，时间会证明”逐渐成为最醒目的记忆点。\n3. 部分后期参与者据用户观察在高位追入，并在回撤后继续套用长期持有口径。\n4. 完整公开内容其实也包含“位置已高、不要追”等边界，但这些限制条件不如口号容易传播。',
+            '长期产业判断目前不能仅凭一次回撤判定对错，案例仍在观察。可以确认的是：同一句“拿着别动”，对低成本、轻仓、长期资金和高位、重仓、短期资金不是同一个动作；高位跟随者即使最终等到反转，也可能先被现金流、情绪和回撤承受力淘汰。',
+            '如果是我，长期方向只决定是否进入研究和观察，不直接决定现在买不买。末端加速后不追；需要参与时按自身体系等待、分批并限定仓位。已经持有也按自己的成本、现金流和退出规则处理，不机械复制任何人的“拿着别动”。',
+            '吸收其对光模块、算力产业趋势的长期研究视角，也保留低频持有、避免追涨杀跌的价值；尤其要保留其完整表述中“位置高、不要追”的限制条件。',
+            '避免只记住一句传播性最强的口号；避免把别人的低位成本和长期资金条件移植到自己的高位买入；避免用“未来可能正确”掩盖当前盈亏比和仓位不合适。',
+            '适用于科技成长、贵金属、主题基金及所有长期逻辑很强但短期波动巨大的资产。该案例不评价光模块与算力最终方向，也不把7月回撤当成长逻辑失效；公开内容存在明确的不追高提醒，因此不能把后期所有追高损失简单归责于博主。跟随者实际盈亏仍待验证。',
+            JSON.stringify([
+              '长期方向、入场价格、仓位和持有期限必须分开判断',
+              '低位布局者的持有逻辑不能直接移植给高位追入者',
+              '外部观点只进观察层，最终动作服从自己的体系'
+            ]),
+            JSON.stringify({
+              capturedBy: 'migration-20260903_003',
+              sourcePlatform: '抖音/B站公开转录',
+              sourceAccount: '李一恩',
+              capturedAt: '2026-09-03',
+              verificationStatus: 'partially_documented',
+              documentedClaims: [
+                '反复表达拿着别动、时间会证明光模块和算力',
+                '同时明确提醒位置已高、不要追'
+              ],
+              unverifiedClaims: [
+                '后期高位跟随者的具体成本、数量和账户亏损'
+              ],
+              references: [
+                'https://www.douyin.com/video/7655558755681483173',
+                'https://www.douyin.com/video/7656676101032694651',
+                'https://www.bilibili.com/opus/1219986882081849350',
+                'https://www.bilibili.com/video/BV1F4gK6LELK/'
+              ]
+            }),
+            '这是一条“同一长期判断在不同成本和承受力下含义不同”的边界案例。保留完整上下文，不把口号单独截出来定罪，也不因长期逻辑可能成立就给高位追入开绿灯。'
+          ]
+        );
+        behaviorCase = await dbGet<{ id: number }>(
+          db,
+          `SELECT id
+           FROM behavior_cases
+           WHERE title = ? AND is_deleted = 0
+           ORDER BY id
+           LIMIT 1`,
+          [title]
+        );
+      }
+
+      if (!behaviorCase) {
+        throw new Error('Li Yien long-term narrative boundary case could not be created');
+      }
+
+      const patternLinks = [
+        { name: '追高', role: 'primary' },
+        { name: 'FOMO（错失焦虑）', role: 'secondary' },
+        { name: '长期叙事替代入场与风控', role: 'secondary' }
+      ];
+      for (const link of patternLinks) {
+        const pattern = await dbGet<{ id: number }>(
+          db,
+          `SELECT id
+           FROM behavior_patterns
+           WHERE name = ? AND is_deleted = 0 AND status = 'active'
+           ORDER BY id
+           LIMIT 1`,
+          [link.name]
+        );
+        if (!pattern) {
+          throw new Error(`Required behavior pattern is missing: ${link.name}`);
+        }
+        await dbRun(
+          db,
+          `INSERT OR IGNORE INTO behavior_case_pattern_links
+            (case_id, pattern_id, role, note, created_at, updated_at)
+           VALUES (?, ?, ?, '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [behaviorCase.id, pattern.id, link.role]
+        );
+      }
+
+      if (await migrationTableExists(db, 'audit_logs')) {
+        await dbRun(
+          db,
+          `INSERT OR IGNORE INTO audit_logs
+            (id, timestamp, module, action, target, status, detail, entity_id,
+             path, domain, workspace, created_at, updated_at)
+           VALUES ('audit-human-case-li-yien-long-term-boundary-20260903', CURRENT_TIMESTAMP,
+                   '人因案例库', 'create', ?, 'success', ?, ?, '/review/human-cases',
+                   'business', 'business', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [
+            title,
+            JSON.stringify({
+              originType: 'public',
+              evidenceLevel: 'second_hand',
+              actionQuality: 'mixed',
+              outcomeType: 'ongoing',
+              primaryPattern: '追高',
+              boundary: '公开内容同时包含长期持有与不要追高'
+            }),
+            String(behaviorCase.id)
+          ]
+        );
+      }
+    }
+  },
+  {
+    id: '20260904_001_seed_ps5_price_repricing_v01_market_case',
+    name: 'Freeze PS5 price repricing ongoing market case V0.1',
+    run: async (db: any) => {
+      if (!(await migrationTableExists(db, 'market_reviews'))) return;
+
+      const title = '2026 PS5 系列价格重估 / PS5 Pro异常加速（进行中 V0.1）';
+      let marketReview = await dbGet<{ id: number }>(
+        db,
+        `SELECT id
+         FROM market_reviews
+         WHERE title = ? AND is_deleted = 0
+         ORDER BY id
+         LIMIT 1`,
+        [title]
+      );
+
+      if (!marketReview) {
+        await dbRun(
+          db,
+          `INSERT INTO market_reviews
+            (title, track, project_name, review_date, market_type_preset,
+             market_type_custom, summary_conclusion, short_lesson, background,
+             market_start, market_evolution, key_turning_points, later_outcome,
+             exposed_problem, extracted_lesson, note, is_deleted, created_at, updated_at)
+           VALUES (?, '游戏机', 'PS5系列 / PS5 Pro', '2026-09-04', '自定义', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                   0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [
+            title,
+            '趋势强 / 基本面存在支撑 / 疑似末端加速',
+            '截至2026-09-04，PS5系列处于价格中枢明显抬升阶段，PS5 Pro斜率尤其陡。当前只定义为“趋势强、基本面存在支撑、疑似末端加速”；不预测顶部，也没有参与计划。',
+            '价格高并不证明马上下跌，但当前风险收益结构已经不适合追货。',
+            '一、现象\n\n2026年3月至9月，国内PS5系列二手档口回收价整体明显上涨。PS5 Slim多数版本较3月低位上涨约20%～40%；本地档口记录中，PS5 Pro日版数字版由约4800元升至9000元，港版数字版由约5300元升至9300元，出现明显斜率加速。\n\n同期Switch OLED国内价格总体横盘偏弱，NS2港版单机原盒约在3230～3365元窄幅波动，明显弱于PS5，说明不能简单用“整个游戏硬件行业共同涨价”解释。',
+            '二、当前推测的传导链\n\nAI/数据中心推动存储需求及资源重新配置\n→ 消费级存储及相关BOM成本压力\n→ Sony自身成本压力\n→ 官方全球调价\n→ PS5整体价格中枢抬升\n→ 部分型号供应与需求错配\n→ 官方价格与二级市场价格倒挂\n→ 消费者、渠道、套利资金共同抢货\n→ 补货快速售罄\n→ 流通库存进一步下降\n→ 二级市场继续抬价。\n\nPS5 Pro在上述共同因素之外，可能额外叠加高性能版本需求、GTA 6预期、严重缺货、惜售及套利正反馈，因此涨幅显著超过普通PS5。以上均为截至冻结日的待验证推测，不作为已确认因果。',
+            '三、控制组\n\nSwitch OLED国内半年总体横盘偏弱；NS2港版单机原盒约在3230～3365元窄幅波动。日本Switch 2回收价格虽可能有温和上涨，但明显弱于日本PS5 Slim和PS5 Pro。\n\n因此目前暂不支持“单纯存储涨价导致所有游戏机普涨”的解释，PlayStation自身的定价、供应和需求因素权重更高。\n\n四、当前风险状态\n\nPS5 Pro国内档口价格已出现明显斜率加速，当前定义为：\n\n趋势强 / 基本面存在支撑 / 疑似末端加速 / 不预测顶部 / 无参与计划。\n\n价格高并不证明马上下跌，但当前风险收益结构已经不适合追货。',
+            '五、待验证假设\n\n当前尚未确认供应拐点，后续只按新出现的日期和证据追加：\n\n1. Sony持续补货后，官方渠道能否从“秒空”变成持续库存；\n2. 日本買取价格是否率先停止创新高；\n3. 国内档口是否随后停止提价、开始降价或限收；\n4. Pro回落是否领先或滞后于Slim；\n5. 官方价与二级市场价差缩窄后，套利需求是否快速退出；\n6. 如果供应恢复，价格最终回到什么新中枢；\n7. 本轮存储成本、官方调价、真实消费需求和套利资金各自贡献到底有多大。',
+            '六、当前不能下的结论\n\n本案例仍在进行中，V0.1不写结局：\n\n1. 不确认9000元附近为顶部；\n2. 不确认后续一定暴跌；\n3. 不确认存储涨价是唯一主因；\n4. 不确认GTA 6是主要原因；\n5. 不把官方偶发补货等同于供应恢复。',
+            '当前无法拆清存储成本、Sony官方调价、真实消费需求、GTA 6预期、渠道惜售和套利资金各自贡献。所有传导关系都停留在待验证层，不用结果倒推原因，也不拿单次补货或单日价格变化宣布拐点。',
+            '七、案例价值\n\n用于研究标准化工业品在“成本变化—厂商调价—供需错配—官方/市场价格倒挂—套利资金进入—价格加速—厂商补产—套利退出—价格修复”过程中的完整价格行为。\n\nV0.1保存的是2026-09-04当时真实可见的信息集和推理过程，用于以后检验判断是否具有前瞻性，而不是拿未来答案解释过去。该结构以后可复用于硬盘、手机、茅台、纪念币及大宗商品案例。',
+            '版本：V0.1\n状态：进行中\n认知冻结日：2026-09-04\n价格数据截止日：2026-09-03\n数据口径：本地游戏机档口回收价；原因链条属于人工推测，尚未完成因果验证。\n\n更新纪律：\n1. 供应拐点或其他关键变化出现后，只新增“2026-XX-XX：第一次关键状态变化”等带日期记录，形成V0.2，不改写V0.1原判断；\n2. 行情彻底结束后再形成V1.0复盘，分别回答“哪些判断对了、哪些判断错了、什么指标最有领先价值”；\n3. 在结局出现前，不补写顶部、暴跌或最终中枢。'
+          ]
+        );
+        marketReview = await dbGet<{ id: number }>(
+          db,
+          `SELECT id
+           FROM market_reviews
+           WHERE title = ? AND is_deleted = 0
+           ORDER BY id
+           LIMIT 1`,
+          [title]
+        );
+      }
+
+      if (!marketReview) {
+        throw new Error('PS5 price repricing ongoing market case V0.1 could not be created');
+      }
+
+      if (await migrationTableExists(db, 'audit_logs')) {
+        await dbRun(
+          db,
+          `INSERT OR IGNORE INTO audit_logs
+            (id, timestamp, module, action, target, status, detail, entity_id,
+             path, domain, workspace, created_at, updated_at)
+           VALUES ('audit-market-review-ps5-repricing-v01-20260904', CURRENT_TIMESTAMP,
+                   '行情复盘', 'create', ?, 'success', ?, ?, '/review/market',
+                   'business', 'business', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [
+            title,
+            JSON.stringify({
+              version: 'V0.1',
+              status: 'ongoing',
+              cognitionFrozenAt: '2026-09-04',
+              priceDataThrough: '2026-09-03',
+              conclusionPolicy: 'freeze-current-information-without-writing-outcome'
+            }),
+            String(marketReview.id)
+          ]
+        );
+      }
+    }
+  },
+  {
+    id: '20260906_001_refine_gazijie_supply_floor_archive',
+    name: 'Refine Gazijie supply pressure floors and anniversary release archive',
+    run: async (db: any) => {
+      if (!(await migrationTableExists(db, 'product_archives'))) return;
+
+      const archive = await dbGet<any>(
+        db,
+        `SELECT id, issue_info, risk_basis, experience_note, pending_questions
+         FROM product_archives
+         WHERE category_name = '泡泡玛特'
+           AND object_name = '嘎子姐'
+           AND COALESCE(is_deleted, 0) = 0
+         ORDER BY id
+         LIMIT 1`
+      );
+      if (!archive) return;
+
+      const appendOnce = (current: unknown, marker: string, addition: string) => {
+        const text = String(current || '').trim();
+        if (text.includes(marker)) return text;
+        return [text, addition].filter(Boolean).join('\n\n');
+      };
+
+      const legacyExperience = '之前也有过门店轮动补货，但不是通货补，当时把价格砸到450以下了。，然后就不咋补货了，零零散散的有补货，后来长时间横盘以后就涨上去了';
+      const cleanedExperience = String(archive.experience_note || '')
+        .replace(legacyExperience, '')
+        .trim();
+      const experienceNote = appendOnce(
+        cleanedExperience,
+        '历史供给压力锚（日期待核）',
+        '历史供给压力锚（日期待核）：官方曾连续多日进行阶段性大规模补货，市场价格一度跌到400元出头；具体日期和精确价格没有留存，因此不补造价格记录。这种阶段性大补不等于线上线下持续数月、随处可买的“通货补”。该轮结束后，官方未再出现同等级的大规模补货，只陆续进行过小规模补货；此后价格没有再跌破500元，并随着供给收缩和真实需求一路抬升。'
+      );
+
+      await dbRun(
+        db,
+        `UPDATE product_archives
+         SET issue_info = ?,
+             risk_basis = ?,
+             experience_note = ?,
+             pending_questions = ?,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`,
+        [
+          appendOnce(
+            archive.issue_info,
+            '阶段性大规模补货和通货补必须分开判断',
+            '供给口径补充：阶段性大规模补货和通货补必须分开判断。连续多日集中放量可以短期打开极端压力位，但只有线上线下随处可买并持续至少一个月甚至数月，才属于会改变长期结构的通货补。'
+          ),
+          appendOnce(
+            archive.risk_basis,
+            '供给形态决定价格底部的层级',
+            '供给形态决定价格底部的层级：400元出头仅是历史上连续多日大规模补货形成的极端压力锚；官方未持续大补后的价格记录显示，500元附近更接近正常供给环境下的观察底部。若未来重新出现同等级连续大补，400元出头的尾部风险会重新打开。'
+          ),
+          experienceNote,
+          appendOnce(
+            archive.pending_questions,
+            '周年庆线上货的实际规模',
+            '当前待确认：周年庆线上货的实际规模、集中卖盘何时消化、后续是否还有新一轮补货、群内约510元收货价能否持续，以及真爱粉和其他买家的真实承接是否足够稳定。'
+          ),
+          archive.id
+        ]
+      );
+
+      if (await migrationTableExists(db, 'product_archive_stages')) {
+        const stages = [
+          {
+            name: '连续大规模补货压力底',
+            time: '具体日期待核（早于现有完整价格序列）',
+            type: '阶段性大规模补货 / 极端供给压力',
+            priceStart: null,
+            priceHigh: null,
+            priceLow: null,
+            priceEnd: null,
+            summary: '官方曾连续多日进行大规模补货，市场价一度跌到400元出头。具体日期和精确价格未留存；该轮结束后未再出现同等级大补，后续仅有小规模补货，价格此后未再跌破500元并逐步抬升。',
+            actionRule: '400元出头只作为极端供给压力锚，不作为日常抄底线。先判断是阶段性集中放量还是持续数月的通货补；若是后者，原有稀缺结构失效，停止参与。',
+            evidence: '证据来自用户亲历和市场观察，日期及精确低价待核。系统自2026-03-30起的147条记录最低为508元，可支持“此后未再跌破500元附近”的后半段，但不能反证更早的400元出头低位。',
+            sortOrder: 1,
+            note: '不向价格历史补写虚构日期或精确价格。'
+          },
+          {
+            name: '2026周年庆线上放货消化',
+            time: '2026-08-24至2026-09-05（进行中）',
+            type: '线上放货 / 集中到货 / 真实承接观察',
+            priceStart: 689,
+            priceHigh: 689,
+            priceLow: 511,
+            priceEnd: 511,
+            summary: '周年庆采用线上直接放货，不产生门店自提码。系统记录从8月24日689元回落至9月5日511元，用户观察群内收货价也约为510元，说明当前价格中枢具有市场印证。推测周年庆货源近期集中流入千岛，本轮放量看起来不小，但真爱粉购买形成了真实承接；暂未看到继续补货迹象，后续供给仍未知。',
+            actionRule: '当前只定义为正常供给底附近的消化观察，不把511元当作绝对历史底。观察群收价是否撤低、千岛是否继续创新低、集中卖盘是否衰减；若供给停止后承接稳定，再重新评估，若转为连续大补则继续等待。',
+            evidence: '价格证据：本地千岛记录2026-08-24为689元、2026-08-28备注周年庆补货并报582元、2026-09-05报511元；市场证据：用户观察群内收货约510元。补货规模和后续安排尚无精确数据。',
+            sortOrder: 2,
+            note: '线上放货与门店轮动补货分开解释，本阶段不使用自提码作为信号。'
+          }
+        ];
+
+        for (const stage of stages) {
+          const existingStage = await dbGet<{ id: number }>(
+            db,
+            `SELECT id
+             FROM product_archive_stages
+             WHERE archive_id = ?
+               AND stage_name = ?
+               AND COALESCE(is_deleted, 0) = 0
+             LIMIT 1`,
+            [archive.id, stage.name]
+          );
+          if (existingStage) continue;
+          await dbRun(
+            db,
+            `INSERT INTO product_archive_stages
+              (archive_id, stage_name, time_text, stage_type, price_start, price_high,
+               price_low, price_end, stage_summary, action_rule, evidence_note,
+               confidence, sort_order, note, is_deleted, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'rough', ?, ?, 0,
+                     CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+            [
+              archive.id,
+              stage.name,
+              stage.time,
+              stage.type,
+              stage.priceStart,
+              stage.priceHigh,
+              stage.priceLow,
+              stage.priceEnd,
+              stage.summary,
+              stage.actionRule,
+              stage.evidence,
+              stage.sortOrder,
+              stage.note
+            ]
+          );
+        }
+      }
+
+      if (await migrationTableExists(db, 'audit_logs')) {
+        await dbRun(
+          db,
+          `INSERT OR IGNORE INTO audit_logs
+            (id, timestamp, module, action, target, status, detail, entity_id,
+             path, domain, workspace, created_at, updated_at)
+           VALUES ('audit-product-archive-gazijie-supply-floor-20260906', CURRENT_TIMESTAMP,
+                   '品种档案', 'update', '嘎子姐', 'success', ?, ?,
+                   '/risk-control/product-archives', 'business', 'business',
+                   CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [
+            JSON.stringify({
+              change: 'refine-supply-pressure-floors-and-anniversary-online-release',
+              historicalStressFloor: '400元出头，日期与精确价格待核',
+              postReleaseObservedFloor: '500元附近',
+              currentObservationDate: '2026-09-05',
+              currentQiandaoPrice: 511,
+              currentGroupBidApprox: 510
+            }),
+            String(archive.id)
+          ]
+        );
+      }
+    }
   }
 ];
 

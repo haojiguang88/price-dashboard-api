@@ -515,3 +515,284 @@ test("seeds collectible scarcity cases with honest quote and liquidity boundarie
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("seeds the Fuyao case as mixed survival and discipline evidence", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "fuyao-trading-survival-case-"));
+  const filename = path.join(directory, "human-case.db");
+  const manager = new DatabaseManager({
+    filename,
+    allowCreate: true,
+    initialize: initializeBusinessBaseSchema
+  });
+
+  try {
+    await manager.getDb();
+    await runMigrations(filename);
+    const db = await manager.getDb();
+    const behaviorCase = await db.get(
+      `SELECT id, origin_type, subject_alias, evidence_level, track,
+              action_quality, outcome_type, evidence_role, action_taken,
+              self_response, applicability_boundary, linked_rule_refs_json,
+              source_snapshot_json, note
+       FROM behavior_cases
+       WHERE title = ? AND is_deleted = 0`,
+      ["扶摇聊交易：从反复爆仓到“先不死”的账户重建"]
+    );
+
+    assert.ok(behaviorCase);
+    assert.equal(behaviorCase.origin_type, "public");
+    assert.equal(behaviorCase.subject_alias, "扶摇聊交易");
+    assert.equal(behaviorCase.evidence_level, "unconfirmed");
+    assert.equal(behaviorCase.track, "杠杆交易（期货/外汇未确认）");
+    assert.equal(behaviorCase.action_quality, "mixed");
+    assert.equal(behaviorCase.outcome_type, "mixed");
+    assert.equal(behaviorCase.evidence_role, "boundary");
+    assert.match(behaviorCase.action_taken, /每笔最多亏3美元/);
+    assert.match(behaviorCase.action_taken, /每天最多3单/);
+    assert.match(behaviorCase.self_response, /借款不用于高杠杆交易/);
+    assert.match(behaviorCase.applicability_boundary, /借钱扩大账户也不是可复制的正面动作/);
+    assert.match(behaviorCase.note, /不作为收益承诺/);
+    assert.deepEqual(JSON.parse(behaviorCase.linked_rule_refs_json), [
+      "先不死，保住本金",
+      "单次损失必须事先限定并可承受",
+      "只做交易系统内的机会",
+      "亏损后禁止加码翻本",
+      "连续盈利不得突破仓位边界"
+    ]);
+    assert.equal(
+      JSON.parse(behaviorCase.source_snapshot_json).verificationStatus,
+      "unconfirmed"
+    );
+
+    const links = await db.all(
+      `SELECT p.name, p.category, l.role
+       FROM behavior_case_pattern_links l
+       JOIN behavior_patterns p ON p.id = l.pattern_id
+       WHERE l.case_id = ?
+       ORDER BY CASE l.role WHEN 'primary' THEN 0 ELSE 1 END, p.name`,
+      [behaviorCase.id]
+    );
+    assert.deepEqual(links, [
+      { name: "过度下注", category: "execution_error", role: "primary" },
+      { name: "恐惧与过度防守", category: "human_bias", role: "secondary" },
+      { name: "连续盈利后的自信膨胀", category: "human_bias", role: "secondary" }
+    ]);
+
+    await db.run(
+      "DELETE FROM migrations WHERE id = ?",
+      ["20260903_001_seed_fuyao_trading_survival_case"]
+    );
+    await runMigrations(filename);
+    const duplicateCheck = await db.get(
+      `SELECT COUNT(*) AS total
+       FROM behavior_cases
+       WHERE title = ? AND is_deleted = 0`,
+      ["扶摇聊交易：从反复爆仓到“先不死”的账户重建"]
+    );
+    assert.equal(Number(duplicateCheck.total), 1);
+  } finally {
+    await manager.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("seeds the creator audience-pressure case without treating profit as a good action", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "creator-audience-pressure-case-"));
+  const filename = path.join(directory, "human-case.db");
+  const manager = new DatabaseManager({
+    filename,
+    allowCreate: true,
+    initialize: initializeBusinessBaseSchema
+  });
+
+  try {
+    await manager.getDb();
+    await runMigrations(filename);
+    const db = await manager.getDb();
+    const pattern = await db.get(
+      `SELECT axis, category, maturity, summary, counter_question, protective_action
+       FROM behavior_patterns
+       WHERE name = '外部评价绑架决策' AND is_deleted = 0`
+    );
+    assert.ok(pattern);
+    assert.equal(pattern.axis, "human");
+    assert.equal(pattern.category, "human_bias");
+    assert.equal(pattern.maturity, "candidate");
+    assert.match(pattern.summary, /放弃原本符合自身风险边界的决策/);
+    assert.match(pattern.counter_question, /替我承担回撤/);
+    assert.match(pattern.protective_action, /公开观点与个人仓位分开/);
+
+    const behaviorCase = await db.get(
+      `SELECT id, origin_type, subject_alias, evidence_level, track,
+              action_quality, outcome_type, evidence_role, background,
+              visible_information, pressure_context, result, self_response,
+              learn_to_avoid, applicability_boundary, linked_rule_refs_json,
+              source_snapshot_json, note
+       FROM behavior_cases
+       WHERE title = ? AND is_deleted = 0`,
+      ["小张小张吃饭用缸：粉丝评价绑架退出，盈利仍大幅回撤"]
+    );
+
+    assert.ok(behaviorCase);
+    assert.equal(behaviorCase.origin_type, "public");
+    assert.equal(behaviorCase.subject_alias, "小张小张吃饭用缸");
+    assert.equal(behaviorCase.evidence_level, "unconfirmed");
+    assert.equal(behaviorCase.track, "科技ETF（具体品种未确认）");
+    assert.equal(behaviorCase.action_quality, "flawed");
+    assert.equal(behaviorCase.outcome_type, "profit");
+    assert.equal(behaviorCase.evidence_role, "negative");
+    assert.match(behaviorCase.background, /账户总额还是累计盈利尚不明确/);
+    assert.match(behaviorCase.visible_information, /具体持仓、成交和净值曲线不可得/);
+    assert.match(behaviorCase.pressure_context, /退出动作变成了舆论选择/);
+    assert.match(behaviorCase.result, /不能证明最高点能够提前判断/);
+    assert.match(behaviorCase.self_response, /后面继续上涨就接受卖飞/);
+    assert.match(behaviorCase.learn_to_avoid, /总体仍盈利/);
+    assert.match(behaviorCase.applicability_boundary, /金额和收益真实性不作为模式成立的前提/);
+    assert.match(behaviorCase.note, /均保留为待核验口述数据/);
+    assert.deepEqual(JSON.parse(behaviorCase.linked_rule_refs_json), [
+      "公开表达不能替代退出纪律",
+      "末端加速分批兑现，接受卖飞",
+      "别人不承担我的回撤，不能替我决定仓位"
+    ]);
+    assert.equal(
+      JSON.parse(behaviorCase.source_snapshot_json).verificationStatus,
+      "unconfirmed"
+    );
+
+    const links = await db.all(
+      `SELECT p.name, p.category, l.role
+       FROM behavior_case_pattern_links l
+       JOIN behavior_patterns p ON p.id = l.pattern_id
+       WHERE l.case_id = ?
+       ORDER BY CASE l.role WHEN 'primary' THEN 0 ELSE 1 END, p.name`,
+      [behaviorCase.id]
+    );
+    assert.deepEqual(links, [
+      { name: "没有退出机制", category: "execution_error", role: "primary" },
+      { name: "外部评价绑架决策", category: "human_bias", role: "secondary" },
+      { name: "暴涨后崩跌", category: "market_structure", role: "secondary" }
+    ]);
+
+    await db.run(
+      "DELETE FROM migrations WHERE id = ?",
+      ["20260903_002_seed_creator_audience_pressure_exit_case"]
+    );
+    await runMigrations(filename);
+    const duplicateCheck = await db.get(
+      `SELECT
+         (SELECT COUNT(*) FROM behavior_cases
+          WHERE title = ? AND is_deleted = 0) AS case_total,
+         (SELECT COUNT(*) FROM behavior_patterns
+          WHERE name = '外部评价绑架决策' AND is_deleted = 0) AS pattern_total`,
+      ["小张小张吃饭用缸：粉丝评价绑架退出，盈利仍大幅回撤"]
+    );
+    assert.equal(Number(duplicateCheck.case_total), 1);
+    assert.equal(Number(duplicateCheck.pattern_total), 1);
+  } finally {
+    await manager.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("seeds the Li Yien case with long-term thesis and late-entry boundaries separated", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "li-yien-long-term-boundary-case-"));
+  const filename = path.join(directory, "human-case.db");
+  const manager = new DatabaseManager({
+    filename,
+    allowCreate: true,
+    initialize: initializeBusinessBaseSchema
+  });
+
+  try {
+    await manager.getDb();
+    await runMigrations(filename);
+    const db = await manager.getDb();
+    const pattern = await db.get(
+      `SELECT axis, category, maturity, summary, mechanism,
+              counter_question, protective_action, note
+       FROM behavior_patterns
+       WHERE name = '长期叙事替代入场与风控' AND is_deleted = 0`
+    );
+    assert.ok(pattern);
+    assert.equal(pattern.axis, "human");
+    assert.equal(pattern.category, "human_bias");
+    assert.equal(pattern.maturity, "candidate");
+    assert.match(pattern.summary, /任何价格都能参与/);
+    assert.match(pattern.mechanism, /低位布局者与高位跟随者/);
+    assert.match(pattern.counter_question, /今天没有仓位/);
+    assert.match(pattern.protective_action, /方向、价格、仓位和期限分开判断/);
+    assert.match(pattern.note, /不否定长期持有本身/);
+
+    const behaviorCase = await db.get(
+      `SELECT id, origin_type, subject_alias, evidence_level, case_date,
+              action_quality, outcome_type, evidence_role, source_note,
+              visible_information, action_taken, result, self_response,
+              learn_to_keep, learn_to_avoid, applicability_boundary,
+              linked_rule_refs_json, source_snapshot_json, note
+       FROM behavior_cases
+       WHERE title = ? AND is_deleted = 0`,
+      ["李一恩“拿着别动”：长期逻辑不能替代入场与风控"]
+    );
+
+    assert.ok(behaviorCase);
+    assert.equal(behaviorCase.origin_type, "public");
+    assert.equal(behaviorCase.subject_alias, "李一恩");
+    assert.equal(behaviorCase.evidence_level, "second_hand");
+    assert.equal(behaviorCase.case_date, "2026-07-01");
+    assert.equal(behaviorCase.action_quality, "mixed");
+    assert.equal(behaviorCase.outcome_type, "ongoing");
+    assert.equal(behaviorCase.evidence_role, "boundary");
+    assert.match(behaviorCase.source_note, /明确提示位置已高、不要追/);
+    assert.match(behaviorCase.visible_information, /两组同时存在的信息/);
+    assert.match(behaviorCase.action_taken, /完整公开内容其实也包含/);
+    assert.match(behaviorCase.result, /长期产业判断目前不能仅凭一次回撤判定对错/);
+    assert.match(behaviorCase.self_response, /末端加速后不追/);
+    assert.match(behaviorCase.learn_to_keep, /保留其完整表述中/);
+    assert.match(behaviorCase.learn_to_avoid, /低位成本和长期资金条件/);
+    assert.match(behaviorCase.applicability_boundary, /不能把后期所有追高损失简单归责于博主/);
+    assert.match(behaviorCase.note, /不把口号单独截出来定罪/);
+    assert.deepEqual(JSON.parse(behaviorCase.linked_rule_refs_json), [
+      "长期方向、入场价格、仓位和持有期限必须分开判断",
+      "低位布局者的持有逻辑不能直接移植给高位追入者",
+      "外部观点只进观察层，最终动作服从自己的体系"
+    ]);
+    const sourceSnapshot = JSON.parse(behaviorCase.source_snapshot_json);
+    assert.equal(sourceSnapshot.verificationStatus, "partially_documented");
+    assert.equal(sourceSnapshot.references.length, 4);
+    assert.ok(sourceSnapshot.documentedClaims.some((item: string) => item.includes("不要追")));
+    assert.ok(sourceSnapshot.unverifiedClaims.some((item: string) => item.includes("账户亏损")));
+
+    const links = await db.all(
+      `SELECT p.name, p.category, l.role
+       FROM behavior_case_pattern_links l
+       JOIN behavior_patterns p ON p.id = l.pattern_id
+       WHERE l.case_id = ?
+       ORDER BY CASE l.role WHEN 'primary' THEN 0 ELSE 1 END, p.name`,
+      [behaviorCase.id]
+    );
+    assert.deepEqual(links, [
+      { name: "追高", category: "execution_error", role: "primary" },
+      { name: "FOMO（错失焦虑）", category: "human_bias", role: "secondary" },
+      { name: "长期叙事替代入场与风控", category: "human_bias", role: "secondary" }
+    ]);
+
+    await db.run(
+      "DELETE FROM migrations WHERE id = ?",
+      ["20260903_003_seed_li_yien_long_term_narrative_boundary_case"]
+    );
+    await runMigrations(filename);
+    const duplicateCheck = await db.get(
+      `SELECT
+         (SELECT COUNT(*) FROM behavior_cases
+          WHERE title = ? AND is_deleted = 0) AS case_total,
+         (SELECT COUNT(*) FROM behavior_patterns
+          WHERE name = '长期叙事替代入场与风控' AND is_deleted = 0) AS pattern_total`,
+      ["李一恩“拿着别动”：长期逻辑不能替代入场与风控"]
+    );
+    assert.equal(Number(duplicateCheck.case_total), 1);
+    assert.equal(Number(duplicateCheck.pattern_total), 1);
+  } finally {
+    await manager.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
