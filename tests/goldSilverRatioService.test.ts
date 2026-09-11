@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildGoldSilverRatioSummary, loadGoldSilverRatioSummary } from "../src/services/goldSilverRatioService";
+import { buildGoldSilverRatioSummary, buildGoldSilverRatioSeries, loadGoldSilverRatioSummary, loadGoldSilverRatioSeries } from "../src/services/goldSilverRatioService";
 
 const dateAt = (offset: number) => {
   const date = new Date(Date.UTC(2026, 0, 1 + offset));
@@ -62,6 +62,32 @@ test("gold silver ratio rejects stale FX carry-forward data", () => {
   assert.equal(summary.sample_count, 0);
 });
 
+test("gold silver ratio series uses the same conversion and stays display-only", () => {
+  const goldRows = [
+    { trade_date: "2026-01-01", close: 2000 },
+    { trade_date: "2026-01-02", close: 2000 },
+    { trade_date: "2026-01-03", close: 2100 }
+  ];
+  const silverRows = [
+    { trade_date: "2026-01-01", close: 10 },
+    { trade_date: "2026-01-02", close: 10 },
+    { trade_date: "2026-01-03", close: 10 }
+  ];
+  const fxRows = [
+    { trade_date: "2026-01-01", close: 7 },
+    { trade_date: "2026-01-02", close: 7 },
+    { trade_date: "2026-01-03", close: 7 }
+  ];
+
+  const series = buildGoldSilverRatioSeries({ goldRows, silverRows, fxRows });
+  assert.equal(series.length, 3);
+  assert.equal(series[0].trade_date, "2026-01-01");
+  assert.equal(series[2].trade_date, "2026-01-03");
+  assert.ok(series[2].close > series[0].close);
+  const expected = 2100 * 7 / 31.1034768 / 10;
+  assert.ok(Math.abs(series[2].close - expected) < 0.001);
+});
+
 test("gold silver ratio database loader applies the as-of boundary to every input", async () => {
   const calls: Array<{ sql: string; params: unknown[] }> = [];
   const db = {
@@ -77,5 +103,29 @@ test("gold silver ratio database loader applies the as-of boundary to every inpu
   calls.forEach(call => {
     assert.match(call.sql, /trade_date <= \?/);
     assert.equal(call.params.at(-1), "2025-12-01");
+  });
+});
+
+test("gold silver ratio series loader applies as-of and lookback to every input", async () => {
+  const calls: Array<{ sql: string; params: unknown[] }> = [];
+  const db = {
+    get: async (sql: string, params: unknown[]) => {
+      calls.push({ sql, params });
+      if (sql.includes("MAX(trade_date)")) return { start_date: "2025-11-01" };
+      return { start_date: "2025-11-15" };
+    },
+    all: async (sql: string, params: unknown[]) => {
+      calls.push({ sql, params });
+      return [];
+    }
+  };
+
+  await loadGoldSilverRatioSeries(db, { asOfDate: "2025-12-01", rangeDays: 30 });
+
+  const sourceLoads = calls.filter(call => call.sql.includes("ORDER BY trade_date ASC"));
+  assert.equal(sourceLoads.length, 3);
+  sourceLoads.forEach(call => {
+    assert.equal(call.params.includes("2025-12-01"), true);
+    assert.equal(call.params.includes("2025-11-01"), true);
   });
 });

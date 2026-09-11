@@ -414,19 +414,22 @@ test("seeds collectible scarcity cases with honest quote and liquidity boundarie
     await runMigrations(filename);
     const db = await manager.getDb();
     const luckyCase = await db.get(
-      `SELECT id, action_quality, outcome_type, evidence_role, pricing_analysis_json,
+      `SELECT id, title, action_quality, outcome_type, evidence_role, pricing_analysis_json,
               visible_information, self_response, learn_to_keep, learn_to_avoid,
-              applicability_boundary, linked_rule_refs_json
+              applicability_boundary, linked_rule_refs_json, result
        FROM behavior_cases
-       WHERE title = ? AND is_deleted = 0`,
-      ["工商25龙：首日+70分+如意王的17倍收购观察"]
+       WHERE project_name = '工商25龙银币智能卡' AND is_deleted = 0
+       ORDER BY id LIMIT 1`
     );
     assert.ok(luckyCase);
+    assert.match(String(luckyCase.title), /圈外玩不了/);
     assert.equal(luckyCase.action_quality, "mixed");
     assert.equal(luckyCase.outcome_type, "ongoing");
     assert.equal(luckyCase.evidence_role, "boundary");
     assert.match(luckyCase.visible_information, /不是圈层目标号，价格会低很多/);
-    assert.match(luckyCase.self_response, /是否圈层目标号/);
+    assert.match(luckyCase.visible_information, /20000/);
+    assert.match(luckyCase.result, /从哪里看都玩不了/);
+    assert.match(luckyCase.self_response, /只记录，不参与/);
     assert.match(luckyCase.learn_to_keep, /固定玩家圈层/);
     assert.match(luckyCase.learn_to_avoid, /翻倍公式/);
     assert.match(luckyCase.applicability_boundary, /小众收藏品/);
@@ -434,11 +437,12 @@ test("seeds collectible scarcity cases with honest quote and liquidity boundarie
 
     const linkedRules = JSON.parse(luckyCase.linked_rule_refs_json);
     assert.ok(linkedRules.some((item: string) => item.includes("稀缺入场券")));
-    assert.ok(linkedRules.some((item: string) => item.includes("圈外只做前期低价小量埋伏")));
+    assert.ok(linkedRules.some((item: string) => item.includes("圈外只记录，不参与")));
 
     const luckyPricing = JSON.parse(luckyCase.pricing_analysis_json);
     assert.equal(luckyPricing.basePrice, 1000);
     assert.equal(luckyPricing.observedPriceLow, 17000);
+    assert.equal(luckyPricing.observedPriceHigh, 20000);
     assert.equal(luckyPricing.priceSignalType, "bid");
     assert.equal(luckyPricing.buyerBreadth, "concentrated");
     assert.deepEqual(luckyPricing.conditionStack, ["龙头", "首日", "评级70分", "圈层目标号：如意王"]);
@@ -474,7 +478,7 @@ test("seeds collectible scarcity cases with honest quote and liquidity boundarie
        WHERE project_name = '发财龙（PMG网红专标）' AND is_deleted = 0`
     );
     assert.ok(facaiCase);
-    assert.match(facaiCase.title, /运营制造稀缺/);
+    assert.match(facaiCase.title, /击鼓传花/);
     assert.equal(facaiCase.action_quality, "good");
     const facaiPricing = JSON.parse(facaiCase.pricing_analysis_json);
     assert.equal(facaiPricing.basePrice, 670);
@@ -503,10 +507,9 @@ test("seeds collectible scarcity cases with honest quote and liquidity boundarie
     const duplicateCheck = await db.get(
       `SELECT
          (SELECT COUNT(*) FROM behavior_cases
-          WHERE title = ? AND is_deleted = 0) AS case_total,
+          WHERE project_name = '工商25龙银币智能卡' AND is_deleted = 0) AS case_total,
          (SELECT COUNT(*) FROM behavior_patterns
-          WHERE name = '组合稀缺与圈层定价' AND is_deleted = 0) AS pattern_total`,
-      ["工商25龙：首日+70分+如意王的17倍收购观察"]
+          WHERE name = '组合稀缺与圈层定价' AND is_deleted = 0) AS pattern_total`
     );
     assert.equal(Number(duplicateCheck.case_total), 1);
     assert.equal(Number(duplicateCheck.pattern_total), 1);

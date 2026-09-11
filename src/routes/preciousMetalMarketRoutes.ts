@@ -1,7 +1,13 @@
 import express from "express";
 import getDb from "../config/database";
 import { getSilverAnchorEvidence } from "../services/marketAnchorService";
-import { loadGoldSilverRatioSummary } from "../services/goldSilverRatioService";
+import {
+  GOLD_SILVER_RATIO_QUOTE,
+  GOLD_SILVER_RATIO_SYMBOL,
+  loadGoldSilverRatioSeries,
+  loadGoldSilverRatioSummary
+} from "../services/goldSilverRatioService";
+import { loadPreciousMetalConverterContext } from "../services/preciousMetalConverterService";
 import { getCoinSilverPremiumContext } from "../services/coinSilverPremiumService";
 import {
   evaluateSilverSwingRules,
@@ -1601,13 +1607,46 @@ router.get("/precious-metal-market/coin-silver-premium-context", async (req, res
   }
 });
 
+router.get("/precious-metal-market/converter", async (_req, res) => {
+  try {
+    const db = await getDb();
+    const data = await loadPreciousMetalConverterContext(db);
+    res.json({ success: true, data });
+  } catch (error) {
+    res.status(200).json({
+      success: false,
+      message: (error as Error).message || "贵金属换算读取失败",
+      data: null
+    });
+  }
+});
+
 router.get("/precious-metal-market/prices", async (req, res) => {
   try {
     const db = await getDb();
     const requestedSymbol = String(req.query.symbol || "SGE_AGTD").trim().toUpperCase();
-    const symbolConfig = MAIN_PRICE_SYMBOLS.find(item => item.symbol === requestedSymbol) || MAIN_PRICE_SYMBOLS[1];
     const rangeDays = parseRangeDays(req.query.range);
     const requestedAsOfDate = parseOptionalAsOfDate(req.query.as_of);
+    if (requestedSymbol === GOLD_SILVER_RATIO_SYMBOL) {
+      const rows = await loadGoldSilverRatioSeries(db, {
+        asOfDate: requestedAsOfDate,
+        rangeDays
+      });
+      const effectiveAsOfDate = rows.length ? String(rows[rows.length - 1].trade_date || "") : "";
+      res.json({
+        success: true,
+        data: {
+          symbol: GOLD_SILVER_RATIO_QUOTE,
+          rows,
+          requested_as_of_date: requestedAsOfDate,
+          effective_as_of_date: effectiveAsOfDate,
+          mode: requestedAsOfDate ? "historical_replay" : "latest",
+          uses_future_data: false
+        }
+      });
+      return;
+    }
+    const symbolConfig = MAIN_PRICE_SYMBOLS.find(item => item.symbol === requestedSymbol) || MAIN_PRICE_SYMBOLS[1];
     const anchorDateExpression = requestedAsOfDate
       ? "(SELECT MAX(trade_date) FROM market_anchor_daily_prices WHERE symbol = ? AND source = ? AND trade_date <= ?)"
       : "(SELECT MAX(trade_date) FROM market_anchor_daily_prices WHERE symbol = ? AND source = ?)";

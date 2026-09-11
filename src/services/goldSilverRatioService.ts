@@ -217,6 +217,111 @@ export const buildGoldSilverRatioSummary = (input: GoldSilverRatioInput): GoldSi
   };
 };
 
+export const GOLD_SILVER_RATIO_SYMBOL = "GOLD_SILVER_RATIO";
+
+export type GoldSilverRatioSeriesPoint = {
+  trade_date: string;
+  close: number;
+  gold_close: number;
+  silver_close: number;
+  fx_rate: number;
+  fx_date: string;
+};
+
+export const GOLD_SILVER_RATIO_QUOTE = {
+  symbol: GOLD_SILVER_RATIO_SYMBOL,
+  label: "金银比",
+  source: "derived",
+  sourceLabel: "XAUUSD × USD/CNH ÷ 31.1034768 ÷ Ag(T+D)",
+  role: "只读观察白银相对黄金的强弱，不参与规则打分，不单独决定买卖"
+};
+
+export const buildGoldSilverRatioSeries = (input: GoldSilverRatioInput): GoldSilverRatioSeriesPoint[] => (
+  buildRatioPoints(input).map(point => ({
+    trade_date: point.tradeDate,
+    close: Number(roundNumber(point.ratio, 4)),
+    gold_close: point.goldClose,
+    silver_close: point.silverClose,
+    fx_rate: point.fxRate,
+    fx_date: point.fxDate
+  }))
+);
+
+const loadRatioSourceRows = (
+  db: any,
+  symbol: string,
+  source: string,
+  asOfDate: string,
+  startDate: string | null
+) => {
+  const clauses = ["symbol = ?", "source = ?", "close IS NOT NULL", "close > 0"];
+  const params: unknown[] = [symbol, source];
+  if (asOfDate) {
+    clauses.push("trade_date <= ?");
+    params.push(asOfDate);
+  }
+  if (startDate) {
+    clauses.push("trade_date >= ?");
+    params.push(startDate);
+  }
+  return db.all(
+    `SELECT trade_date, close
+     FROM market_anchor_daily_prices
+     WHERE ${clauses.join(" AND ")}
+     ORDER BY trade_date ASC, id ASC`,
+    params
+  );
+};
+
+const resolveRatioLookbackStart = async (
+  db: any,
+  asOfDate: string,
+  lookbackDays: number
+): Promise<string | null> => {
+  const row = asOfDate
+    ? await db.get(
+      `SELECT date(
+         (SELECT MAX(trade_date) FROM market_anchor_daily_prices
+          WHERE symbol = 'SGE_AGTD' AND source = 'tushare_sge' AND trade_date <= ?),
+         ?
+       ) AS start_date`,
+      [asOfDate, `-${lookbackDays} day`]
+    )
+    : await db.get(
+      `SELECT date(
+         (SELECT MAX(trade_date) FROM market_anchor_daily_prices
+          WHERE symbol = 'SGE_AGTD' AND source = 'tushare_sge'),
+         ?
+       ) AS start_date`,
+      [`-${lookbackDays} day`]
+    );
+  return row?.start_date || null;
+};
+
+export const loadGoldSilverRatioSeries = async (
+  db: any,
+  options: { asOfDate?: string | null; rangeDays?: number | null } = {}
+): Promise<GoldSilverRatioSeriesPoint[]> => {
+  const asOfDate = String(options.asOfDate || "").trim();
+  const rangeDays = options.rangeDays ?? null;
+  const startDate = rangeDays ? await resolveRatioLookbackStart(db, asOfDate, rangeDays + 14) : null;
+  const [goldRows, silverRows, fxRows] = await Promise.all([
+    loadRatioSourceRows(db, "XAUUSD", "twelvedata", asOfDate, startDate),
+    loadRatioSourceRows(db, "SGE_AGTD", "tushare_sge", asOfDate, startDate),
+    loadRatioSourceRows(db, "USDCNH", "tushare_fxcm", asOfDate, startDate)
+  ]);
+  let series = buildGoldSilverRatioSeries({ goldRows, silverRows, fxRows });
+  if (rangeDays && series.length) {
+    const cutoffRow = await db.get(
+      "SELECT date(?, ?) AS start_date",
+      [series[series.length - 1].trade_date, `-${rangeDays} day`]
+    );
+    const cutoff = cutoffRow?.start_date;
+    if (cutoff) series = series.filter(point => point.trade_date >= cutoff);
+  }
+  return series;
+};
+
 export const loadGoldSilverRatioSummary = async (
   db: any,
   options: { asOfDate?: string | null } = {}

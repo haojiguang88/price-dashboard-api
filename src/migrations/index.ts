@@ -7426,7 +7426,9 @@ const migrations: Migration[] = [
       let luckyCase = await dbGet<{ id: number }>(
         db,
         `SELECT id FROM behavior_cases
-         WHERE title = ? AND is_deleted = 0 ORDER BY id LIMIT 1`,
+         WHERE is_deleted = 0
+           AND (title = ? OR title LIKE '工商25龙：首日+70分+如意王%' OR project_name = '工商25龙银币智能卡')
+         ORDER BY id LIMIT 1`,
         [luckyCaseTitle]
       );
       if (!luckyCase) {
@@ -8568,6 +8570,256 @@ const migrations: Migration[] = [
               currentGroupBidApprox: 510
             }),
             String(archive.id)
+          ]
+        );
+      }
+    }
+  },
+  {
+    id: '20260907_001_close_facailong_influencer_hot_potato',
+    name: 'Close Facai Long influencer case after high-price dump and short squeeze',
+    run: async (db: any) => {
+      const marker = '击鼓传花坐实（2026-09-07）';
+      const laterOutcome = `截至2026-07-23：原价约670元在数日内出现2600元真实成交，后续还看到约6000-7000元的拉升区间；首发约6000套、下一批约13000套，当时仍在观察后续放量由谁接盘。
+
+${marker}：大网红本人亲自上阵、加价卖货。币圈一批大佬反过来砸盘做空，网红认怂。原价抢到的没事；后来高价收货的挂树上。这就是典型击鼓传花，看谁接最后一棒。7月“真成交不等于真承接、不高位补票”被这轮出货和砸盘验证。龙银币后来也进过同一直播盘，但炒作远弱于龙钞/发财龙专标，不按钞的专标涨幅外推到币。`;
+      const summaryConclusion = '网红专标是击鼓传花。原价门槛货没事，高价收货挂树。大网红亲自加价卖后，币圈大佬砸盘做空，本人认怂。7月判断“真成交不等于可持续承接、高位不补票”成立；后续放量观察被这轮亲自出货提前验证。';
+      const treeType = '网红带货/击鼓传花/高位接货挂树';
+      const extractedLesson = '真实成交不等于可持续承接。判断网红专标不能只看当前成交价，要同时看首发流通量、后续批次、每批规模、买家结构和退出流动性。首发6000套形成的稀缺价格，不能直接外推到后续13000套；后续供给超过首发时，必须重新判断承接。原价没抢到不算亏，数日翻几倍更不能因错失感高位补票。网红亲自加价出货，就是击鼓传花进入兑现段：运营方开始把货卖给市场，高位收货者就是最后一棒。原价抢到只说明过了门槛，不证明后面加价买还能安全退出。被砸盘、认怂之后，不能用“曾经涨到过”为高位接货平反。';
+      const shortLesson = '击鼓传花看最后一棒；原价没事，高价收的挂树。';
+      const exposedProblem = '真实成交容易让人把“有人接”误判成“价格安全”。网红亲自加价出货是击鼓传花进入兑现段的信号；把加价卖当成还有下一棒，高位收货者就会成为最后接盘的人。';
+      const rootCauseType = '网红流量制造稀缺 + 击鼓传花 + 高位接货挂树（已验证）';
+      const note = '来源为用户亲自参与和市场观察。2026-07-23先确认2600元附近真实成交，当时第二批约13000套尚未验证。2026-09-07补后续：网红亲自加价卖、币圈砸盘做空后认怂；原价没事、高价收货挂树。不补造砸盘后的精确成交价。';
+      const title = '发财龙网红专标击鼓传花挂树案例';
+      const judgmentAtThatTime = '2600元真实成交只能证明此刻有人愿意接，并不能证明该溢价能够覆盖后续供给。首发筹码少、参与门槛高、网红流量集中时，价格可以被持续抬高；但下一批13000套超过首发两倍，接盘资金和真实终端需求将面临明显压力。当前判断仍是高位不追，并重点观察新买家来自原始粉丝、二级投机者还是拉升资金自身。 带4标10相对不带4标十的价差由负转正，说明需求不是泛化到全部龙钞，而是直接集中到发财龙所需底货。';
+      const actionAtThatTime = '没有为粉丝团3级额外刷礼物，也没有拿到原价货。2600元已有真实成交后仍不高位补票。后续围绕第二批13000套的发布时间、实际流通量、成交速度、买卖价差和低价抛单进行观察；如果原价持有，应把后续放量节点作为优先兑现窗口，而不是继续用当前成交价外推。';
+      const background = '快手千万级网红带货，并在PMG开设名为“发财龙”的专标。参与抢购要求粉丝团达到3级，一般还需要额外刷礼物，实际参与成本和准入门槛不只是670元原价。用户曾参与，但没有为升级粉丝团继续刷礼物，因此没有抢到。当前已确认2600元附近存在真实成交。供给采用分批释放：本次首发6000套，下一批计划13000套，已知总量至少19000套。 发财龙实际使用“标10带4”，不是散张或不带4标10。';
+
+      if (await migrationTableExists(db, 'tree_hanging_cases')) {
+        const existing = await dbGet<{ id: number }>(
+          db,
+          `SELECT id FROM tree_hanging_cases
+           WHERE COALESCE(is_deleted, 0) = 0
+             AND (project_name = '发财龙（PMG网红专标）'
+                  OR title LIKE '发财龙网红专标%')
+           ORDER BY id LIMIT 1`
+        );
+        const params = [
+          title,
+          '纪念钞',
+          '发财龙（PMG网红专标）',
+          '2026-07-23',
+          treeType,
+          summaryConclusion,
+          background,
+          judgmentAtThatTime,
+          actionAtThatTime,
+          laterOutcome,
+          rootCauseType,
+          exposedProblem,
+          extractedLesson,
+          shortLesson,
+          note
+        ];
+        if (existing) {
+          await dbRun(
+            db,
+            `UPDATE tree_hanging_cases
+             SET title = ?, track = ?, project_name = ?, review_date = ?, tree_type = ?,
+                 summary_conclusion = ?, background = ?, judgment_at_that_time = ?,
+                 action_at_that_time = ?, later_outcome = ?, root_cause_type = ?,
+                 exposed_problem = ?, extracted_lesson = ?, short_lesson = ?, note = ?,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?`,
+            [...params, existing.id]
+          );
+        } else {
+          await dbRun(
+            db,
+            `INSERT INTO tree_hanging_cases
+              (title, track, project_name, review_date, tree_type, summary_conclusion,
+               background, judgment_at_that_time, action_at_that_time, later_outcome,
+               root_cause_type, exposed_problem, extracted_lesson, short_lesson, note,
+               is_deleted, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+            params
+          );
+        }
+      }
+
+      if (await migrationTableExists(db, 'behavior_cases')) {
+        const facaiCase = await dbGet<{ id: number }>(
+          db,
+          `SELECT id FROM behavior_cases
+           WHERE is_deleted = 0
+             AND (title LIKE '发财龙网红专标%'
+                  OR project_name = '发财龙（PMG网红专标）')
+           ORDER BY id LIMIT 1`
+        );
+        if (facaiCase) {
+          const facaiPricingAnalysis = JSON.stringify({
+            basePriceLabel: '原始发售价',
+            basePrice: 670,
+            observedPriceLabel: '拉升后高位区间（砸盘前）',
+            observedPriceLow: 6000,
+            observedPriceHigh: 7000,
+            priceSignalType: 'market_reference',
+            conditionStack: ['PMG网红专标', '粉丝团渠道', '团队持续抬价收货', '网红亲自加价出货', '币圈砸盘做空'],
+            buyerBreadth: 'concentrated',
+            keyBuyerDependency: 'high',
+            exitLiquidity: 'thin',
+            verificationNote: '高位区间曾到约6000-7000；网红亲自加价卖后被砸盘认怂。原价抢到的没事，高价收货挂树。不补造砸盘后的精确成交价。'
+          });
+          await dbRun(
+            db,
+            `UPDATE behavior_cases
+             SET title = ?,
+                 background = ?,
+                 visible_information = ?,
+                 pressure_context = ?,
+                 result = ?,
+                 outcome_type = 'mixed',
+                 evidence_role = 'boundary',
+                 self_response = ?,
+                 learn_to_keep = ?,
+                 learn_to_avoid = ?,
+                 applicability_boundary = ?,
+                 pricing_analysis_json = ?,
+                 note = ?,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?`,
+            [
+              '发财龙网红专标：击鼓传花，高位收货挂树',
+              '团队申请PMG网红专标，借助千万级网红的粉丝影响力首轮按低价或市场价销售，再由一部分人持续在市场加价收货，逐级抬高价格并吸引跟风盘。行业里类似玩法还会更换为如意、比特、中华等不同专标名称。龙银币后来也进过同一直播盘，但炒作远弱于龙钞专标。',
+              '原价约670元，早期数日达到约2600元，高位曾到约6000-7000元；首发约6000套，后续还有约13000套。成交可以真实存在，但价格形成高度依赖团队运营、粉丝渠道和持续抬价收货。',
+              '真实成交、网红光环和连续上涨会让人产生“还有下一棒”的错觉；网红亲自加价卖货时，最容易让人以为还能再传一棒。',
+              '后续大网红亲自上阵加价卖货，币圈大佬砸盘做空后认怂。原价抢到的没事，后来高价收货的挂树上。击鼓传花坐实，看谁接最后一棒。上涨没有证明高位参与安全。',
+              '专标先拆底货价值、运营溢价和核心团队买盘；真成交只证明当下有人换手。网红亲自加价出货后，高位收货者就是最后一棒。没有独立买家宽度和退出深度时，不把运营出来的稀缺价外推，更不在高位补票。',
+              '吸收团队在标签、流量、渠道和价格节奏上的运营能力，同时学会识别谁在创造需求、谁在出货兑现。原价过门槛和后面加价收货必须分开看。',
+              '避免把专标名称当成自然稀缺，避免因为真实成交和继续上涨就认为后续一定有人接盘，避免在网红亲自加价卖时去接最后一棒。',
+              '适用于网红专标、圈层专标和运营型小众收藏品；不用于否定首日、满分、顶级号码等可核验的真实组合稀缺，两类案例必须分开分析。也不把龙钞专标的炒作强度套到后来加入的龙银币上。',
+              facaiPricingAnalysis,
+              '2026-09-07关闭观察：网红亲自加价卖、被砸盘后认怂；原价没事、高价收货挂树。砸盘后的精确成交价未留存，不补造。',
+              facaiCase.id
+            ]
+          );
+        }
+      }
+
+      if (await migrationTableExists(db, 'audit_logs')) {
+        await dbRun(
+          db,
+          `INSERT OR IGNORE INTO audit_logs
+            (id, timestamp, module, action, target, status, detail, entity_id,
+             path, domain, workspace, created_at, updated_at)
+           VALUES ('audit-tree-case-facailong-hot-potato-20260907', CURRENT_TIMESTAMP,
+                   '风控中心', 'update', '发财龙网红专标击鼓传花挂树案例', 'success', ?, NULL,
+                   '/review/case', 'business', 'business', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [
+            JSON.stringify({
+              change: 'close-facailong-influencer-hot-potato',
+              marker,
+              originalPriceSafe: true,
+              highPriceHung: true,
+              inventedPostCrashPrice: false
+            })
+          ]
+        );
+      }
+    }
+  },
+  {
+    id: '20260907_002_mark_icbc_lucky_circle_unplayable',
+    name: 'Mark ICBC 25 dragon lucky-number circle as record-only and unplayable',
+    run: async (db: any) => {
+      if (!(await migrationTableExists(db, 'behavior_cases'))) return;
+      const marker = '圈外玩不了（2026-09-07）';
+      const behaviorCase = await dbGet<{ id: number }>(
+        db,
+        `SELECT id FROM behavior_cases
+         WHERE is_deleted = 0
+           AND (project_name = '工商25龙银币智能卡'
+                OR title LIKE '工商25龙：首日+70分+如意王%')
+         ORDER BY id LIMIT 1`
+      );
+      if (!behaviorCase) return;
+
+      const pricingAnalysis = JSON.stringify({
+        basePriceLabel: '工商25龙普通卡参考价',
+        basePrice: 1000,
+        observedPriceLabel: '首日+70分+圈层目标号“如意王”收购报价带',
+        observedPriceLow: 17000,
+        observedPriceHigh: 20000,
+        priceSignalType: 'bid',
+        conditionStack: ['龙头', '首日', '评级70分', '圈层目标号：如意王'],
+        buyerBreadth: 'concentrated',
+        keyBuyerDependency: 'high',
+        exitLiquidity: 'thin',
+        verificationNote: '8月记录圈层目标号收购约17000元。2026-09-07用户补记：前几天约17500，现收购约20000。全程按圈层收购报价记录，不按普遍市价，不补造成交。非圈层目标号码价格低很多。抬价只证明圈子还在收自己的号，不证明圈外能玩、能卖、能退出。'
+      });
+
+      await dbRun(
+        db,
+        `UPDATE behavior_cases
+         SET title = ?,
+             source_note = ?,
+             visible_information = ?,
+             pressure_context = ?,
+             action_taken = ?,
+             result = ?,
+             outcome_type = 'ongoing',
+             evidence_role = 'boundary',
+             self_response = ?,
+             learn_to_keep = ?,
+             learn_to_avoid = ?,
+             applicability_boundary = ?,
+             linked_rule_refs_json = ?,
+             pricing_analysis_json = ?,
+             note = ?,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`,
+        [
+          '工商25龙：首日+70分+如意王圈层定价，圈外玩不了',
+          '来自本人持续观察的行业收货信息。报价只记圈层目标号收购，不按普遍市场价；同条件非目标靓号低很多。这种结构只记录，圈外不参与。',
+          '可见信息是：工商25龙普通卡约1000元；一张同时满足“龙头+首日+评级70分+如意王”的卡，由指定圈子定价。8月圈层收购约17000元，前几天约17500元，2026-09-07收购约20000元。同样是龙头、70分和靓号，但不是圈层目标号，价格会低很多。',
+          '看见十几倍、二十倍报价和连续抬价，容易把“龙头+首日+70分+靓号”误记成翻倍公式，也容易让圈外人觉得还能跟上。从准入、信息、资金和退出看，这都不是自己能玩的盘子。',
+          '不追入。只拆开记录底货、首日、评级、普通靓号、圈层目标号、买家宽度和退出深度。圈外不建立参与仓，包括所谓低价小量埋伏也不再作为这张号的操作选项。',
+          `${marker}：圈层目标号收购从约17500抬到约20000。仍是指定圈子收购报价，不是普遍市价，也不是所有70分靓号。这种就是记录，玩不了。不是圈子的人、不知道他们认哪些号、单张两万元、买家宽度极窄、圈层停收后没有自己的退出——从哪里看都玩不了。20000不打开追入。`,
+          '圈外只记录，不参与。按“底货→首日→评级→号码等级→是否圈层目标号→买家宽度→退出深度”拆开看，是为了避免误入，不是为了找入场。目标号报价不外推。',
+          '识别固定玩家圈层真正认可的号码和收货节奏，用来当边界样本；看到圈层定价，先判断自己是不是那个圈子的人。',
+          '避免把龙头+首日+70分+靓号当成翻倍公式，避免把圈内目标号报价外推到所有靓号，避免在圈层抬价后以任何仓位追入。这种号从准入、信息、资金、退出哪边看都玩不了。',
+          '适用于首日、评级、号码被固定圈层定价的小众收藏品。圈外默认只记录。普通靓号、标准品和买家广泛的通货不能照搬；也不能用这张号的20000去解释25信泰或其它龙银币涨幅。',
+          JSON.stringify([
+            '龙头+首日+70分+靓号只是稀缺入场券，不是翻倍公式',
+            '特定圈层认可、持续收货和真实成交同时成立，才承认额外溢价',
+            '圈外只记录，不参与；高位更不追',
+            '圈层停收后，价格可能回落到普通70分或普通靓号价格带',
+            '从准入、信息、资金、退出看都玩不了，就不玩'
+          ]),
+          pricingAnalysis,
+          '2026-09-07校准：前几天约17500、现收购约20000。结论从“观察能否参与”改为“只记录，圈外玩不了”。不把收购报价写成已成交。',
+          behaviorCase.id
+        ]
+      );
+
+      if (await migrationTableExists(db, 'audit_logs')) {
+        await dbRun(
+          db,
+          `INSERT OR IGNORE INTO audit_logs
+            (id, timestamp, module, action, target, status, detail, entity_id,
+             path, domain, workspace, created_at, updated_at)
+           VALUES ('audit-human-case-icbc-lucky-unplayable-20260907', CURRENT_TIMESTAMP,
+                   '人因案例库', 'update', '工商25龙：首日+70分+如意王圈层定价，圈外玩不了', 'success', ?, ?,
+                   '/review/human-cases', 'business', 'business', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [
+            JSON.stringify({
+              change: 'mark-icbc-lucky-circle-unplayable',
+              bidLow: 17000,
+              bidMidRecent: 17500,
+              bidHigh: 20000,
+              playable: false
+            }),
+            String(behaviorCase.id)
           ]
         );
       }
