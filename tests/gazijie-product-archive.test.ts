@@ -130,3 +130,116 @@ test("refines the Gazijie archive without inventing a dated 400-yuan price recor
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("records Gazijie 520-area temporary stabilize without calling it a new floor", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "gazijie-520-stabilize-"));
+  const filename = path.join(directory, "business.db");
+  const manager = new DatabaseManager({
+    filename,
+    allowCreate: true,
+    initialize: initializeBusinessBaseSchema
+  });
+
+  try {
+    await manager.getDb();
+    await runMigrations(filename);
+    const db = await manager.getDb();
+    await db.run("INSERT OR IGNORE INTO categories (name) VALUES (?)", ["泡泡玛特"]);
+    const category = await db.get("SELECT id FROM categories WHERE name = ?", ["泡泡玛特"]);
+    await db.run("INSERT OR IGNORE INTO objects (category_id, name) VALUES (?, ?)", [category.id, "嘎子姐"]);
+    const object = await db.get(
+      "SELECT id FROM objects WHERE category_id = ? AND name = ?",
+      [category.id, "嘎子姐"]
+    );
+    const existingArchive = await db.get(
+      `SELECT id FROM product_archives
+       WHERE category_name = '泡泡玛特' AND object_name = '嘎子姐' AND is_deleted = 0
+       ORDER BY id LIMIT 1`
+    );
+    if (!existingArchive) {
+      await db.run(
+        `INSERT INTO product_archives
+          (category_id, category_name, object_id, object_name, archive_name,
+           position_level, one_sentence_judgment, issue_info, risk_basis,
+           experience_note, pending_questions, confidence, status)
+         VALUES (?, '泡泡玛特', ?, '嘎子姐', '嘎子姐', 'main', ?, ?, ?, ?, ?,
+                 'confirmed', 'active')`,
+        [
+          category.id,
+          object.id,
+          "等补货把价格砸下来再观察",
+          "没有经历过持续数月的通货补",
+          "每天更新价格",
+          "补货观察",
+          "补货时间未知"
+        ]
+      );
+    }
+
+    await db.run(
+      "DELETE FROM migrations WHERE id IN (?, ?)",
+      [
+        "20260906_001_refine_gazijie_supply_floor_archive",
+        "20260912_002_record_gazijie_520_temporary_stabilize"
+      ]
+    );
+    await runMigrations(filename);
+
+    const archive = await db.get(
+      `SELECT id, experience_note, pending_questions
+       FROM product_archives
+       WHERE category_name = '泡泡玛特' AND object_name = '嘎子姐' AND is_deleted = 0`
+    );
+    assert.ok(archive);
+    assert.match(archive.experience_note, /2026-09-12：520附近暂时稳定/);
+    assert.match(archive.experience_note, /520收不太好收/);
+    assert.match(archive.experience_note, /不把520写成新底或买入许可/);
+    assert.match(archive.pending_questions, /520收不太好收/);
+    assert.match(archive.pending_questions, /千岛520\+/);
+
+    const stabilize = await db.get(
+      `SELECT time_text, price_low, price_end, stage_summary, action_rule, evidence_note
+       FROM product_archive_stages
+       WHERE archive_id = ?
+         AND stage_name = '2026-09 放货后520附近暂时企稳'
+         AND is_deleted = 0`,
+      [archive.id]
+    );
+    assert.ok(stabilize);
+    assert.match(stabilize.time_text, /暂时稳定/);
+    assert.equal(Number(stabilize.price_low), 513);
+    assert.equal(Number(stabilize.price_end), 529);
+    assert.match(stabilize.stage_summary, /千岛也基本在520\+/);
+    assert.match(stabilize.action_rule, /不把520当成新底或买入许可/);
+    assert.match(stabilize.evidence_note, /不补造/);
+
+    const dumpStage = await db.get(
+      `SELECT time_text
+       FROM product_archive_stages
+       WHERE archive_id = ?
+         AND stage_name = '2026周年庆线上放货消化'
+         AND is_deleted = 0`,
+      [archive.id]
+    );
+    assert.ok(dumpStage);
+    assert.doesNotMatch(String(dumpStage.time_text), /进行中/);
+
+    await db.run(
+      "DELETE FROM migrations WHERE id = ?",
+      ["20260912_002_record_gazijie_520_temporary_stabilize"]
+    );
+    await runMigrations(filename);
+    const duplicateCheck = await db.get(
+      `SELECT COUNT(*) AS total
+       FROM product_archive_stages
+       WHERE archive_id = ?
+         AND stage_name = '2026-09 放货后520附近暂时企稳'
+         AND is_deleted = 0`,
+      [archive.id]
+    );
+    assert.equal(Number(duplicateCheck.total), 1);
+  } finally {
+    await manager.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});

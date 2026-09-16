@@ -12,6 +12,7 @@ import {
 import { assessPriceMove } from "../services/priceAnomalyDetection";
 import { buildQualityAlertRecheckMetadata } from "../services/priceQualityAlertService";
 import { calculatePriceWorkbenchCoinSilverPremium } from "../services/coinSilverPremiumService";
+import { attachMarketBooks, listMarketTrades } from "../services/marketBookService";
 
 const router = express.Router();
 
@@ -24,6 +25,7 @@ interface PriceRecordRow {
   price: number;
   source: string | null;
   note: string | null;
+  price_kind?: string | null;
   category_id: number | null;
   object_id: number | null;
   variant_id: number | null;
@@ -1378,6 +1380,36 @@ router.get("/price-records/insights", async (req, res) => {
   }
 });
 
+router.get("/price-records/trades", async (req, res) => {
+  try {
+    const db = await getDb();
+    const category = String(req.query.category || "").trim();
+    const objectName = String(req.query.object_name || "").trim();
+    const date = String(req.query.date || "").trim();
+    if (!category || !objectName || !date) {
+      return res.status(400).json({
+        status: "error",
+        message: "读取成交记录时必须指定 category、object_name 和 date"
+      });
+    }
+    if (!isValidDateOnly(date)) {
+      return res.status(400).json({ status: "error", message: "日期格式错误" });
+    }
+    const result = await listMarketTrades(db, {
+      category,
+      object_name: objectName,
+      variant: String(req.query.variant || ""),
+      date,
+      page: Number.parseInt(String(req.query.page || "1"), 10),
+      pageSize: Number.parseInt(String(req.query.pageSize || "50"), 10)
+    });
+    return res.json({ status: "success", ...result });
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : "Unknown error";
+    res.status(500).json({ status: "error", message: "Failed to fetch market trades", error: errorMessage });
+  }
+});
+
 router.get("/price-records", async (req, res) => {
   try {
     const db = await getDb();
@@ -1430,6 +1462,7 @@ router.get("/price-records", async (req, res) => {
           CAST(pr.price AS REAL) AS price,
           pr.source,
           pr.note,
+          COALESCE(pr.price_kind, 'avg_deal') AS price_kind,
           pr.created_at,
           pr.updated_at,
           c.id AS category_id,
@@ -1487,6 +1520,7 @@ router.get("/price-records", async (req, res) => {
           CAST(pr.price AS REAL) AS price,
           pr.source,
           pr.note,
+          COALESCE(pr.price_kind, 'avg_deal') AS price_kind,
           pr.created_at,
           pr.updated_at,
           c.id AS category_id,
@@ -1528,7 +1562,8 @@ router.get("/price-records", async (req, res) => {
          LIMIT ? OFFSET ?`,
         [...listParams, pageSize, (page - 1) * pageSize]
       );
-      const chartRecords = await db.all(
+      const recordsWithBooks = await attachMarketBooks(db, records);
+      const chartRecordsRaw = await db.all(
         `SELECT
            pr.id,
            pr.date,
@@ -1538,6 +1573,7 @@ router.get("/price-records", async (req, res) => {
            CAST(pr.price AS REAL) AS price,
            pr.source,
            pr.note,
+           COALESCE(pr.price_kind, 'avg_deal') AS price_kind,
            c.id AS category_id,
            o.id AS object_id,
            CASE WHEN COALESCE(pr.variant, '') = '' THEN NULL ELSE v.id END AS variant_id
@@ -1546,10 +1582,11 @@ router.get("/price-records", async (req, res) => {
          ORDER BY pr.date ASC, pr.id ASC`,
         listParams
       );
+      const chartRecords = await attachMarketBooks(db, chartRecordsRaw);
 
       return res.json({
         status: "success",
-        data: records,
+        data: recordsWithBooks,
         pagination: { total, page, pageSize, totalPages },
         summary: {
           latest_price: latest?.price ?? null,
@@ -1726,8 +1763,8 @@ router.post("/price-records", async (req, res) => {
       }
 
       const result = await db.run(
-        "INSERT INTO price_records (date, category, object_name, variant, price, source, note, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        [normalizedDate, normalizedCategoryName, normalizedObjectName, variant, price, normalizedSource, normalizedNote, now, now]
+        "INSERT INTO price_records (date, category, object_name, variant, price, source, note, price_kind, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [normalizedDate, normalizedCategoryName, normalizedObjectName, variant, price, normalizedSource, normalizedNote, "manual", now, now]
       );
       newRecord = await db.get("SELECT * FROM price_records WHERE id = ?", [result.lastID]);
       await db.run("COMMIT");
@@ -1868,8 +1905,8 @@ router.put("/price-records/:id", async (req, res) => {
     const now = new Date().toISOString();
     const updateRecord = async (connection: any) => {
       const result = await connection.run(
-        "UPDATE price_records SET date = ?, category = ?, object_name = ?, variant = ?, price = ?, source = ?, note = ?, updated_at = ? WHERE id = ?",
-        [normalizedDate, normalizedCategoryName, normalizedObjectName, normalizedVariantName, price, normalizedSource, normalizedNote, now, id]
+        "UPDATE price_records SET date = ?, category = ?, object_name = ?, variant = ?, price = ?, source = ?, note = ?, price_kind = ?, updated_at = ? WHERE id = ?",
+        [normalizedDate, normalizedCategoryName, normalizedObjectName, normalizedVariantName, price, normalizedSource, normalizedNote, "manual", now, id]
       );
       if (result.changes === 0) {
         const error = new Error("记录不存在");

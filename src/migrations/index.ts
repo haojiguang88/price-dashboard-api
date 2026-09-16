@@ -8824,6 +8824,764 @@ ${marker}：大网红本人亲自上阵、加价卖货。币圈一批大佬反�
         );
       }
     }
+  },
+  {
+    id: '20260911_001_seed_iphone17_eol_stocking_case',
+    name: 'Seed ongoing iPhone 17 EOL stocking observation without writing an outcome',
+    run: async (db: any) => {
+      const title = '2026 iPhone 17 停产涨价囤货观察（进行中 V0.1）';
+      const behaviorTitle = 'iPhone 17停产涨价叙事：看不清先不参加，杠杆囤货另记账';
+      const marker = '认知冻结日：2026-09-11';
+
+      let marketReview: { id: number } | undefined;
+      if (await migrationTableExists(db, 'market_reviews')) {
+        marketReview = await dbGet<{ id: number }>(
+          db,
+          `SELECT id FROM market_reviews
+           WHERE is_deleted = 0
+             AND (title = ? OR project_name = 'iPhone 17系列')
+           ORDER BY id LIMIT 1`,
+          [title]
+        );
+        if (!marketReview) {
+          await dbRun(
+            db,
+            `INSERT INTO market_reviews
+              (title, track, project_name, review_date, market_type_preset,
+               market_type_custom, summary_conclusion, short_lesson, background,
+               market_start, market_evolution, key_turning_points, later_outcome,
+               exposed_problem, extracted_lesson, note, is_deleted, created_at, updated_at)
+             VALUES (?, '苹果手机', 'iPhone 17系列', '2026-09-11', '自定义', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                     0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+            [
+              title,
+              '叙事囤货 / 价格尚未兑现 / 杠杆库存风险 / 进行中',
+              '截至2026-09-11，二级市场把“17停产 + 18涨价并发布”推成17系列会大涨。9月前后档口和撸货圈子已在囤货，少则几十台、多则几百上千台。本地档口价截止2026-09-10没有出现这轮叙事承诺的大涨：普通款横盘，Pro略回，Pro Max小尖后回吐。本人因成本高、看不清局势没有参加。后期涨不涨未知，不写结局。',
+              '叙事加囤货不等于已经涨价。不加杠杆，一台亏也就一两百；加了杠杆，涨了还行，不涨就废了，得赔死。看不清就先不参加。',
+              '一、现象\n\n用户一直在关注，但没有参与。市场叙事是：苹果17系列将停产，苹果18涨价并发布，所以17系列会在二级市场大涨。大约2026年9月前后，陆陆续续有二级档口和撸货圈子开始囤货，规模少则几十台，多则几百上千台。囤货规模来自现场观察，不补造成交量和精确库存。\n\n价格只使用本地生意库里的二级档口报价，当前主要来源为潮收汇苹果备用报价；这就是二级市场行情，不是官方零售价，也不是本人成交价。',
+              '二、当前可见的叙事链（待验证）\n\n17停产预期\n→ 18涨价并发布\n→ 二级推断17会更稀缺或更有性价比\n→ 档口和撸货圈子提前囤货\n→ 价格被预期提前抬升。\n\n截至冻结日，后半段“价格被抬升”没有被本地报价证实。停产时点、18官方价和真实终端需求都还没有独立核验，不把这条链写成已确认因果。',
+              '三、本地价格（截止2026-09-10，冻结日为2026-09-11）\n\n只记三个常跟型号，价格为当日档口报价带或当日末条，不把多源同日差异补造成交。\n\niPhone 17 256G：8月下旬至9月1日约5900元；9月4日到5930元，是本地序列高点；9月10日回到5900元。相对4月25–26日低点5350元是涨过的，但九月囤货窗口没有新一轮大涨。\n\niPhone 17 Pro 256G：8月20日约7950元（当日约7900–7990）；9月7日约7960元；9月10日7930元（当日约7900–7990）。相对3月7日首录约8860元、3月中旬约9000元，仍明显更低。\n\niPhone 17 Pro Max 256G：8月20日约8960元；9月4–7日到9040–9050元；9月10日9000元（当日约8990–9000）。相对3月7日首录约9730元、3月25日约9870元，仍明显更低。\n\n对照叙事“九月大涨”：普通款横盘，Pro持平略回，Pro Max只有一个很快回吐的小尖。这只能否定“已经大涨”，不能证明以后一定跌、也不能证明以后不会涨。',
+              '四、待验证\n\n1. 17停产和18涨价发布是否按市场说的时点发生，官方价差实际有多大；\n2. 囤货是消化了还是还在加仓，有没有档口开始限收、降价或甩货；\n3. 本地档口价是否出现明显脱离8–9月中枢的上涨或下跌；\n4. 加杠杆收货的档口会不会在下跌时爆雷、跑路或连环甩货；\n5. 如果后来真涨，涨的是缺货还是杠杆资金自我实现，不能用结果倒推9月11日当时已经看对。',
+              '五、当前不能下的结论\n\nV0.1不写结局：\n\n1. 不确认17后来一定大涨；\n2. 不确认现在是顶部或已经证伪；\n3. 不把9月10日的横盘/小回写成趋势反转；\n4. 不把“没参加”事后解释成已经赚到了踏空保护。本人当时只是成本高、看不清，不是预测它会跌。',
+              '叙事可以把未来事件提前折进库存，但库存本身不是价格。不加杠杆时，一台普通回撤大约一两百，是可计算的货损。加了杠杆，涨了还行；不涨或下跌就会叠加利息、压货和甩货，普通波动变成爆雷、跑路和赔死。上涨时账面好看，不能拿来证明杠杆库存安全。',
+              '六、案例价值\n\n用来观察标准化工业品在“换代停产叙事—渠道囤货—价格是否兑现—杠杆库存是否爆雷”中的完整过程。V0.1只冻结2026-09-11当时看见的信息和推理，供以后对照，不拿后来的涨跌改写当时判断。',
+              `版本：V0.1\n状态：进行中\n${marker}\n价格数据截止日：2026-09-10\n数据口径：本地生意库苹果手机档口报价（当前源：潮收汇苹果备用报价）；囤货规模和杠杆收货来自用户现场观察，未独立核验台数和杠杆倍数。\n本人立场：关注，未参与。后续行情由用户自行更新。\n\n更新纪律：\n1. 价格中枢、停产/发布、甩货或爆雷等关键变化只新增带日期记录，形成V0.2，不改写V0.1原判断；\n2. 行情告一段落后再形成V1.0，分别回答叙事对了没、囤货有没有变成涨价、杠杆有没有爆；\n3. 结局出现前，不补写大涨、崩盘或最终中枢。`
+            ]
+          );
+          marketReview = await dbGet<{ id: number }>(
+            db,
+            `SELECT id FROM market_reviews
+             WHERE title = ? AND is_deleted = 0
+             ORDER BY id LIMIT 1`,
+            [title]
+          );
+        }
+      }
+
+      if (await migrationTableExists(db, 'behavior_cases')) {
+        let behaviorCase = await dbGet<{ id: number }>(
+          db,
+          `SELECT id FROM behavior_cases
+           WHERE is_deleted = 0
+             AND (title = ? OR project_name = 'iPhone 17系列')
+           ORDER BY id LIMIT 1`,
+          [behaviorTitle]
+        );
+        if (!behaviorCase) {
+          const pricingAnalysis = JSON.stringify({
+            basePriceLabel: 'iPhone 17 256G 本地档口价（2026-09-10）',
+            basePrice: 5900,
+            observedPriceLabel: '九月囤货窗口本地档口报价带（三型号，截止2026-09-10）',
+            observedPriceLow: 5900,
+            observedPriceHigh: 9050,
+            priceSignalType: 'market_reference',
+            conditionStack: ['17停产叙事', '18涨价并发布叙事', '二级档口囤货', '撸货圈子', '部分杠杆收货'],
+            buyerBreadth: 'concentrated',
+            keyBuyerDependency: 'high',
+            exitLiquidity: 'unknown',
+            verificationNote: '价格取本地档口报价，不是成交。17 256G 9/10为5900；Pro 9/10约7930；Pro Max 9/4–7曾到9040–9050，9/10回9000。囤货规模和杠杆未核验台数、倍数。不把报价写成已涨或已崩。'
+          });
+          await dbRun(
+            db,
+            `INSERT INTO behavior_cases
+              (title, origin_type, subject_alias, source_note, evidence_level, case_date,
+               track, project_name, background, visible_information, pressure_context,
+               action_taken, result, action_quality, outcome_type, evidence_role,
+               self_response, learn_to_keep, learn_to_avoid, applicability_boundary,
+               linked_rule_refs_json, source_type, source_id, source_snapshot_json,
+               pricing_analysis_json, note, is_deleted, created_at, updated_at)
+             VALUES (?, 'self', ?, ?, 'first_hand', '2026-09-11',
+                     '苹果手机', 'iPhone 17系列', ?, ?, ?,
+                     ?, ?, 'good', 'ongoing', 'boundary',
+                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0,
+                     CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+            [
+              behaviorTitle,
+              '自己观察，未参与',
+              '价格证据来自本地生意库二级档口报价，截止2026-09-10。囤货规模、撸货圈子和部分档口加杠杆收货来自用户持续观察，未独立核验台数和杠杆倍数。',
+              '苹果17系列因停产预期，叠加苹果18涨价并发布，被二级市场推断会大涨。大约9月前后，档口和撸货圈子开始囤货，少则几十台，多则几百上千台。本人一直关注，但跟自己没有直接买卖关系。',
+              '本地档口价没有兑现“已经大涨”：17 256G从8月下旬5900元到9月10日仍是5900元，中间9月4日到过5930元；Pro从约7950元到7930元；Pro Max从约8960元到过9050元后又回9000元。同时有人用叙事说服自己继续收货。',
+              '别人已经在囤、规模还不小，容易让人觉得“再不进就没货”。不加杠杆时，一台最多也就亏一两百；一旦加杠杆收货，涨了还行，不涨就废了，得赔死。账面只要暂时不跌，杠杆风险看不出来。',
+              '没有参加。原因是成本高，加上看不清局势，不是因为已经判断它会跌。',
+              '截止2026-09-11，这轮叙事囤货还没有变成大涨。后期会不会涨不知道。案例保持进行中，先把“没参加”和“杠杆收货风险”记下，等后续价格、甩货或爆雷再追加。',
+              '看不清、单次资金又重，就先站在场外观察。价格以本地档口数据为准，不跟口头叙事走。别人囤货只证明有人在赌。不加杠杆，一台普通回撤大约一两百；加杠杆后不涨就会赔死。',
+              '吸收“换代叙事会出现、渠道会提前囤”这条观察能力；同时把价格有没有动、库存是不是杠杆这两件事分开看。',
+              '避免把停产/涨价故事直接翻译成一定会大涨；避免在看不清时为了不踏空去跟风收货；尤其避免用杠杆去扛还没兑现的工业品库存。不加杠杆最多一台一两百，加杠杆不涨就废了。',
+              '适用于换代电子产品、渠道囤货和带融资的库存生意；不用于否定无杠杆、少量、退出清楚的正常周转。也不把9月11日的横盘外推成后来一定跌或一定涨。',
+              JSON.stringify([
+                '叙事和库存不能代替价格',
+                '看不清且成本高就先不参加',
+                '不加杠杆一台普通回撤大约一两百；加杠杆不涨就会赔死'
+              ]),
+              marketReview ? 'market_review' : '',
+              marketReview ? String(marketReview.id) : '',
+              JSON.stringify({
+                capturedBy: 'migration-20260911_001',
+                sourceType: marketReview ? 'market_review' : '',
+                sourceId: marketReview ? String(marketReview.id) : '',
+                cognitionFrozenAt: '2026-09-11',
+                priceDataThrough: '2026-09-10',
+                participated: false,
+                inventedPostMove: false
+              }),
+              pricingAnalysis,
+              `${marker}。价格数据截止2026-09-10。本人未参与。后续行情由用户自行更新。不改写当日“看不清所以不参加”。`
+            ]
+          );
+          behaviorCase = await dbGet<{ id: number }>(
+            db,
+            `SELECT id FROM behavior_cases
+             WHERE title = ? AND is_deleted = 0
+             ORDER BY id LIMIT 1`,
+            [behaviorTitle]
+          );
+        }
+
+        if (behaviorCase && await migrationTableExists(db, 'behavior_case_pattern_links')) {
+          const patternLinks = [
+            { name: '过度下注', role: 'primary' },
+            { name: '抢跑/没有等待', role: 'secondary' },
+            { name: '研究与推演停在表层', role: 'secondary' }
+          ];
+          for (const link of patternLinks) {
+            const pattern = await dbGet<{ id: number }>(
+              db,
+              `SELECT id FROM behavior_patterns
+               WHERE name = ? AND is_deleted = 0 AND status = 'active'
+               ORDER BY id LIMIT 1`,
+              [link.name]
+            );
+            if (!pattern) {
+              throw new Error(`Required behavior pattern is missing: ${link.name}`);
+            }
+            await dbRun(
+              db,
+              `INSERT OR IGNORE INTO behavior_case_pattern_links
+                (case_id, pattern_id, role, note, created_at, updated_at)
+               VALUES (?, ?, ?, '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+              [behaviorCase.id, pattern.id, link.role]
+            );
+          }
+        }
+
+        if (behaviorCase && await migrationTableExists(db, 'audit_logs')) {
+          await dbRun(
+            db,
+            `INSERT OR IGNORE INTO audit_logs
+              (id, timestamp, module, action, target, status, detail, entity_id,
+               path, domain, workspace, created_at, updated_at)
+             VALUES ('audit-human-case-iphone17-eol-stocking-20260911', CURRENT_TIMESTAMP,
+                     '人因案例库', 'create', ?, 'success', ?, ?,
+                     '/review/human-cases', 'business', 'business', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+            [
+              behaviorTitle,
+              JSON.stringify({
+                version: 'V0.1',
+                status: 'ongoing',
+                participated: false,
+                priceDataThrough: '2026-09-10',
+                primaryPattern: '过度下注'
+              }),
+              String(behaviorCase.id)
+            ]
+          );
+        }
+      }
+
+      if (marketReview && await migrationTableExists(db, 'audit_logs')) {
+        await dbRun(
+          db,
+          `INSERT OR IGNORE INTO audit_logs
+            (id, timestamp, module, action, target, status, detail, entity_id,
+             path, domain, workspace, created_at, updated_at)
+           VALUES ('audit-market-review-iphone17-eol-stocking-v01-20260911', CURRENT_TIMESTAMP,
+                   '行情复盘', 'create', ?, 'success', ?, ?, '/review/market',
+                   'business', 'business', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [
+            title,
+            JSON.stringify({
+              version: 'V0.1',
+              status: 'ongoing',
+              cognitionFrozenAt: '2026-09-11',
+              priceDataThrough: '2026-09-10',
+              conclusionPolicy: 'freeze-current-information-without-writing-outcome',
+              participated: false
+            }),
+            String(marketReview.id)
+          ]
+        );
+      }
+    }
+  },
+  {
+    id: '20260911_002_refine_iphone17_unlevered_vs_leverage_loss',
+    name: 'Clarify iPhone 17 unlevered per-unit loss versus leveraged wipeout',
+    run: async (db: any) => {
+      const marker = '不加杠杆，一台亏也就一两百';
+      const lossStructure = '不加杠杆时，一台普通回撤大约一两百，是可计算的货损。加了杠杆，涨了还行；不涨或下跌就会叠加利息、压货和甩货，普通波动变成爆雷、跑路和赔死。上涨时账面好看，不能拿来证明杠杆库存安全。';
+
+      if (await migrationTableExists(db, 'market_reviews')) {
+        const review = await dbGet<{
+          id: number;
+          short_lesson: string;
+          exposed_problem: string;
+          note: string;
+        }>(
+          db,
+          `SELECT id, short_lesson, exposed_problem, note
+           FROM market_reviews
+           WHERE COALESCE(is_deleted, 0) = 0
+             AND project_name = 'iPhone 17系列'
+           ORDER BY id LIMIT 1`
+        );
+        if (review && !String(review.exposed_problem || '').includes(marker) && !String(review.short_lesson || '').includes(marker)) {
+          const note = String(review.note || '').includes('后续行情由用户自行更新')
+            ? review.note
+            : [String(review.note || '').trim(), '后续行情由用户自行更新。2026-09-11补充：不加杠杆一台最多一两百，加杠杆不涨就废了、得赔死。'].filter(Boolean).join('\n');
+          await dbRun(
+            db,
+            `UPDATE market_reviews
+             SET short_lesson = ?,
+                 exposed_problem = ?,
+                 note = ?,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?`,
+            [
+              '叙事加囤货不等于已经涨价。不加杠杆，一台亏也就一两百；加了杠杆，涨了还行，不涨就废了，得赔死。看不清就先不参加。',
+              `叙事可以把未来事件提前折进库存，但库存本身不是价格。${lossStructure}`,
+              note,
+              review.id
+            ]
+          );
+        }
+      }
+
+      if (await migrationTableExists(db, 'behavior_cases')) {
+        const behaviorCase = await dbGet<{
+          id: number;
+          pressure_context: string;
+          self_response: string;
+          learn_to_avoid: string;
+          linked_rule_refs_json: string;
+          note: string;
+        }>(
+          db,
+          `SELECT id, pressure_context, self_response, learn_to_avoid, linked_rule_refs_json, note
+           FROM behavior_cases
+           WHERE is_deleted = 0
+             AND project_name = 'iPhone 17系列'
+           ORDER BY id LIMIT 1`
+        );
+        if (behaviorCase && !String(behaviorCase.self_response || '').includes('一台普通回撤大约一两百')) {
+          let linkedRules: string[] = [];
+          try {
+            const parsed = JSON.parse(behaviorCase.linked_rule_refs_json || '[]');
+            if (Array.isArray(parsed)) linkedRules = parsed.map((item) => String(item));
+          } catch {
+            linkedRules = [];
+          }
+          const leverageRule = '不加杠杆一台普通回撤大约一两百；加杠杆不涨就会赔死';
+          if (!linkedRules.some((item) => item.includes('一两百'))) {
+            linkedRules = linkedRules.filter((item) => item !== '杠杆收货把普通波动升级成爆雷风险');
+            linkedRules.push(leverageRule);
+          }
+          const note = String(behaviorCase.note || '').includes('后续行情由用户自行更新')
+            ? behaviorCase.note
+            : [String(behaviorCase.note || '').trim(), '后续行情由用户自行更新。2026-09-11补充：不加杠杆一台最多一两百，加杠杆不涨就废了、得赔死。'].filter(Boolean).join('\n');
+          await dbRun(
+            db,
+            `UPDATE behavior_cases
+             SET pressure_context = ?,
+                 self_response = ?,
+                 learn_to_avoid = ?,
+                 linked_rule_refs_json = ?,
+                 note = ?,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?`,
+            [
+              '别人已经在囤、规模还不小，容易让人觉得“再不进就没货”。不加杠杆时，一台最多也就亏一两百；一旦加杠杆收货，涨了还行，不涨就废了，得赔死。账面只要暂时不跌，杠杆风险看不出来。',
+              '看不清、单次资金又重，就先站在场外观察。价格以本地档口数据为准，不跟口头叙事走。别人囤货只证明有人在赌。不加杠杆，一台普通回撤大约一两百；加杠杆后不涨就会赔死。',
+              '避免把停产/涨价故事直接翻译成一定会大涨；避免在看不清时为了不踏空去跟风收货；尤其避免用杠杆去扛还没兑现的工业品库存。不加杠杆最多一台一两百，加杠杆不涨就废了。',
+              JSON.stringify(linkedRules),
+              note,
+              behaviorCase.id
+            ]
+          );
+        }
+      }
+
+      if (await migrationTableExists(db, 'audit_logs')) {
+        await dbRun(
+          db,
+          `INSERT OR IGNORE INTO audit_logs
+            (id, timestamp, module, action, target, status, detail, entity_id,
+             path, domain, workspace, created_at, updated_at)
+           VALUES ('audit-iphone17-unlevered-vs-leverage-loss-20260911', CURRENT_TIMESTAMP,
+                   '人因案例库', 'update', 'iPhone 17停产涨价叙事：看不清先不参加，杠杆囤货另记账', 'success', ?, NULL,
+                   '/review/human-cases', 'business', 'business', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [
+            JSON.stringify({
+              change: 'clarify-unlevered-per-unit-vs-leveraged-wipeout',
+              unleveredPerUnitLoss: '100-200',
+              leveragedIfNotUp: 'wipeout'
+            })
+          ]
+        );
+      }
+    }
+  },
+  {
+    id: '20260912_002_record_gazijie_520_temporary_stabilize',
+    name: 'Record Gazijie 520-area temporary stabilize after anniversary dump',
+    run: async (db: any) => {
+      if (!(await migrationTableExists(db, 'product_archives'))) return;
+
+      const archive = await dbGet<any>(
+        db,
+        `SELECT id, experience_note, pending_questions
+         FROM product_archives
+         WHERE category_name = '泡泡玛特'
+           AND object_name = '嘎子姐'
+           AND COALESCE(is_deleted, 0) = 0
+         ORDER BY id
+         LIMIT 1`
+      );
+      if (!archive) return;
+
+      const marker = '2026-09-12：520附近暂时稳定';
+      const appendOnce = (current: unknown, key: string, addition: string) => {
+        const text = String(current || '').trim();
+        if (text.includes(key)) return text;
+        return [text, addition].filter(Boolean).join('\n\n');
+      };
+
+      await dbRun(
+        db,
+        `UPDATE product_archives
+         SET experience_note = ?,
+             pending_questions = ?,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`,
+        [
+          appendOnce(
+            archive.experience_note,
+            marker,
+            `${marker}。周年庆砸到511后没有继续创新低。本地千岛9月6–11日报513、520、519、519、533、529，落在520附近。用户同日观察：交易群520收不太好收，千岛也基本在520+。510收货已经站不住，但只定义为暂时稳定，不把520写成新底或买入许可。`
+          ),
+          appendOnce(
+            archive.pending_questions,
+            '2026-09-12更新：群内约510元收货已不再容易',
+            '2026-09-12更新：群内约510元收货已不再容易。当前观察转为520收不太好收、千岛520+能否维持，以及后续是否还有新一轮补货。暂时稳定不等于供给结束。'
+          ),
+          archive.id
+        ]
+      );
+
+      if (await migrationTableExists(db, 'product_archive_stages')) {
+        const dumpStage = await dbGet<{ id: number; time_text: string }>(
+          db,
+          `SELECT id, time_text
+           FROM product_archive_stages
+           WHERE archive_id = ?
+             AND stage_name = '2026周年庆线上放货消化'
+             AND COALESCE(is_deleted, 0) = 0
+           LIMIT 1`,
+          [archive.id]
+        );
+        if (dumpStage && String(dumpStage.time_text || '').includes('进行中')) {
+          await dbRun(
+            db,
+            `UPDATE product_archive_stages
+             SET time_text = '2026-08-24至2026-09-05',
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?`,
+            [dumpStage.id]
+          );
+        }
+
+        const stabilizeName = '2026-09 放货后520附近暂时企稳';
+        const existingStabilize = await dbGet<{ id: number }>(
+          db,
+          `SELECT id
+           FROM product_archive_stages
+           WHERE archive_id = ?
+             AND stage_name = ?
+             AND COALESCE(is_deleted, 0) = 0
+           LIMIT 1`,
+          [archive.id, stabilizeName]
+        );
+        if (!existingStabilize) {
+          await dbRun(
+            db,
+            `INSERT INTO product_archive_stages
+              (archive_id, stage_name, time_text, stage_type, price_start, price_high,
+               price_low, price_end, stage_summary, action_rule, evidence_note,
+               confidence, sort_order, note, is_deleted, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'rough', ?, ?, 0,
+                     CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+            [
+              archive.id,
+              stabilizeName,
+              '2026-09-06至2026-09-12（暂时稳定，进行中）',
+              '放货后承接 / 暂时企稳',
+              513,
+              533,
+              513,
+              529,
+              '周年庆砸到511后没有继续创新低。本地千岛9月6–11日在513–533元，最新9月11日529元，落在520附近。2026-09-12用户观察：交易群520收不太好收，千岛也基本在520+。510收货价已经站不住，但没有证明新一轮大补结束，也不把520写成可以追的新底。',
+              '暂时观察520附近承接，不把520当成新底或买入许可。若群收重新撤到510以下或千岛再创新低，回到放货消化；若出现持续大补，400元出头的极端压力锚重新打开。',
+              '价格证据：本地千岛2026-09-05为511元，9月6–11日报513、520、519、519、533、529。市场证据：用户2026-09-12观察交易群520收不太好收、千岛基本520+。9月12日当天千岛精确价尚未入库，不补造。',
+              3,
+              '暂时稳定。后续行情继续观察补货和520承接，不外推反转。'
+            ]
+          );
+        }
+      }
+
+      if (await migrationTableExists(db, 'audit_logs')) {
+        await dbRun(
+          db,
+          `INSERT OR IGNORE INTO audit_logs
+            (id, timestamp, module, action, target, status, detail, entity_id,
+             path, domain, workspace, created_at, updated_at)
+           VALUES ('audit-product-archive-gazijie-520-stabilize-20260912', CURRENT_TIMESTAMP,
+                   '品种档案', 'update', '嘎子姐', 'success', ?, ?,
+                   '/risk-control/product-archives', 'business', 'business',
+                   CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [
+            JSON.stringify({
+              change: 'record-520-temporary-stabilize',
+              observationDate: '2026-09-12',
+              qiandaoThrough: '2026-09-11',
+              qiandaoLatest: 529,
+              groupBid: '520 hard to fill',
+              notABuySignal: true
+            }),
+            String(archive.id)
+          ]
+        );
+      }
+    }
+  },
+  {
+    id: '20260912_003_start_gazijie_layered_core_position',
+    name: 'Start Gazijie core position as layered entry without filling all at once',
+    run: async (db: any) => {
+      const marker = '2026-09-12：底仓分层占位，禁止一次打满';
+      const planName = '嘎子姐底仓分层占位';
+
+      let annualItemId: number | undefined;
+      if (await migrationTableExists(db, 'annual_plan_items') && await migrationTableExists(db, 'annual_plans')) {
+        const plan = await dbGet<{ id: number }>(
+          db,
+          `SELECT id FROM annual_plans
+           WHERE year = 2026 AND COALESCE(is_deleted, 0) = 0
+           ORDER BY id LIMIT 1`
+        );
+        if (plan) {
+          const existingItem = await dbGet<{ id: number }>(
+            db,
+            `SELECT id FROM annual_plan_items
+             WHERE plan_id = ?
+               AND COALESCE(is_deleted, 0) = 0
+               AND category = '泡泡玛特'
+               AND object_name = '嘎子姐'
+             ORDER BY id LIMIT 1`,
+            [plan.id]
+          );
+          if (existingItem) {
+            annualItemId = existingItem.id;
+          } else {
+            await dbRun(
+              db,
+              `INSERT INTO annual_plan_items
+                (plan_id, scope_type, category, object_name, current_role, current_action,
+                 current_status, thesis, current_reason, position_rule, exit_rule,
+                 downgrade_reason, resume_condition, priority_order, note,
+                 is_deleted, created_at, updated_at)
+               VALUES (?, '对象', '泡泡玛特', '嘎子姐', '试错', '轻仓参与', '生效中', ?, ?, ?, ?, ?, ?, 2, ?,
+                       0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+              [
+                plan.id,
+                '嘎子姐只做底仓分层占位，不把泡泡玛特整体升回主做。',
+                '2026-09-12：周年庆砸到511后，千岛回到520+，交易群520收不太好收。用户决定开始底仓占位，但看不清也不能一下打满，必须分层进去。整体赛道仍降级。',
+                '分层买，禁止一次打满。第一层：当前520+附近少量占位，能收到再收，不加价追。第一层之后必须再观察承接和补货，不得把剩余数量一次买完。第二层：回落到500附近再加。再砸或新大补出现则停止加仓。',
+                '有仓后按拉高出货/变现优先；补货再砸不加仓死扛。',
+                '若出现持续大补、通货补，或520承接消失并再创新低，立即停止加仓并降回只观察。',
+                '第一层装上且承接仍在、没有新大补，才评估第二层。',
+                '对象例外，不影响泡泡玛特整体已降级。数量先按占位单位记，禁止一次打满。'
+              ]
+            );
+            const inserted = await dbGet<{ id: number }>(
+              db,
+              `SELECT id FROM annual_plan_items
+               WHERE plan_id = ? AND category = '泡泡玛特' AND object_name = '嘎子姐'
+                 AND COALESCE(is_deleted, 0) = 0
+               ORDER BY id DESC LIMIT 1`,
+              [plan.id]
+            );
+            annualItemId = inserted?.id;
+            if (annualItemId && await migrationTableExists(db, 'annual_plan_item_changes')) {
+              await dbRun(
+                db,
+                `INSERT INTO annual_plan_item_changes
+                  (plan_item_id, change_date, change_type, old_role, new_role, old_action, new_action,
+                   old_status, new_status, reason, trigger_condition, evidence_note, decision_note,
+                   next_action, created_at, updated_at)
+                 VALUES (?, '2026-09-12', '升级', '观察', '试错', '只观察', '轻仓参与',
+                         '已降级', '生效中', ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+                [
+                  annualItemId,
+                  '520附近暂时稳定后开始底仓分层占位，禁止一次打满。',
+                  '群里520收不太好收，千岛520+，周年庆低点511没有被立刻打穿。',
+                  '这是对象例外，不是把泡泡玛特整体升回主做。',
+                  marker,
+                  '先做第一层少量占位，观察后再决定是否加第二层。'
+                ]
+              );
+            }
+          }
+        }
+      }
+
+      if (await migrationTableExists(db, 'buying_plans')) {
+        const existingPlan = await dbGet<{ id: number }>(
+          db,
+          `SELECT id FROM buying_plans
+           WHERE plan_name = ? AND object_name = '嘎子姐'
+           ORDER BY id LIMIT 1`,
+          [planName]
+        );
+        if (!existingPlan) {
+          const batches = [
+            {
+              id: 'gazijie-core-layer-1',
+              target_price: 530,
+              plan_quantity: 1,
+              completed_quantity: 0,
+              remaining_quantity: 1,
+              amount: 530,
+              status: 'pending',
+              note: '第一层：当前520+附近少量占位。能收到再收，不加价追。禁止把后面几层一起打满。'
+            },
+            {
+              id: 'gazijie-core-layer-2',
+              target_price: 500,
+              plan_quantity: 1,
+              completed_quantity: 0,
+              remaining_quantity: 1,
+              amount: 500,
+              status: 'pending',
+              note: '第二层：回落到500附近再加。第一层没观察完不加。到价也不一次打满。'
+            }
+          ];
+          await dbRun(
+            db,
+            `INSERT INTO buying_plans
+              (plan_name, category_name, object_name, variant_name, target_price, plan_quantity,
+               total_amount, note, track, type, market_type_preset, status, batches,
+               annual_plan_item_id, created_at, updated_at)
+             VALUES (?, '泡泡玛特', '嘎子姐', '', 515, 2, 1030, ?, '潮玩', 'manual', 'standard',
+                     'pending', ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+            [
+              planName,
+              '底仓分层占位，禁止一次打满。数量先按每层1个占位单位记，要加数量只加当前层。旧的500元1个计划已取消，不再使用。',
+              JSON.stringify(batches),
+              annualItemId ?? null
+            ]
+          );
+        }
+      }
+
+      if (await migrationTableExists(db, 'audit_logs')) {
+        await dbRun(
+          db,
+          `INSERT OR IGNORE INTO audit_logs
+            (id, timestamp, module, action, target, status, detail, entity_id,
+             path, domain, workspace, created_at, updated_at)
+           VALUES ('audit-gazijie-layered-core-position-20260912', CURRENT_TIMESTAMP,
+                   '买入计划', 'create', ?, 'success', ?, NULL,
+                   '/plan/buy', 'business', 'business', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [
+            planName,
+            JSON.stringify({
+              change: 'start-layered-core-position',
+              fillAllAtOnce: false,
+              layer1: 530,
+              layer2: 500,
+              quantityUnit: 1,
+              categoryStillDowngraded: true
+            })
+          ]
+        );
+      }
+    }
+  },
+  {
+    id: '20260912_004_keep_gazijie_core_position_in_plans_only',
+    name: 'Remove Gazijie layered core notes from archive and keep them in buy plans',
+    run: async (db: any) => {
+      if (!(await migrationTableExists(db, 'product_archives'))) return;
+      const archive = await dbGet<{
+        id: number;
+        one_sentence_judgment: string;
+        experience_note: string;
+        pending_questions: string;
+      }>(
+        db,
+        `SELECT id, one_sentence_judgment, experience_note, pending_questions
+         FROM product_archives
+         WHERE category_name = '泡泡玛特'
+           AND object_name = '嘎子姐'
+           AND COALESCE(is_deleted, 0) = 0
+         ORDER BY id LIMIT 1`
+      );
+      if (!archive) return;
+
+      const marker = '2026-09-12：底仓分层占位，禁止一次打满';
+      const stripMarkerParagraphs = (current: unknown, keys: string[]) => (
+        String(current || '')
+          .split(/\n\n+/)
+          .map((part) => part.trim())
+          .filter((part) => part && !keys.some((key) => part.includes(key)))
+          .join('\n\n')
+      );
+
+      const nextExperience = stripMarkerParagraphs(archive.experience_note, [marker, '必须分层进去']);
+      const nextQuestions = stripMarkerParagraphs(archive.pending_questions, [
+        '第一层占位后承接是否还在',
+        '不能把底仓一次打满'
+      ]);
+      const shouldRestoreJudgment = String(archive.one_sentence_judgment || '').includes('底仓分层占位');
+      if (
+        !shouldRestoreJudgment
+        && nextExperience === String(archive.experience_note || '').trim()
+        && nextQuestions === String(archive.pending_questions || '').trim()
+      ) {
+        return;
+      }
+
+      await dbRun(
+        db,
+        `UPDATE product_archives
+         SET one_sentence_judgment = ?,
+             experience_note = ?,
+             pending_questions = ?,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`,
+        [
+          shouldRestoreJudgment ? '等补货把价格砸下来就干' : archive.one_sentence_judgment,
+          nextExperience,
+          nextQuestions,
+          archive.id
+        ]
+      );
+
+      if (await migrationTableExists(db, 'audit_logs')) {
+        await dbRun(
+          db,
+          `INSERT OR IGNORE INTO audit_logs
+            (id, timestamp, module, action, target, status, detail, entity_id,
+             path, domain, workspace, created_at, updated_at)
+           VALUES ('audit-gazijie-core-position-plans-only-20260912', CURRENT_TIMESTAMP,
+                   '品种档案', 'update', '嘎子姐', 'success', ?, ?,
+                   '/risk-control/product-archives', 'business', 'business',
+                   CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [
+            JSON.stringify({
+              change: 'keep-layered-core-in-buy-plans-only',
+              archiveRecordsExecution: false,
+              reason: 'price-has-not-broken-500-use-plan-management'
+            }),
+            String(archive.id)
+          ]
+        );
+      }
+    }
+  },
+  {
+    id: '20260914_001_qiandao_market_book',
+    name: 'Add Qiandao market book snapshots, levels, trades, and price_kind',
+    run: async (db: any) => {
+      await dbExec(db, `
+        CREATE TABLE IF NOT EXISTS market_book_snapshots (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          category TEXT NOT NULL,
+          object_name TEXT NOT NULL,
+          variant TEXT NOT NULL DEFAULT '',
+          date TEXT NOT NULL,
+          source_key TEXT NOT NULL,
+          flash_min_price REAL,
+          flash_selling_qty INTEGER,
+          ask_qty INTEGER,
+          bid_qty INTEGER,
+          bid_price REAL,
+          display_price REAL,
+          price_kind TEXT NOT NULL DEFAULT 'avg_deal',
+          avg_deal_price REAL,
+          sweep_hint INTEGER NOT NULL DEFAULT 0,
+          captured_at TEXT NOT NULL,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE (source_key, category, object_name, variant, date)
+        );
+
+        CREATE TABLE IF NOT EXISTS market_book_levels (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          snapshot_id INTEGER NOT NULL,
+          side TEXT NOT NULL CHECK (side IN ('ask', 'bid')),
+          price REAL NOT NULL,
+          qty INTEGER NOT NULL,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (snapshot_id) REFERENCES market_book_snapshots(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS market_trades (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          external_id TEXT NOT NULL UNIQUE,
+          category TEXT NOT NULL,
+          object_name TEXT NOT NULL,
+          variant TEXT NOT NULL DEFAULT '',
+          source_key TEXT NOT NULL,
+          traded_at TEXT NOT NULL,
+          trade_date TEXT NOT NULL,
+          price REAL NOT NULL,
+          qty INTEGER NOT NULL,
+          buyer_account_id TEXT,
+          seller_account_id TEXT,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_market_book_snapshots_target_date
+          ON market_book_snapshots(category, object_name, variant, date);
+        CREATE INDEX IF NOT EXISTS idx_market_book_levels_snapshot
+          ON market_book_levels(snapshot_id, side, price);
+        CREATE INDEX IF NOT EXISTS idx_market_trades_target_date
+          ON market_trades(category, object_name, variant, trade_date, traded_at);
+      `);
+      await ensureMigrationColumn(db, 'price_records', 'price_kind', 'TEXT');
+    }
   }
 ];
 

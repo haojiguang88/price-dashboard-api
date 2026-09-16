@@ -11,6 +11,15 @@ from urllib.parse import quote
 
 import requests
 
+from qiandao_book import (
+    SOURCE_KEY as BOOK_SOURCE_KEY,
+    book_from_json,
+    choose_display_price,
+    merge_books,
+    parse_spu_html,
+    shanghai_today,
+    upsert_market_book,
+)
 from source_mappings import (
     load_enabled_source_mappings,
     mark_source_mapping_errors,
@@ -20,10 +29,14 @@ from source_mappings import (
 )
 
 CATEGORY_NAME = "泡泡玛特"
-SOURCE_KEY = "qiandao_popmart"
+SOURCE_KEY = BOOK_SOURCE_KEY
 SOURCE_NAME = "千岛泡泡玛特"
 SEARCH_URL = "https://oia.qiandao.com/search"
 SPU_URL = "https://oia.qiandao.com/spu"
+TRADE_INFO_URLS = (
+    "https://api.qiandao.com/trade/action/get-trade-info",
+    "https://api.qiandao.cn/trade/action/get-trade-info",
+)
 DEFAULT_DB_PATH = (
     os.environ.get("BUSINESS_DB_PATH")
     or str(Path(__file__).resolve().parents[2] / "data" / "price_dashboard_business.db")
@@ -95,7 +108,7 @@ def load_source_targets(db_path):
 
 
 def today():
-    return datetime.now().strftime("%Y-%m-%d")
+    return shanghai_today()
 
 
 def strip_tags(value):
@@ -186,26 +199,58 @@ def parse_spu_page(page_html, spu_id):
     }
 
 
+def fetch_trade_info_payload(session, spu_id):
+    headers = {
+        **HEADERS,
+        "Accept": "application/json, text/plain, */*",
+        "Content-Type": "application/json",
+        "Origin": "https://oia.qiandao.com",
+        "Referer": f"{SPU_URL}?id={spu_id}",
+    }
+    for url in TRADE_INFO_URLS:
+        try:
+            response = session.post(url, json={"spuId": str(spu_id)}, headers=headers, timeout=20)
+            if response.status_code != 200:
+                continue
+            payload = response.json()
+        except (requests.RequestException, ValueError, json.JSONDecodeError):
+            continue
+        if payload is not None:
+            return payload
+    return None
+
+
+def fetch_one_source_item(session, target):
+    search_html = fetch_search_html(session, target["query"])
+    candidates = parse_search_results(search_html)
+    spu_html = fetch_spu_html(session, target["spu_id"])
+    matched = parse_spu_page(spu_html, target["spu_id"])
+    book = parse_spu_html(spu_html)
+    extra_payload = fetch_trade_info_payload(session, target["spu_id"])
+    if extra_payload is not None:
+        book = merge_books(book, book_from_json(extra_payload))
+    return {
+        **target,
+        "matched": matched,
+        "book": book,
+        "candidate_count": len(candidates),
+    }
+
+
 def fetch_source_items(source_targets):
     session = requests.Session()
     source_items = []
     for target in source_targets:
-        page_html = fetch_search_html(session, target["query"])
-        candidates = parse_search_results(page_html)
-        matched = next(
-            (item for item in candidates if item["spu_id"] == target["spu_id"]),
-            None,
-        )
-        if matched is None:
-            matched = parse_spu_page(
-                fetch_spu_html(session, target["spu_id"]),
-                target["spu_id"],
-            )
-        source_items.append({
-            **target,
-            "matched": matched,
-            "candidate_count": len(candidates),
-        })
+        try:
+            source_items.append(fetch_one_source_item(session, target))
+        except Exception as exc:
+            source_items.append({
+                **target,
+                "matched": {},
+                "book": parse_spu_html(""),
+                "candidate_count": 0,
+                "fetch_error": f"抓取失败：{exc}",
+            })
     return source_items
 
 
@@ -267,27 +312,48 @@ def extract_records(
         if variant_name and (object_name, variant_name) not in enabled_variants:
             continue
 
-        matched = item.get("matched")
-        if not matched or matched.get("price") is None:
+        if item.get("fetch_error"):
             missing_source_objects.append(object_name)
-            missing_errors[item["spu_id"]] = "本次来源未返回成交均价"
+            missing_errors[item["spu_id"]] = item["fetch_error"]
+            continue
+
+        matched = item.get("matched") or {}
+        book = item.get("book") or parse_spu_html("")
+        chosen = choose_display_price(book)
+        display_price = chosen.get("display_price")
+        if display_price is None and matched.get("price") is not None:
+            display_price = matched["price"]
+            chosen["display_price"] = display_price
+            chosen["price_kind"] = chosen.get("price_kind") or "avg_deal"
+            chosen["avg_deal_price"] = chosen.get("avg_deal_price") or matched["price"]
+            book["avg_deal_price"] = book.get("avg_deal_price") or matched["price"]
+        if display_price is None:
+            missing_source_objects.append(object_name)
+            missing_errors[item["spu_id"]] = "本次来源未返回收购价或闪购/成交价"
             continue
 
         records.append({
             "category": category,
             "object": object_name,
             "variant": variant_name,
-            "price": matched["price"],
-            "raw_price": matched["price"],
+            "price": display_price,
+            "raw_price": display_price,
+            "price_kind": chosen.get("price_kind") or "avg_deal",
             "price_date": today(),
             "source": source_name,
-            "source_id": matched["spu_id"],
-            "source_name": matched["name"],
+            "source_id": matched.get("spu_id") or item["spu_id"],
+            "source_name": matched.get("name") or object_name,
             "query": item["query"],
+            "book": book,
         })
 
     unmapped_enabled_objects = sorted(enabled_objects - mapped_objects)
     return records, unmapped_enabled_objects, missing_source_objects, missing_errors
+
+
+def _has_price_kind_column(conn):
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(price_records)").fetchall()}
+    return "price_kind" in columns
 
 
 def upsert_price_records(db_path, records, dry_run=False):
@@ -298,16 +364,48 @@ def upsert_price_records(db_path, records, dry_run=False):
 
     if dry_run:
         for record in records:
-            results.append({**record, "action": "dry_run"})
+            book_summary = choose_display_price(record.get("book") or {})
+            results.append({
+                "category": record["category"],
+                "object": record["object"],
+                "variant": record["variant"],
+                "price": record["price"],
+                "price_kind": record.get("price_kind"),
+                "price_date": record["price_date"],
+                "source": record["source"],
+                "source_id": record.get("source_id"),
+                "action": "dry_run",
+                "book_summary": {
+                    "flash_min_price": book_summary.get("flash_min_price"),
+                    "flash_selling_qty": book_summary.get("flash_selling_qty"),
+                    "ask_qty": book_summary.get("ask_qty"),
+                    "bid_qty": book_summary.get("bid_qty"),
+                    "bid_price": book_summary.get("bid_price"),
+                    "price_kind": record.get("price_kind"),
+                    "trade_count": len((record.get("book") or {}).get("trades") or []),
+                    "ask_levels": book_summary.get("ask_levels"),
+                    "bid_levels": book_summary.get("bid_levels"),
+                },
+            })
         return inserted, updated, skipped, results
 
     conn = sqlite3.connect(db_path)
     try:
+        has_price_kind = _has_price_kind_column(conn)
         for record in records:
             now = datetime.now().isoformat()
             existing = conn.execute(
                 """
-                SELECT id, price
+                SELECT id, price, COALESCE(source, ''), COALESCE(price_kind, '')
+                FROM price_records
+                WHERE date = ?
+                  AND category = ?
+                  AND object_name = ?
+                  AND COALESCE(variant, '') = ?
+                ORDER BY id DESC
+                LIMIT 1
+                """ if has_price_kind else """
+                SELECT id, price, COALESCE(source, ''), ''
                 FROM price_records
                 WHERE date = ?
                   AND category = ?
@@ -324,52 +422,111 @@ def upsert_price_records(db_path, records, dry_run=False):
                 ),
             ).fetchone()
 
+            price_kind = record.get("price_kind") or "avg_deal"
             if existing is None:
-                conn.execute(
-                    """
-                    INSERT INTO price_records
-                      (date, category, object_name, variant, price, source, note, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        record["price_date"],
-                        record["category"],
-                        record["object"],
-                        record["variant"],
-                        record["price"],
-                        record["source"],
-                        "",
-                        now,
-                        now,
-                    ),
-                )
+                if has_price_kind:
+                    conn.execute(
+                        """
+                        INSERT INTO price_records
+                          (date, category, object_name, variant, price, source, note, price_kind, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            record["price_date"],
+                            record["category"],
+                            record["object"],
+                            record["variant"],
+                            record["price"],
+                            record["source"],
+                            "",
+                            price_kind,
+                            now,
+                            now,
+                        ),
+                    )
+                else:
+                    conn.execute(
+                        """
+                        INSERT INTO price_records
+                          (date, category, object_name, variant, price, source, note, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            record["price_date"],
+                            record["category"],
+                            record["object"],
+                            record["variant"],
+                            record["price"],
+                            record["source"],
+                            "",
+                            now,
+                            now,
+                        ),
+                    )
                 inserted += 1
                 action = "inserted"
-            elif float(existing[1]) != float(record["price"]):
-                conn.execute(
-                    """
-                    UPDATE price_records
-                    SET price = ?, source = ?, note = ?, updated_at = ?
-                    WHERE id = ?
-                    """,
-                    (
-                        record["price"],
-                        record["source"],
-                        "",
-                        now,
-                        existing[0],
-                    ),
-                )
+            elif (
+                float(existing[1]) != float(record["price"])
+                or str(existing[2] or "") != str(record["source"] or "")
+                or (has_price_kind and str(existing[3] or "") != price_kind)
+            ):
+                if has_price_kind:
+                    conn.execute(
+                        """
+                        UPDATE price_records
+                        SET price = ?, source = ?, note = ?, price_kind = ?, updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            record["price"],
+                            record["source"],
+                            "",
+                            price_kind,
+                            now,
+                            existing[0],
+                        ),
+                    )
+                else:
+                    conn.execute(
+                        """
+                        UPDATE price_records
+                        SET price = ?, source = ?, note = ?, updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            record["price"],
+                            record["source"],
+                            "",
+                            now,
+                            existing[0],
+                        ),
+                    )
                 updated += 1
                 action = "updated"
             else:
                 skipped += 1
                 action = "skipped"
 
-            results.append({**record, "action": action})
+            result = {**record, "action": action}
+            result.pop("book", None)
+            results.append(result)
         conn.commit()
     finally:
         conn.close()
+
+    if not dry_run:
+        for index, record in enumerate(records):
+            book_summary = upsert_market_book(db_path, record, record.get("book") or {}, dry_run=False)
+            results[index]["book_summary"] = {
+                "flash_min_price": book_summary.get("flash_min_price"),
+                "flash_selling_qty": book_summary.get("flash_selling_qty"),
+                "ask_qty": book_summary.get("ask_qty"),
+                "bid_qty": book_summary.get("bid_qty"),
+                "bid_price": book_summary.get("bid_price"),
+                "price_kind": book_summary.get("price_kind"),
+                "trade_count": book_summary.get("trade_count"),
+                "sweep_hint": book_summary.get("sweep_hint"),
+            }
 
     return inserted, updated, skipped, results
 
