@@ -9582,6 +9582,109 @@ ${marker}：大网红本人亲自上阵、加价卖货。币圈一批大佬反�
       `);
       await ensureMigrationColumn(db, 'price_records', 'price_kind', 'TEXT');
     }
+  },
+  {
+    id: '20260917_001_seed_iphone18_source_models',
+    name: 'Seed iPhone 18 Pro/Pro Max objects and colors from the live CSHRich catalog',
+    run: async (db: any) => {
+      if (!(await migrationTableExists(db, 'categories'))) return;
+      if (!(await migrationTableExists(db, 'objects'))) return;
+      if (!(await migrationTableExists(db, 'variants'))) return;
+
+      const categoryName = '苹果手机';
+      let category = await dbGet(
+        db,
+        "SELECT id FROM categories WHERE name = ?",
+        [categoryName]
+      );
+      if (!category) {
+        await dbRun(
+          db,
+          "INSERT INTO categories (name, created_at, updated_at) VALUES (?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+          [categoryName]
+        );
+        category = await dbGet(
+          db,
+          "SELECT id FROM categories WHERE name = ?",
+          [categoryName]
+        );
+      }
+      if (!category) return;
+
+      await dbRun(
+        db,
+        "UPDATE categories SET is_archived = 0, archived_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        [category.id]
+      );
+
+      const colors = ['黑色', '银色', '红色', '蓝色'];
+      const objectNames = [
+        'iPhone 18 Pro 256G',
+        'iPhone 18 Pro 512G',
+        'iPhone 18 Pro 1TB',
+        'iPhone 18 Pro 2TB',
+        'iPhone 18 Pro Max 256G',
+        'iPhone 18 Pro Max 512G',
+        'iPhone 18 Pro Max 1TB',
+        'iPhone 18 Pro Max 2TB'
+      ];
+
+      for (const objectName of objectNames) {
+        await dbRun(
+          db,
+          "INSERT OR IGNORE INTO objects (category_id, name, created_at, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+          [category.id, objectName]
+        );
+        const object = await dbGet(
+          db,
+          "SELECT id FROM objects WHERE category_id = ? AND name = ?",
+          [category.id, objectName]
+        );
+        if (!object) continue;
+
+        await dbRun(
+          db,
+          "UPDATE objects SET is_archived = 0, archived_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+          [object.id]
+        );
+
+        for (const color of colors) {
+          await dbRun(
+            db,
+            "INSERT OR IGNORE INTO variants (object_id, name, created_at, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            [object.id, color]
+          );
+          await dbRun(
+            db,
+            "UPDATE variants SET is_archived = 0, archived_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE object_id = ? AND name = ?",
+            [object.id, color]
+          );
+        }
+      }
+
+      if (await migrationTableExists(db, 'audit_logs')) {
+        await dbRun(
+          db,
+          `INSERT OR IGNORE INTO audit_logs
+            (id, timestamp, module, action, target, status, detail, entity_id,
+             path, domain, workspace, created_at, updated_at)
+           VALUES ('audit-seed-iphone18-source-models-20260917', CURRENT_TIMESTAMP,
+                   '主数据', 'create', 'iPhone 18 Pro / Pro Max', 'success', ?, ?,
+                   '/master-data', 'business', 'business',
+                   CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [
+            JSON.stringify({
+              source: 'cshrich_iphone_backup',
+              catalogCheckedAt: '2026-09-17',
+              objects: objectNames,
+              variants: colors,
+              missingInSource: ['iPhone 18', 'iPhone 18 Plus', 'iPhone 18 Air']
+            }),
+            String(category.id)
+          ]
+        );
+      }
+    }
   }
 ];
 
