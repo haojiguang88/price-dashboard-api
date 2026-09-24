@@ -94,6 +94,7 @@ const getPriceRecords = async (db: any, categoryFilter?: { categoryId?: string; 
     LEFT JOIN variants v ON v.object_id = o.id AND v.name = COALESCE(pr.variant, '') AND COALESCE(pr.variant, '') <> ''
     WHERE 1=1
       AND COALESCE(c.is_archived, 0) = 0
+      AND COALESCE(c.tracking_mode, 'active') != 'observe'
       AND COALESCE(o.is_archived, 0) = 0
       AND (COALESCE(pr.variant, '') = '' OR COALESCE(v.is_archived, 0) = 0)
   `;
@@ -517,6 +518,82 @@ const getReadKeyVariants = (result: any) => Array.from(new Set([
   generateLegacyReadKey(result)
 ].filter(Boolean)));
 
+export const MAX_ABNORMAL_READ_BATCH = 5000;
+
+export type AbnormalReadKeyRecord = {
+  canonicalReadKey: string;
+  target_type: string;
+  category_name: string;
+  object_name: string;
+  variant_name: string;
+  rule_code: string;
+  effective_date: string;
+};
+
+export const parseAbnormalReadKey = (readKey: unknown): AbnormalReadKeyRecord | null => {
+  const raw = String(readKey || '').trim();
+  if (!raw) return null;
+  const parts = raw.split('|');
+  if (parts.length !== 6) return null;
+  const [target_type, category_name, object_name, variant_name, rule_code, effective_date] = parts.map(decodeReadKeyPart);
+  const canonicalReadKey = [
+    target_type,
+    category_name,
+    object_name,
+    variant_name,
+    rule_code,
+    effective_date
+  ].map(encodeReadKeyPart).join('|');
+  return {
+    canonicalReadKey,
+    target_type,
+    category_name,
+    object_name,
+    variant_name,
+    rule_code,
+    effective_date
+  };
+};
+
+export const insertAbnormalMonitorReads = async (db: any, readKeys: unknown[]) => {
+  const invalid: string[] = [];
+  const unique = new Map<string, AbnormalReadKeyRecord>();
+  for (const readKey of readKeys) {
+    const parsed = parseAbnormalReadKey(readKey);
+    if (!parsed) {
+      invalid.push(String(readKey ?? ''));
+      continue;
+    }
+    unique.set(parsed.canonicalReadKey, parsed);
+  }
+
+  let marked = 0;
+  for (const item of unique.values()) {
+    const result = await db.run(
+      `INSERT OR IGNORE INTO abnormal_monitor_reads
+       (read_key, target_type, category_name, object_name, variant_name, rule_code, effective_date)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [
+        item.canonicalReadKey,
+        item.target_type,
+        item.category_name,
+        item.object_name,
+        item.variant_name,
+        item.rule_code,
+        item.effective_date
+      ]
+    );
+    if (Number(result?.changes || 0) > 0) marked += 1;
+  }
+
+  return {
+    requested: readKeys.length,
+    valid: unique.size,
+    marked,
+    skipped_invalid: invalid.length
+  };
+};
+
 // 聚合结果
 const aggregateResults = async (db: any, groupedRecords: Record<string, any[]>) => {
   const results: any[] = [];
@@ -715,30 +792,13 @@ router.post('/read', async (req, res) => {
       return;
     }
 
-    // 解析 read_key 提取信息
-    const parts = read_key.split('|');
-    if (parts.length !== 6) {
+    const parsed = parseAbnormalReadKey(read_key);
+    if (!parsed) {
       res.status(400).json({ status: "error", message: "read_key 格式错误" });
       return;
     }
 
-    const [target_type, category_name, object_name, variant_name, rule_code, effective_date] = parts.map(decodeReadKeyPart);
-    const canonicalReadKey = [
-      target_type,
-      category_name,
-      object_name,
-      variant_name,
-      rule_code,
-      effective_date
-    ].map(encodeReadKeyPart).join('|');
-
-    // 写入已读记录（幂等处理）
-    await db.run(
-      `INSERT OR IGNORE INTO abnormal_monitor_reads
-       (read_key, target_type, category_name, object_name, variant_name, rule_code, effective_date)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [canonicalReadKey, target_type, category_name, object_name, variant_name, rule_code, effective_date]
-    );
+    await insertAbnormalMonitorReads(db, [read_key]);
 
     res.json({
       status: "success",
@@ -747,6 +807,43 @@ router.post('/read', async (req, res) => {
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     res.status(500).json({ status: "error", message: "标记已读失败", error: errorMessage });
+  }
+});
+
+router.post('/read-batch', async (req, res) => {
+  try {
+    const db = await getDb();
+    const rawKeys = Array.isArray(req.body?.read_keys) ? req.body.read_keys : null;
+    if (!rawKeys) {
+      res.status(400).json({ status: "error", message: "read_keys 必须是数组" });
+      return;
+    }
+    if (rawKeys.length === 0) {
+      res.status(400).json({ status: "error", message: "read_keys 不能为空" });
+      return;
+    }
+    if (rawKeys.length > MAX_ABNORMAL_READ_BATCH) {
+      res.status(400).json({
+        status: "error",
+        message: `一次最多标记 ${MAX_ABNORMAL_READ_BATCH} 条`
+      });
+      return;
+    }
+
+    const summary = await insertAbnormalMonitorReads(db, rawKeys);
+    if (summary.valid === 0) {
+      res.status(400).json({ status: "error", message: "没有可标记的 read_key" });
+      return;
+    }
+
+    res.json({
+      status: "success",
+      message: `已标记 ${summary.valid} 条异动为已读`,
+      data: summary
+    });
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    res.status(500).json({ status: "error", message: "批量标记已读失败", error: errorMessage });
   }
 });
 

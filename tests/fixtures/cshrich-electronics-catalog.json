@@ -1,0 +1,50 @@
+{
+  "success": true,
+  "data": {
+    "filters": {
+      "topCategories": [
+        { "id": 1, "name": "苹果" },
+        { "id": 5, "name": "华为" },
+        { "id": 181, "name": "潮玩" },
+        { "id": 9999, "name": "三星测试" }
+      ]
+    },
+    "modelsByCategory": {
+      "1": [
+        {
+          "name": "iPhone 测试机",
+          "updatedAt": "2026-09-24 10:00:00",
+          "variants": [{ "color": "黑色", "settlementPrice": 5000 }]
+        }
+      ],
+      "5": [
+        {
+          "name": "Mate 70",
+          "updatedAt": "2026-09-24 10:00:00",
+          "variants": [{ "color": "黑色", "settlementPrice": 4200 }]
+        }
+      ],
+      "181": [
+        {
+          "name": "Switch OLED",
+          "seriesName": "任天堂",
+          "updatedAt": "2026-09-24 10:00:00",
+          "variants": [{ "color": "红蓝", "settlementPrice": 1800 }]
+        },
+        {
+          "name": "某潮玩",
+          "seriesName": "其他",
+          "updatedAt": "2026-09-24 10:00:00",
+          "variants": [{ "color": "默认", "settlementPrice": 99 }]
+        }
+      ],
+      "9999": [
+        {
+          "name": "Galaxy 测试机",
+          "updatedAt": "2026-09-24 10:00:00",
+          "variants": [{ "color": "白色", "settlementPrice": 3100 }]
+        }
+      ]
+    }
+  }
+}

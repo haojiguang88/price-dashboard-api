@@ -1,4 +1,8 @@
 import { DEFAULT_SELF_COGNITION_PROFILE } from "../services/selfCognitionProfileService";
+import {
+  CSHRICH_ELECTRONICS_SOURCE_KEY,
+  CSHRICH_SEEDED_TOP_CATEGORIES
+} from "../constants/electronicsCategories";
 
 // 迁移管理模块
 
@@ -9684,6 +9688,146 @@ ${marker}：大网红本人亲自上阵、加价卖货。币圈一批大佬反�
           ]
         );
       }
+    }
+  },
+  {
+    id: '20260924_001_cshrich_electronics_catalog',
+    name: 'Record CSHRich electronics top categories and weekly discovery task',
+    run: async (db: any) => {
+      await dbExec(db, `
+        CREATE TABLE IF NOT EXISTS cshrich_catalog_categories (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          source_key TEXT NOT NULL,
+          external_id TEXT NOT NULL,
+          external_name TEXT NOT NULL,
+          system_category_name TEXT NOT NULL,
+          tracked INTEGER NOT NULL DEFAULT 1,
+          skip_reason TEXT NOT NULL DEFAULT '',
+          first_seen_at TEXT,
+          last_seen_at TEXT,
+          last_model_count INTEGER,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE (source_key, external_id)
+        );
+      `);
+
+      for (const item of CSHRICH_SEEDED_TOP_CATEGORIES) {
+        await dbRun(
+          db,
+          `INSERT OR IGNORE INTO cshrich_catalog_categories
+            (source_key, external_id, external_name, system_category_name, tracked, skip_reason,
+             first_seen_at, last_seen_at, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP,
+                   CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [
+            CSHRICH_ELECTRONICS_SOURCE_KEY,
+            item.externalId,
+            item.externalName,
+            item.systemCategoryName,
+            item.tracked ? 1 : 0,
+            item.skipReason
+          ]
+        );
+        if (item.tracked && (await migrationTableExists(db, 'categories'))) {
+          await dbRun(
+            db,
+            `INSERT OR IGNORE INTO categories (name, created_at, updated_at)
+             VALUES (?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+            [item.systemCategoryName]
+          );
+          await dbRun(
+            db,
+            `UPDATE categories
+             SET is_archived = 0, archived_at = NULL, updated_at = CURRENT_TIMESTAMP
+             WHERE name = ?`,
+            [item.systemCategoryName]
+          );
+        }
+      }
+
+      if (await migrationTableExists(db, 'task_center_tasks')) {
+        await dbRun(
+          db,
+          `INSERT INTO task_center_tasks
+            (task_key, name, domain, workspace, task_type, enabled, schedule_time,
+             schedule_days, priority, config_json, last_status, last_message,
+             created_at, updated_at)
+           VALUES
+            (
+              'cshrich_electronics_price_update',
+              '潮收汇电子产品价格更新',
+              'price',
+              'business',
+              'cshrich_electronics_price_update',
+              1,
+              '18:20',
+              'every_day',
+              36,
+              '{"mode":"sync","task_timeout_minutes":30}',
+              'pending',
+              '每天同步已记录的潮收汇顶层分类型号，并写入档口报价；苹果手机仍走原任务',
+              CURRENT_TIMESTAMP,
+              CURRENT_TIMESTAMP
+            )
+           ON CONFLICT(task_key) DO UPDATE SET
+             name = excluded.name,
+             domain = excluded.domain,
+             workspace = excluded.workspace,
+             task_type = excluded.task_type,
+             enabled = excluded.enabled,
+             schedule_days = excluded.schedule_days,
+             priority = excluded.priority,
+             config_json = excluded.config_json,
+             updated_at = CURRENT_TIMESTAMP`
+        );
+        await dbRun(
+          db,
+          `INSERT INTO task_center_tasks
+            (task_key, name, domain, workspace, task_type, enabled, schedule_time,
+             schedule_days, priority, config_json, last_status, last_message,
+             created_at, updated_at)
+           VALUES
+            (
+              'cshrich_catalog_discover',
+              '潮收汇电子产品分类周检',
+              'price',
+              'business',
+              'cshrich_catalog_discover',
+              1,
+              '10:00',
+              'weekly_sunday',
+              37,
+              '{"mode":"discover","task_timeout_minutes":15}',
+              'pending',
+              '每周日检查潮收汇是否出现新的顶层分类；新品类写入记录并建系统品类',
+              CURRENT_TIMESTAMP,
+              CURRENT_TIMESTAMP
+            )
+           ON CONFLICT(task_key) DO UPDATE SET
+             name = excluded.name,
+             domain = excluded.domain,
+             workspace = excluded.workspace,
+             task_type = excluded.task_type,
+             enabled = excluded.enabled,
+             schedule_days = excluded.schedule_days,
+             priority = excluded.priority,
+             config_json = excluded.config_json,
+             updated_at = CURRENT_TIMESTAMP`
+        );
+      }
+    }
+  },
+  {
+    id: '20260924_002_category_tracking_mode',
+    name: 'Add category tracking mode for active/observe whitelist',
+    run: async (db: any) => {
+      await ensureMigrationColumn(
+        db,
+        'categories',
+        'tracking_mode',
+        "TEXT NOT NULL DEFAULT 'active'"
+      );
     }
   }
 ];

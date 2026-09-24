@@ -14,6 +14,7 @@ import {
   formatPreciousMetalFreshness
 } from '../services/preciousMetalTaskFreshness';
 import { buildTaskChildEnv, resolveTaskPython } from '../utils/taskExecutionEnv';
+import { isRunnableToday } from '../utils/taskSchedule';
 
 type TaskRow = {
   id: number;
@@ -105,13 +106,6 @@ function getChinaDateParts(now = new Date()) {
     day: Number(parts.day),
     weekday: weekdayMap[parts.weekday] ?? now.getDay()
   };
-}
-
-function isRunnableToday(scheduleDays: string, now = new Date()) {
-  const day = getChinaDateParts(now).weekday;
-  if (scheduleDays === 'every_day') return true;
-  if (scheduleDays === 'work_days') return day >= 1 && day <= 5;
-  return true;
 }
 
 function getScheduleWindowKey(task: TaskRow, now = new Date()) {
@@ -731,6 +725,39 @@ async function runLongchaoPriceUpdate(config: any, timeoutMs: number, taskName: 
   };
 }
 
+async function runCshrichElectronicsUpdate(
+  config: any,
+  timeoutMs: number,
+  taskName: string,
+  defaultMode: 'sync' | 'discover'
+): Promise<BusinessTaskRunResult> {
+  const mode = String(config.mode || defaultMode).trim() || defaultMode;
+  const args = [
+    '--db',
+    getDatabasePath(),
+    '--mode',
+    mode
+  ];
+  if (config.catalog) args.push('--catalog', String(config.catalog));
+  if (config.dry_run) args.push('--dry-run');
+
+  const fallbackMessage = defaultMode === 'discover'
+    ? '潮收汇电子产品分类周检失败'
+    : '潮收汇电子产品价格更新失败';
+  const parsed = await runPythonJsonScript(
+    config,
+    'cshrich_electronics.py',
+    args,
+    fallbackMessage,
+    timeoutMs,
+    taskName
+  );
+  return buildTaskResult(
+    parsed,
+    defaultMode === 'discover' ? '潮收汇电子产品分类周检完成' : '潮收汇电子产品价格更新完成'
+  );
+}
+
 async function runBusinessTask(task: TaskRow, config: any, timeoutMs: number): Promise<BusinessTaskRunResult> {
   const taskName = task.name || task.task_key;
   if (task.task_type === 'commodity_metals_price_update' || task.task_key === 'commodity_metals_price_update') {
@@ -753,6 +780,12 @@ async function runBusinessTask(task: TaskRow, config: any, timeoutMs: number): P
   }
   if (task.task_type === 'longchao_price_update' || task.task_key === 'longchao_price_update') {
     return runLongchaoPriceUpdate(config, timeoutMs, taskName);
+  }
+  if (task.task_type === 'cshrich_electronics_price_update' || task.task_key === 'cshrich_electronics_price_update') {
+    return runCshrichElectronicsUpdate(config, timeoutMs, taskName, 'sync');
+  }
+  if (task.task_type === 'cshrich_catalog_discover' || task.task_key === 'cshrich_catalog_discover') {
+    return runCshrichElectronicsUpdate(config, timeoutMs, taskName, 'discover');
   }
   throw new Error(`生意任务执行器未接入：${task.task_key} / ${task.task_type}`);
 }

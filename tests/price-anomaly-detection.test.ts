@@ -35,3 +35,13 @@ test("general categories retain the existing thirty-percent threshold", () => {
     changeAmount: -350
   }).shouldAlert, true);
 });
+
+test("seeded electronics categories share the iPhone high-unit-price profile", () => {
+  const assessment = assessPriceMove({
+    categoryName: "大疆",
+    changePercent: -6.14,
+    changeAmount: -540
+  });
+  assert.equal(assessment.shouldAlert, true);
+  assert.equal(assessment.profile, "high_unit_price");
+});

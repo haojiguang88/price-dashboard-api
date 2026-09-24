@@ -1,8 +1,10 @@
+import { ELECTRONICS_HIGH_UNIT_PRICE_CATEGORIES } from "../constants/electronicsCategories";
+
 const GENERAL_MOVE_PERCENT = 30;
 const HIGH_UNIT_PRICE_MOVE_PERCENT = 3;
 const HIGH_UNIT_PRICE_MOVE_AMOUNT = 300;
 
-const HIGH_UNIT_PRICE_CATEGORIES = new Set(["苹果手机", "游戏机"]);
+const HIGH_UNIT_PRICE_CATEGORIES = ELECTRONICS_HIGH_UNIT_PRICE_CATEGORIES;
 
 export interface PriceMoveAssessment {
   shouldAlert: boolean;

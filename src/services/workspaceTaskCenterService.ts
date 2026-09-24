@@ -1,6 +1,7 @@
 import getDb from "../config/database";
 import { buildWorkspaceFilter, normalizeWorkspace } from "../utils/workspace";
 import { WorkspaceCenterError } from "./workspaceCenterErrors";
+import { getFreshnessThresholdHours } from "../utils/taskSchedule";
 
 const COMPACT_RESULT_ARRAY_PREVIEW_LIMIT = 5;
 const COMPACT_RESULT_ARRAY_KEYS = new Set([
@@ -180,10 +181,6 @@ const getDueTime = (scheduleTime: string, now = new Date()) => {
   if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) return null;
   return new Date(Date.UTC(year, month - 1, day, parsed.hour - 8, parsed.minute, 0, 0));
 };
-
-const getFreshnessThresholdHours = (scheduleDays: string) => (
-  scheduleDays === "work_days" ? 84 : 36
-);
 
 const getTaskFreshness = (task: any, lastDataWriteRun: any, now = new Date()) => {
   if (Number(task.enabled) !== 1) {

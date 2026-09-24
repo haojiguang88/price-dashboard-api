@@ -10,6 +10,7 @@ import {
   registerPriceImportPreview
 } from "../services/priceImportService";
 import { assessPriceMove } from "../services/priceAnomalyDetection";
+import { ELECTRONICS_HIGH_UNIT_PRICE_CATEGORIES } from "../constants/electronicsCategories";
 import { buildQualityAlertRecheckMetadata } from "../services/priceQualityAlertService";
 import { calculatePriceWorkbenchCoinSilverPremium } from "../services/coinSilverPremiumService";
 import { attachMarketBooks, listMarketTrades } from "../services/marketBookService";
@@ -127,7 +128,7 @@ const STRONG_JUMP_AMOUNT = 1000;
 const HIGH_UNIT_PRICE_STANDARD_JUMP_DAYS = 14;
 const MEDIAN_OUTLIER_RATIO = 0.5;
 const ISOLATED_NEIGHBOR_CLOSE_PERCENT = 15;
-const HIGH_UNIT_PRICE_STANDARD_CATEGORIES = new Set(["苹果手机", "游戏机"]);
+const HIGH_UNIT_PRICE_STANDARD_CATEGORIES = ELECTRONICS_HIGH_UNIT_PRICE_CATEGORIES;
 const VALID_QUALITY_ALERT_STATUSES = new Set<PriceQualityAlertStatus>(["pending", "ignored", "fixed"]);
 
 const toTrimmedText = (value: unknown) => (

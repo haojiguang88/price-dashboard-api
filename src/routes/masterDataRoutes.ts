@@ -70,7 +70,8 @@ router.get("/categories", async (req, res) => {
     const db = await getDb();
     const where = includeArchived(req) ? "" : "WHERE COALESCE(is_archived, 0) = 0";
     const categories = await db.all(`
-      SELECT id, name, COALESCE(is_archived, 0) AS is_archived, archived_at, created_at, updated_at
+      SELECT id, name, COALESCE(is_archived, 0) AS is_archived, archived_at,
+             COALESCE(tracking_mode, 'active') AS tracking_mode, created_at, updated_at
       FROM categories
       ${where}
       ORDER BY COALESCE(is_archived, 0) ASC, name ASC
@@ -78,6 +79,198 @@ router.get("/categories", async (req, res) => {
     res.json({ success: true, data: categories });
   } catch (error) {
     res.status(500).json({ success: false, message: "获取品类列表失败" });
+  }
+});
+
+const CORE_ACTIVE_CATEGORIES = new Set(["苹果手机", "游戏机", "泡泡玛特", "纪念币", "纪念钞", "贵金属"]);
+const ARCHIVE_SKIP_REASON = "品类已归档，停止日常采集";
+export const STALE_PRICE_DAYS = 30;
+
+export const chinaDateKey = (now = new Date()) => (
+  now.toLocaleDateString("en-CA", { timeZone: "Asia/Shanghai" })
+);
+
+export const daysSincePriceDate = (dateText: string | null | undefined, today = chinaDateKey()) => {
+  const raw = String(dateText || "").slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) return null;
+  const from = Date.parse(`${raw}T00:00:00+08:00`);
+  const to = Date.parse(`${today}T00:00:00+08:00`);
+  if (!Number.isFinite(from) || !Number.isFinite(to)) return null;
+  return Math.max(0, Math.round((to - from) / 86_400_000));
+};
+
+export const classifyCategoryLiquidity = (row: {
+  is_archived?: number;
+  name: string;
+  last_price_date?: string | null;
+  open_position_count?: number;
+  buying_plan_count?: number;
+  selling_plan_count?: number;
+  watchlist_count?: number;
+}, today = chinaDateKey()) => {
+  const ageDays = daysSincePriceDate(row.last_price_date, today);
+  let liquidity: "none" | "stale" | "ok" = "ok";
+  let liquidityReason = "";
+  if (!row.last_price_date) {
+    liquidity = "none";
+    liquidityReason = "无可用价格";
+  } else if (ageDays !== null && ageDays > STALE_PRICE_DAYS) {
+    liquidity = "stale";
+    liquidityReason = `最近价格 ${String(row.last_price_date).slice(0, 10)}，已 ${ageDays} 天`;
+  }
+
+  const inUse = (
+    Number(row.open_position_count || 0) > 0
+    || Number(row.buying_plan_count || 0) > 0
+    || Number(row.selling_plan_count || 0) > 0
+    || Number(row.watchlist_count || 0) > 0
+  );
+  const archiveCandidate = (
+    Number(row.is_archived || 0) !== 1
+    && !CORE_ACTIVE_CATEGORIES.has(row.name)
+    && !inUse
+    && (liquidity === "none" || liquidity === "stale")
+  );
+
+  return {
+    last_price_age_days: ageDays,
+    liquidity,
+    liquidity_reason: liquidityReason,
+    archive_candidate: archiveCandidate
+  };
+};
+
+const syncCshrichCatalogTracking = async (db: any, categoryName: string, archived: boolean) => {
+  const table = await db.get(
+    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'cshrich_catalog_categories'"
+  );
+  if (!table) return;
+  if (archived) {
+    await db.run(
+      `UPDATE cshrich_catalog_categories
+       SET tracked = 0,
+           skip_reason = CASE WHEN skip_reason = '' THEN ? ELSE skip_reason END,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE system_category_name = ? AND source_key = 'cshrich_electronics'`,
+      [ARCHIVE_SKIP_REASON, categoryName]
+    );
+    return;
+  }
+  await db.run(
+    `UPDATE cshrich_catalog_categories
+     SET tracked = CASE
+           WHEN skip_reason IN ('', ?) THEN 1
+           ELSE 0
+         END,
+         skip_reason = CASE WHEN skip_reason = ? THEN '' ELSE skip_reason END,
+         updated_at = CURRENT_TIMESTAMP
+     WHERE system_category_name = ? AND source_key = 'cshrich_electronics'`,
+    [ARCHIVE_SKIP_REASON, ARCHIVE_SKIP_REASON, categoryName]
+  );
+};
+
+const suggestCategoryTracking = (row: {
+  is_archived: number;
+  name: string;
+  open_position_count: number;
+  buying_plan_count: number;
+  selling_plan_count: number;
+  watchlist_count: number;
+}) => {
+  if (Number(row.is_archived) === 1) return "archived";
+  if (CORE_ACTIVE_CATEGORIES.has(row.name)) return "active";
+  if (
+    Number(row.open_position_count) > 0
+    || Number(row.buying_plan_count) > 0
+    || Number(row.selling_plan_count) > 0
+    || Number(row.watchlist_count) > 0
+  ) {
+    return "active";
+  }
+  return "observe";
+};
+
+router.get("/categories/review", async (req, res) => {
+  try {
+    const db = await getDb();
+    const where = includeArchived(req) ? "" : "WHERE COALESCE(c.is_archived, 0) = 0";
+    const rows = await db.all(`
+      SELECT
+        c.id,
+        c.name,
+        COALESCE(c.is_archived, 0) AS is_archived,
+        c.archived_at,
+        COALESCE(c.tracking_mode, 'active') AS tracking_mode,
+        (
+          SELECT COUNT(1) FROM objects o
+          WHERE o.category_id = c.id AND COALESCE(o.is_archived, 0) = 0
+        ) AS active_object_count,
+        (
+          SELECT COUNT(1) FROM objects o
+          WHERE o.category_id = c.id AND COALESCE(o.is_archived, 0) = 1
+        ) AS archived_object_count,
+        (
+          SELECT MAX(pr.date) FROM price_records pr WHERE pr.category = c.name
+        ) AS last_price_date,
+        (
+          SELECT COUNT(DISTINCT pr.object_name) FROM price_records pr WHERE pr.category = c.name
+        ) AS priced_object_count,
+        (
+          SELECT COUNT(1) FROM positions p
+          WHERE p.category_name = c.name AND COALESCE(p.total_quantity, 0) > 0
+        ) AS open_position_count,
+        (
+          SELECT COUNT(1) FROM buying_plans bp
+          WHERE bp.category_name = c.name AND bp.status IN ('pending', 'in_progress')
+        ) AS buying_plan_count,
+        (
+          SELECT COUNT(1) FROM selling_plans sp
+          WHERE sp.category_name = c.name AND sp.status IN ('pending', 'in_progress')
+        ) AS selling_plan_count,
+        (
+          SELECT COUNT(1) FROM watchlist_items w
+          WHERE w.category_id = c.id AND w.status IN ('watching', 'waiting_price', 'waiting_signal')
+        ) AS watchlist_count
+      FROM categories c
+      ${where}
+      ORDER BY COALESCE(c.is_archived, 0) ASC, c.name ASC
+    `);
+    res.json({
+      success: true,
+      data: rows.map((row: any) => ({
+        ...row,
+        suggested_tracking: suggestCategoryTracking(row),
+        ...classifyCategoryLiquidity(row)
+      }))
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: "获取品类跟踪口径失败" });
+  }
+});
+
+router.patch("/categories/:id/tracking", async (req, res) => {
+  try {
+    const db = await getDb();
+    const trackingMode = String(req.body?.tracking_mode || "").trim();
+    if (trackingMode !== "active" && trackingMode !== "observe") {
+      return res.status(400).json({ success: false, message: "跟踪口径只能是活跃或观察" });
+    }
+    const category = await db.get(
+      "SELECT id, name, COALESCE(is_archived, 0) AS is_archived FROM categories WHERE id = ?",
+      [req.params.id]
+    );
+    if (!category) return res.status(404).json({ success: false, message: "品类不存在" });
+    if (Number(category.is_archived) === 1) {
+      return res.status(409).json({ success: false, message: "已归档品类请先恢复，再改跟踪口径" });
+    }
+    const now = new Date().toISOString();
+    await db.run(
+      "UPDATE categories SET tracking_mode = ?, updated_at = ? WHERE id = ?",
+      [trackingMode, now, req.params.id]
+    );
+    res.json({ success: true, data: { message: trackingMode === "observe" ? "已设为观察" : "已设为活跃" } });
+  } catch (error) {
+    res.status(500).json({ success: false, message: "更新品类跟踪口径失败" });
   }
 });
 
@@ -141,60 +334,122 @@ router.put("/categories/:id", async (req, res) => {
   }
 });
 
+export const archiveCategoryRecord = async (db: any, categoryId: string | number) => {
+  const category = await db.get(
+    "SELECT id, name, COALESCE(is_archived, 0) AS is_archived FROM categories WHERE id = ?",
+    [categoryId]
+  );
+  if (!category) {
+    return { ok: false as const, status: 404, message: "品类不存在" };
+  }
+  if (Number(category.is_archived) === 1) {
+    return { ok: true as const, skipped: true, name: category.name };
+  }
+  const openPositions = await countOpenPositionsForMaster(db, {
+    level: "category",
+    categoryName: category.name
+  });
+  if (openPositions > 0) {
+    return {
+      ok: false as const,
+      status: 409,
+      message: `${category.name}：${formatOpenPositionArchiveBlockMessage(openPositions)}`
+    };
+  }
+
+  const now = new Date().toISOString();
+  try {
+    await db.run("BEGIN IMMEDIATE TRANSACTION");
+    await db.run(
+      "UPDATE categories SET is_archived = 1, archived_at = ?, updated_at = ? WHERE id = ?",
+      [now, now, category.id]
+    );
+    await db.run(
+      `UPDATE objects
+       SET is_archived = 1, archived_at = ?, updated_at = ?
+       WHERE category_id = ? AND COALESCE(is_archived, 0) = 0`,
+      [now, now, category.id]
+    );
+    await db.run(
+      `UPDATE variants
+       SET is_archived = 1, archived_at = ?, updated_at = ?
+       WHERE object_id IN (SELECT id FROM objects WHERE category_id = ?)
+         AND COALESCE(is_archived, 0) = 0`,
+      [now, now, category.id]
+    );
+    await db.run("COMMIT");
+  } catch (error) {
+    await db.run("ROLLBACK").catch(() => undefined);
+    throw error;
+  }
+  await syncCshrichCatalogTracking(db, category.name, true);
+  return { ok: true as const, skipped: false, name: category.name };
+};
+
 router.patch("/categories/:id/archive", async (req, res) => {
   try {
     const db = await getDb();
-    const category = await db.get("SELECT id, name FROM categories WHERE id = ?", [req.params.id]);
-    if (!category) return res.status(404).json({ success: false, message: "品类不存在" });
-
-    const openPositions = await countOpenPositionsForMaster(db, {
-      level: "category",
-      categoryName: category.name
-    });
-    if (openPositions > 0) {
-      return res.status(409).json({
-        success: false,
-        message: formatOpenPositionArchiveBlockMessage(openPositions)
-      });
+    const result = await archiveCategoryRecord(db, req.params.id);
+    if (!result.ok) {
+      return res.status(result.status).json({ success: false, message: result.message });
     }
-
-    const now = new Date().toISOString();
-    try {
-      await db.run("BEGIN IMMEDIATE TRANSACTION");
-      await db.run(
-        "UPDATE categories SET is_archived = 1, archived_at = ?, updated_at = ? WHERE id = ?",
-        [now, now, req.params.id]
-      );
-      await db.run(
-        `UPDATE objects
-         SET is_archived = 1, archived_at = ?, updated_at = ?
-         WHERE category_id = ? AND COALESCE(is_archived, 0) = 0`,
-        [now, now, req.params.id]
-      );
-      await db.run(
-        `UPDATE variants
-         SET is_archived = 1, archived_at = ?, updated_at = ?
-         WHERE object_id IN (SELECT id FROM objects WHERE category_id = ?)
-           AND COALESCE(is_archived, 0) = 0`,
-        [now, now, req.params.id]
-      );
-      await db.run("COMMIT");
-    } catch (error) {
-      await db.run("ROLLBACK").catch(() => undefined);
-      throw error;
-    }
-
     res.json({ success: true, data: { message: "品类已归档" } });
   } catch (error) {
     res.status(500).json({ success: false, message: "归档品类失败" });
   }
 });
 
+router.post("/categories/archive-batch", async (req, res) => {
+  try {
+    const db = await getDb();
+    const ids = Array.isArray(req.body?.ids) ? req.body.ids : null;
+    if (!ids) {
+      return res.status(400).json({ success: false, message: "ids 必须是数组" });
+    }
+    if (ids.length === 0) {
+      return res.status(400).json({ success: false, message: "请选择要归档的品类" });
+    }
+    const archived: string[] = [];
+    const skipped: string[] = [];
+    const failed: string[] = [];
+    for (const id of ids) {
+      const result = await archiveCategoryRecord(db, id);
+      if (!result.ok) {
+        failed.push(result.message);
+        continue;
+      }
+      if (result.skipped) skipped.push(result.name);
+      else archived.push(result.name);
+    }
+    if (archived.length === 0 && failed.length > 0) {
+      return res.status(409).json({
+        success: false,
+        message: failed.join("；"),
+        data: { archived, skipped, failed }
+      });
+    }
+    res.json({
+      success: true,
+      data: {
+        message: `已归档 ${archived.length} 个品类`,
+        archived,
+        skipped,
+        failed
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: "批量归档品类失败" });
+  }
+});
+
 router.patch("/categories/:id/restore", async (req, res) => {
   try {
     const db = await getDb();
+    const category = await db.get("SELECT id, name FROM categories WHERE id = ?", [req.params.id]);
+    if (!category) return res.status(404).json({ success: false, message: "品类不存在" });
     const changes = await archiveResponse(db, "categories", req.params.id, false);
     if (changes === 0) return res.status(404).json({ success: false, message: "品类不存在" });
+    await syncCshrichCatalogTracking(db, category.name, false);
     res.json({ success: true, data: { message: "品类已恢复" } });
   } catch (error) {
     res.status(500).json({ success: false, message: "恢复品类失败" });
