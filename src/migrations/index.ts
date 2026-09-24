@@ -9829,6 +9829,433 @@ ${marker}：大网红本人亲自上阵、加价卖货。币圈一批大佬反�
         "TEXT NOT NULL DEFAULT 'active'"
       );
     }
+  },
+  {
+    id: '20260924_003_seed_pass_on_liquidity_cases',
+    name: 'Seed four pass-on cases: Pokemon 30th, Moutai Four Seasons, iPhone 18, sports cards',
+    run: async (db: any) => {
+      const freezeDate = '2026-09-24';
+      const marker = `认知冻结日：${freezeDate}`;
+
+      const findPatternId = async (name: string) => {
+        const row = await dbGet<{ id: number }>(
+          db,
+          `SELECT id FROM behavior_patterns
+           WHERE name = ? AND is_deleted = 0 AND status = 'active'
+           ORDER BY id LIMIT 1`,
+          [name]
+        );
+        if (!row) throw new Error(`Required behavior pattern is missing: ${name}`);
+        return row.id;
+      };
+
+      const linkPatterns = async (
+        caseId: number,
+        links: Array<{ name: string; role: 'primary' | 'secondary' }>
+      ) => {
+        if (!(await migrationTableExists(db, 'behavior_case_pattern_links'))) return;
+        for (const link of links) {
+          await dbRun(
+            db,
+            `INSERT OR IGNORE INTO behavior_case_pattern_links
+              (case_id, pattern_id, role, note, created_at, updated_at)
+             VALUES (?, ?, ?, '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+            [caseId, await findPatternId(link.name), link.role]
+          );
+        }
+      };
+
+      const seedObservation = async (spec: {
+        auditKey: string;
+        marketTitle: string;
+        behaviorTitle: string;
+        track: string;
+        projectName: string;
+        marketType: string;
+        summary: string;
+        shortLesson: string;
+        background: string;
+        marketStart: string;
+        marketEvolution: string;
+        turningPoints: string;
+        laterOutcome: string;
+        exposedProblem: string;
+        extractedLesson: string;
+        note: string;
+        sourceNote: string;
+        visibleInformation: string;
+        pressureContext: string;
+        actionTaken: string;
+        result: string;
+        outcomeType: 'ongoing' | 'unknown';
+        selfResponse: string;
+        learnToKeep: string;
+        learnToAvoid: string;
+        applicabilityBoundary: string;
+        linkedRules: string[];
+        pricingAnalysis: Record<string, unknown>;
+        patterns: Array<{ name: string; role: 'primary' | 'secondary' }>;
+      }) => {
+        let marketReview: { id: number } | undefined;
+        if (await migrationTableExists(db, 'market_reviews')) {
+          marketReview = await dbGet<{ id: number }>(
+            db,
+            `SELECT id FROM market_reviews
+             WHERE is_deleted = 0 AND (title = ? OR project_name = ?)
+             ORDER BY id LIMIT 1`,
+            [spec.marketTitle, spec.projectName]
+          );
+          if (!marketReview) {
+            await dbRun(
+              db,
+              `INSERT INTO market_reviews
+                (title, track, project_name, review_date, market_type_preset,
+                 market_type_custom, summary_conclusion, short_lesson, background,
+                 market_start, market_evolution, key_turning_points, later_outcome,
+                 exposed_problem, extracted_lesson, note, is_deleted, created_at, updated_at)
+               VALUES (?, ?, ?, ?, '自定义', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                       0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+              [
+                spec.marketTitle,
+                spec.track,
+                spec.projectName,
+                freezeDate,
+                spec.marketType,
+                spec.summary,
+                spec.shortLesson,
+                spec.background,
+                spec.marketStart,
+                spec.marketEvolution,
+                spec.turningPoints,
+                spec.laterOutcome,
+                spec.exposedProblem,
+                spec.extractedLesson,
+                spec.note
+              ]
+            );
+            marketReview = await dbGet<{ id: number }>(
+              db,
+              `SELECT id FROM market_reviews WHERE title = ? AND is_deleted = 0 ORDER BY id LIMIT 1`,
+              [spec.marketTitle]
+            );
+          }
+        }
+
+        if (!(await migrationTableExists(db, 'behavior_cases'))) return;
+        let behaviorCase = await dbGet<{ id: number }>(
+          db,
+          `SELECT id FROM behavior_cases
+           WHERE is_deleted = 0 AND (title = ? OR project_name = ?)
+           ORDER BY id LIMIT 1`,
+          [spec.behaviorTitle, spec.projectName]
+        );
+        if (!behaviorCase) {
+          await dbRun(
+            db,
+            `INSERT INTO behavior_cases
+              (title, origin_type, subject_alias, source_note, evidence_level, case_date,
+               track, project_name, background, visible_information, pressure_context,
+               action_taken, result, action_quality, outcome_type, evidence_role,
+               self_response, learn_to_keep, learn_to_avoid, applicability_boundary,
+               linked_rule_refs_json, source_type, source_id, source_snapshot_json,
+               pricing_analysis_json, note, is_deleted, created_at, updated_at)
+             VALUES (?, 'self', ?, ?, 'first_hand', ?,
+                     ?, ?, ?, ?, ?,
+                     ?, ?, 'good', ?, 'boundary',
+                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0,
+                     CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+            [
+              spec.behaviorTitle,
+              '自己观察，未参与',
+              spec.sourceNote,
+              freezeDate,
+              spec.track,
+              spec.projectName,
+              spec.background,
+              spec.visibleInformation,
+              spec.pressureContext,
+              spec.actionTaken,
+              spec.result,
+              spec.outcomeType,
+              spec.selfResponse,
+              spec.learnToKeep,
+              spec.learnToAvoid,
+              spec.applicabilityBoundary,
+              JSON.stringify(spec.linkedRules),
+              marketReview ? 'market_review' : '',
+              marketReview ? String(marketReview.id) : '',
+              JSON.stringify({
+                capturedBy: 'migration-20260924_003',
+                sourceType: marketReview ? 'market_review' : '',
+                sourceId: marketReview ? String(marketReview.id) : '',
+                cognitionFrozenAt: freezeDate,
+                participated: false,
+                inventedPostMove: false
+              }),
+              JSON.stringify(spec.pricingAnalysis),
+              spec.note
+            ]
+          );
+          behaviorCase = await dbGet<{ id: number }>(
+            db,
+            `SELECT id FROM behavior_cases WHERE title = ? AND is_deleted = 0 ORDER BY id LIMIT 1`,
+            [spec.behaviorTitle]
+          );
+        }
+        if (behaviorCase) {
+          await linkPatterns(behaviorCase.id, spec.patterns);
+          if (await migrationTableExists(db, 'audit_logs')) {
+            await dbRun(
+              db,
+              `INSERT OR IGNORE INTO audit_logs
+                (id, timestamp, module, action, target, status, detail, entity_id,
+                 path, domain, workspace, created_at, updated_at)
+               VALUES (?, CURRENT_TIMESTAMP, '人因案例库', 'create', ?, 'success', ?, ?,
+                       '/review/human-cases', 'business', 'business', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+              [
+                `audit-human-case-${spec.auditKey}-20260924`,
+                spec.behaviorTitle,
+                JSON.stringify({
+                  version: 'V0.1',
+                  participated: false,
+                  primaryPattern: spec.patterns[0]?.name
+                }),
+                String(behaviorCase.id)
+              ]
+            );
+          }
+        }
+        if (marketReview && await migrationTableExists(db, 'audit_logs')) {
+          await dbRun(
+            db,
+            `INSERT OR IGNORE INTO audit_logs
+              (id, timestamp, module, action, target, status, detail, entity_id,
+               path, domain, workspace, created_at, updated_at)
+             VALUES (?, CURRENT_TIMESTAMP, '行情复盘', 'create', ?, 'success', ?, ?,
+                     '/review/market', 'business', 'business', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+            [
+              `audit-market-review-${spec.auditKey}-20260924`,
+              spec.marketTitle,
+              JSON.stringify({
+                version: 'V0.1',
+                cognitionFrozenAt: freezeDate,
+                participated: false
+              }),
+              String(marketReview.id)
+            ]
+          );
+        }
+      };
+
+      await seedObservation({
+        auditKey: 'pokemon-30th',
+        marketTitle: '2026 宝可梦30周年：当时没利润，后来起飞不倒推（V0.1）',
+        behaviorTitle: '宝可梦30周年：不懂、实体不好跑，A仓都没开',
+        track: '观察样本',
+        projectName: '宝可梦30周年',
+        marketType: '不懂不做 / 实体退出差 / 后来起飞不倒推',
+        summary: '一开始接触时看着没利润，本人完全不懂，A仓都没开。当时想的是：这东西拿到实体，行情不好时跑都不好跑。后来起飞是后来的事，不能改写当时“不懂所以不干”。这东西倒是也不贵，但贵不贵替代不了懂不懂。',
+        shortLesson: '不懂、退出差的实体不参与。后来起飞，只能证明市场后来变了，不能证明当时该开仓。',
+        background: '一、当时看见什么\n\n接触宝可梦30周年时，盘面看起来没利润。本人对卡牌/周边圈层、出货渠道和玩家结构都不熟，A仓也没建。不补造成交价和库存量。本案例不新建系统品类，只留观察样本。',
+        marketStart: '二、当时判断\n\n1. 看不懂利润从哪来，谁接、怎么出；\n2. 实体拿到手里，行情不好时不好变现；\n3. 价格不高也不能当成“亏得起所以可以瞎干”。',
+        marketEvolution: '三、动作\n\n没有开A仓，没有参与。原因是不懂，不是已经预测它不会涨。',
+        turningPoints: '四、后来发生了什么（分开记账）\n\n后来这波起飞了。起飞时点、幅度和成交结构未核验，不写入精确价格。这是后验行情，不是当时决策依据。',
+        laterOutcome: '五、当前不能下的结论\n\n1. 不把后来起飞写成当时判断错了、当时该买；\n2. 不把“没参加”解释成踏空损失，也不解释成已经赚到了回避；\n3. 不因为后来涨了就去补课追高；\n4. 不把宝可梦做成系统品类或日常采价对象。',
+        exposedProblem: '看不懂时，最大风险不是错过利润，而是行情一差就卡在实体上，货出不去。',
+        extractedLesson: '能力圈和退出流动性先于题材。后来的暴涨只更新市场事实，不改写当时信息集。',
+        note: `${marker}\n状态：V0.1\n本人立场：未参与，A仓未开。\n数据口径：现场观察，无本地报价序列。\n后续：起飞细节若要补，只新增带日期记录，不改写“当时不懂所以不干”。`,
+        sourceNote: '本人当时接触过这波，但未建仓、未交易。后来起飞来自后续观察，未核验精确价格。',
+        visibleInformation: '一开始看着没利润。后来市场起飞。没有本地档口报价可核对。',
+        pressureContext: '后来涨了，容易让人后悔“当时那么便宜怎么不拿”。便宜和懂是两件事。',
+        actionTaken: '没有开A仓，没有干。原因是完全不懂，并且判断实体行情不好时不好跑。',
+        result: '后来起飞了。本人没有仓位，个人盈亏不存在。案例记下“不懂不做”，不把起飞写成卖飞。',
+        outcomeType: 'unknown',
+        selfResponse: '看不懂就不进。实体货在弱市里退出很差，这比“贵不贵”更重要。后来涨了也不追。',
+        learnToKeep: '先问自己懂不懂、不好跑时怎么出。不懂就保持零仓。',
+        learnToAvoid: '避免用后来的起飞证明当时该干；避免因为“又不贵”降低懂的门槛；避免在不懂的圈层里为了不踏空去补货。',
+        applicabilityBoundary: '适用于看不懂、退出靠实体流通的卡牌和周边。不适用于自己本来就有出货渠道、能当通货周转的品种。也不把本案例当成宝可梦日常跟踪的开工指令。',
+        linkedRules: [
+          '不懂、退出差的实体/卡牌不参与',
+          '后来起飞不能倒推当时该开仓',
+          '不贵替代不了懂'
+        ],
+        pricingAnalysis: {
+          basePriceLabel: '当时未见稳定利润，无本地报价',
+          basePrice: null,
+          observedPriceLabel: '后来起飞（幅度未核验）',
+          observedPriceLow: null,
+          observedPriceHigh: null,
+          priceSignalType: 'unconfirmed',
+          conditionStack: ['30周年题材', '当时看似无利润', '实体持货', '后来起飞'],
+          buyerBreadth: 'unknown',
+          keyBuyerDependency: 'unknown',
+          exitLiquidity: 'thin',
+          verificationNote: '无本地价格序列。起飞是用户后验观察，不写入具体价，避免把传闻报价当成成交。'
+        },
+        patterns: [
+          { name: '主动放弃与纪律优先', role: 'primary' },
+          { name: '没有退出机制', role: 'secondary' },
+          { name: '研究与推演停在表层', role: 'secondary' }
+        ]
+      });
+
+      await seedObservation({
+        auditKey: 'moutai-four-seasons',
+        marketTitle: '2026 茅台四季：不信限量，持续放货后破发（V0.1）',
+        behaviorTitle: '茅台四季：复刻不了70周年，弱市里持续放就破发',
+        track: '观察样本',
+        projectName: '茅台四季',
+        marketType: '弱市发售 / 官方限量不可信 / 持续放货破发',
+        summary: '官方没说限量；就算说了本人也不信。茅台整体行情本来就弱。发售当天有档口按一套加五六百兜底收，一套4瓶。随后这两天继续放货，破发了。当时判断是：这东西不好看，也不是限定限量，复刻不了70周年。',
+        shortLesson: '弱市里，发售日有人加价兜底，不等于有承接。官方限量不信。能持续放货的，稀缺叙事失效。',
+        background: '一、当时看见什么\n\n茅台整体行情偏弱。四季这套官方没有给出可信的限量口径；本人对官方限量声明默认不信。外观也不构成硬题材。价格只记用户看到的档口行为：发售当日一套加五六百兜底收，一套4瓶。没有本地生意库报价，不编发行价和破发后的绝对价。',
+        marketStart: '二、当时判断\n\n复刻不了70周年。原因很具体：不好看，也不是限定限量。弱市里更不该把发售日溢价当成趋势。',
+        marketEvolution: '三、发售日与随后供给\n\n发售当天出现档口兜底：一套加五六百收，计价单位是4瓶一套，不是单瓶。这只证明发售日有人愿意给这个加价，不证明后面还能出。随后两天继续放货，盘面破发。破发幅度未核验。',
+        turningPoints: '四、动作\n\n按“复刻不了70周年”这个判断，没有参与抢发售、也没有按档口加价去接。不是事后看到破发才说自己早就空仓。',
+        laterOutcome: '五、当前不能下的结论\n\n1. 破发只说明持续放货打穿了发售日加价，不证明当时已经精确预测到破发时点和幅度；\n2. 不把发售日+500～600写成真实成交中枢；\n3. 不把70周年的溢价公式套到以后每一套茅台文创上；\n4. 官方以后若补口限量，仍然先看能不能持续放货。',
+        exposedProblem: '发售日兜底价最容易被误读成“有人托底所以安全”。托底只对当时那一单有效。货还在放，托底就会撤。',
+        extractedLesson: '酒类文创先看供给能不能停，再看纪年、颜值、官方口径。弱市加持续放货，发售日加价很快失效。',
+        note: `${marker}\n状态：V0.1\n本人立场：未参与。\n数据口径：发售日档口一套加五六百为用户观察；破发为随后两天持续放货后的盘面事实，绝对价未录入。\n后续：若补发行价或破发后成交，只新增带日期记录。`,
+        sourceNote: '发售日档口一套加五六百兜底、随后持续放货破发，来自本人观察。未核验绝对发行价和破发后成交价。',
+        visibleInformation: '官方未给出可信限量。发售当日档口一套（4瓶）加五六百兜底收。随后两天继续放货，破发。',
+        pressureContext: '发售日有人加价收，容易让人觉得“开盘就有利润”。弱市里这利润只存在于货还没放完之前。',
+        actionTaken: '判断复刻不了70周年，没有参与。依据是不好看、不是限定限量，加上茅台整体行情弱。',
+        result: '随后持续放货，破发。这验证了“稀缺叙事撑不住”，但不把破发幅度写成当时已算准。',
+        outcomeType: 'ongoing',
+        selfResponse: '官方限量默认不信。发售日加价只记为瞬时买盘。能持续放货就按补货结构处理，不按70周年复刻。',
+        learnToKeep: '把“能不能停货”放在颜值、纪年和官方口径前面。弱市发售先看供给。',
+        learnToAvoid: '避免把70周年溢价复制到下一套茅台；避免把发售日档口兜底当成全程地板；避免在官方说限量时直接信。',
+        applicabilityBoundary: '适用于弱市酒类文创、官方口径含糊、发售后仍能连续放货的品种。不适用于已经核实停产、流通极窄、退出路径清楚的真限量。',
+        linkedRules: [
+          '官方限量默认不信，先看能不能持续放货',
+          '发售日加价兜底不是全程地板',
+          '不能拿70周年公式套下一套茅台'
+        ],
+        pricingAnalysis: {
+          basePriceLabel: '官方套装发行价（未录入）',
+          basePrice: null,
+          observedPriceLabel: '发售当日档口一套加价兜底（一套4瓶）',
+          observedPriceLow: 500,
+          observedPriceHigh: 600,
+          priceSignalType: 'bid',
+          conditionStack: ['茅台弱市', '四季套装', '一套4瓶', '发售日档口加价', '随后持续放货', '破发'],
+          buyerBreadth: 'concentrated',
+          keyBuyerDependency: 'high',
+          exitLiquidity: 'limited',
+          verificationNote: '500～600是相对发行价的一套加价，不是套装绝对价，也不是确认成交。破发后的绝对价未核验。'
+        },
+        patterns: [
+          { name: '主动放弃与纪律优先', role: 'primary' },
+          { name: '补货结构反转', role: 'secondary' },
+          { name: '弱市集中放量', role: 'secondary' },
+          { name: '运营制造稀缺', role: 'secondary' }
+        ]
+      });
+
+      await seedObservation({
+        auditKey: 'iphone-18-launch',
+        marketTitle: '2026 iPhone 18：复制不了17，发货节奏决定赚不赚（进行中 V0.1）',
+        behaviorTitle: 'iPhone 18：外观升级不大、资金占用大，发货慢就反撸',
+        track: '苹果手机',
+        projectName: 'iPhone 18系列',
+        marketType: '换代复制失败风险 / 资金占用 / 发货节奏 / 进行中',
+        summary: '一开始不太看好18能复制去年17的行情。对比17，外观升级不大，占用资金还大。原价抢到且发货快，才有周转利润；发货慢了就会反撸。截至2026-09-24不写这轮已经成功或已经失败。',
+        shortLesson: '换代溢价不能按上一代自动续上。资金重的工业品，利润看发货和退出速度，不看发布会情绪。',
+        background: '一、当时判断\n\n18对17外观升级不大，难再走一遍17那种换代差价。单台资金占用明显高于普通标的，压货成本高。本人立场是不太看好复制17，不是已经判断18一定跌。',
+        marketStart: '二、赚钱条件（当时就成立，不事后补）\n\n原价抢到、发货快：有可能赚一截周转。\n发货慢：货压在路上或手里，二级一松就反撸。\n所以这不是“看涨18”，是“只接受快进快出，不接受压货”。',
+        marketEvolution: '三、本地档口价（价格数据截止2026-09-23，冻结日2026-09-24）\n\n只使用本地生意库苹果手机档口报价，当前源为潮收汇，不是官方零售价，也不是本人成交。\n\niPhone 18 Pro 256G：9月17日约10050元；9月21–22日约9980元；9月23日黑色/红色9850元，蓝色/银色9980元。\n这是一周内小幅回落，只能说明还没有出现17那种明显换代溢价，不能写成已经完成反撸，也不能写成已经证伪全部机会。',
+        turningPoints: '四、动作\n\n不按“17能炒，18也能炒”去铺货。若参与，只接受原价、快发货的周转；不接受慢发货压仓。本V0.1不把具体成交写成已做或已赚。',
+        laterOutcome: '五、当前不能下的结论\n\n1. 不确认18后来一定没有17的行情；\n2. 不把9月17–23日从10050到9850的回落写成趋势破位；\n3. 不把“不太看好”事后改成“早就知道会跌”；\n4. 发货快的原价单是否真能赚，等实际周转记录再补，不在V0.1里写盈亏。',
+        exposedProblem: '换代叙事会让人用上一代利润表给下一代铺货。外观变化小、资金占用大时，发货慢会把普通波动变成反撸。',
+        extractedLesson: '工业品换代先比外观和资金占用，再比情绪。利润来自发货速度，不来自“去年就是这样”。',
+        note: `${marker}\n状态：进行中 V0.1\n价格数据截止日：2026-09-23\n数据口径：本地生意库苹果手机档口报价（潮收汇）。\n本人立场：不看好复制17；未把慢发货压货当成可做。后续行情由用户自行更新。`,
+        sourceNote: '判断来自本人。价格取本地档口报价，截止2026-09-23。发货快慢对利润的影响是规则，不是已核验的一批成交。',
+        visibleInformation: '18对17外观升级不大。18 Pro 256G档口价9/17约10050元，9/23约9850–9980元。资金占用大。',
+        pressureContext: '17做过一轮，市场会默认18还能做。发布和现货之间的空档，最容易把预计利润当成已经到手。',
+        actionTaken: '不按复制17去铺货。只把“原价且发货快”当成可能的周转条件；发货慢按反撸处理。',
+        result: '截至2026-09-24，本地档口价小幅走低，未见17那种换代大溢价。后期仍未知，保持进行中。',
+        outcomeType: 'ongoing',
+        selfResponse: '上一代赚钱，不能自动授权下一代铺货。资金重就更要看发货。看不清复制路径，就不做重仓压货。',
+        learnToKeep: '把发货速度写成18的硬条件：快才可能有利润，慢就按反撸。',
+        learnToAvoid: '避免用17的行情模板给18加杠杆或压货；避免把发布会情绪折进还没到手的货。',
+        applicabilityBoundary: '适用于换代电子产品、单台资金重、利润依赖发货和二级周转的品种。不适用于已经形成稳定折价通货、快出快进且不加杠杆的常规摊货。',
+        linkedRules: [
+          '换代溢价不能按上一代自动续上',
+          '原价快发货才可能有利润，发货慢按反撸',
+          '资金占用大时，看不清就不压货'
+        ],
+        pricingAnalysis: {
+          basePriceLabel: 'iPhone 18 Pro 256G 本地档口价（2026-09-17）',
+          basePrice: 10050,
+          observedPriceLabel: 'iPhone 18 Pro 256G 本地档口报价带（2026-09-17至09-23）',
+          observedPriceLow: 9850,
+          observedPriceHigh: 10050,
+          priceSignalType: 'market_reference',
+          conditionStack: ['对比17外观升级不大', '资金占用大', '原价抢货', '发货快慢', '不复制17行情'],
+          buyerBreadth: 'concentrated',
+          keyBuyerDependency: 'medium',
+          exitLiquidity: 'limited',
+          verificationNote: '档口价不是成交。9/23黑/红9850、蓝/银9980。一周回落约70–200元，不写成已经反撸。官方零售价未写入。'
+        },
+        patterns: [
+          { name: '主动放弃与纪律优先', role: 'primary' },
+          { name: '过度下注', role: 'secondary' },
+          { name: '抢跑/没有等待', role: 'secondary' }
+        ]
+      });
+
+      await seedObservation({
+        auditKey: 'sports-cards',
+        marketTitle: '球星卡：不懂就不炒，没有原价抽兜底就路过（V0.1）',
+        behaviorTitle: '球星卡：真不懂，有人兜底原价抽可以看，参与炒作就算了',
+        track: '观察样本',
+        projectName: '球星卡',
+        marketType: '不懂不做 / 卡片退出差 / 原价抽可看炒作不参与',
+        summary: '球星卡同样不懂。如果有人兜底原价抽，可以当抽卡游戏看一眼；参与炒作就算了。卡片类和实体周边一样，行情不好时跑都不好跑。',
+        shortLesson: '不懂的卡牌不参与炒作。只有明确的原价抽兜底，才是可观察的游戏，不是可加仓的生意。',
+        background: '一、当时看见什么\n\n圈层、球员溢价、评级和出货路径本人都不熟。没有本地报价序列。本案例不新建系统品类。',
+        marketStart: '二、当时判断\n\n和宝可梦是同一条纪律：卡片在弱市里退出很差。看不懂价格是谁给的，就不能当生意做。',
+        marketEvolution: '三、唯一可看的条件\n\n如果有人按原价兜底抽，风险边界清楚，最多把它当抽卡，不当行情。没有这个兜底，参与炒作就是在不明买盘里加库存。',
+        turningPoints: '四、动作\n\n没有参与炒作。',
+        laterOutcome: '五、当前不能下的结论\n\n1. 不评价某系列后来涨了或跌了；\n2. 不把“有人原价抽”推广成“这个盘子有深度”；\n3. 不因为个别球星卡大涨就补课追入。',
+        exposedProblem: '卡牌弱市时连变现入口都少，比“看错方向”更致命。',
+        extractedLesson: '能力圈外的卡牌，默认路过。原价抽兜底只定义游戏，不定义市场。',
+        note: `${marker}\n状态：V0.1\n本人立场：未参与炒作。\n数据口径：无本地价格。与宝可梦30周年共用“不懂+退出差就不做”。`,
+        sourceNote: '本人对球星卡圈层不熟，未参与炒作。原价抽兜底是可观察条件，不是已核对的某次活动。',
+        visibleInformation: '没有稳定可核对的本地报价。可见条件只有：若有人兜底原价抽，风险边界才清楚。',
+        pressureContext: '别人赚钱时，最容易把抽卡和炒作混成一件事。',
+        actionTaken: '不参与炒作。有原价抽兜底可以看，没有就不碰。',
+        result: '保持零仓。后续某系列涨跌不改写这条纪律。',
+        outcomeType: 'unknown',
+        selfResponse: '卡片不好跑，就不在不懂的盘子里加库存。原价抽是游戏，炒作是另一回事。',
+        learnToKeep: '先问退出：行情不好时这张卡卖给谁。卖不掉就默认不碰。',
+        learnToAvoid: '避免把原价抽的安全感带进二级炒作；避免因为个别卡暴涨就认为自己看懂了。',
+        applicabilityBoundary: '适用于能力圈外的卡牌、抽卡和评级周边。不适用于本人本来就有稳定出货渠道、按通货周转的品种。',
+        linkedRules: [
+          '不懂、退出差的实体/卡牌不参与',
+          '有人兜底原价抽只是游戏，不是炒作许可',
+          '卡片弱市时跑都不好跑'
+        ],
+        pricingAnalysis: {
+          basePriceLabel: '无本地发行价',
+          basePrice: null,
+          observedPriceLabel: '无本地二级报价',
+          observedPriceLow: null,
+          observedPriceHigh: null,
+          priceSignalType: 'unconfirmed',
+          conditionStack: ['圈层不懂', '卡片退出差', '原价抽兜底可看', '炒作不参与'],
+          buyerBreadth: 'unknown',
+          keyBuyerDependency: 'high',
+          exitLiquidity: 'thin',
+          verificationNote: '无价格序列。原价抽兜底未绑定具体场次，只作为参与边界，不作为已发生成交。'
+        },
+        patterns: [
+          { name: '主动放弃与纪律优先', role: 'primary' },
+          { name: '没有退出机制', role: 'secondary' },
+          { name: '研究与推演停在表层', role: 'secondary' }
+        ]
+      });
+    }
   }
 ];
 
