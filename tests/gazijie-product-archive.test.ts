@@ -21,15 +21,17 @@ test("refines the Gazijie archive without inventing a dated 400-yuan price recor
     const db = await manager.getDb();
     await db.run("INSERT OR IGNORE INTO categories (name) VALUES (?)", ["泡泡玛特"]);
     const category = await db.get("SELECT id FROM categories WHERE name = ?", ["泡泡玛特"]);
-    await db.run("INSERT OR IGNORE INTO objects (category_id, name) VALUES (?, ?)", [category.id, "嘎子姐"]);
     const object = await db.get(
-      "SELECT id FROM objects WHERE category_id = ? AND name = ?",
-      [category.id, "嘎子姐"]
+      "SELECT id FROM objects WHERE category_id = ? AND name = ? AND COALESCE(is_archived, 0) = 0",
+      [category.id, "Zsiga"]
     );
+    assert.ok(object);
     const legacyExperience = "之前也有过门店轮动补货，但不是通货补，当时把价格砸到450以下了。，然后就不咋补货了，零零散散的有补货，后来长时间横盘以后就涨上去了";
     const existingArchive = await db.get(
       `SELECT id FROM product_archives
-       WHERE category_name = '泡泡玛特' AND object_name = '嘎子姐' AND is_deleted = 0
+       WHERE category_name = '泡泡玛特' AND object_name = 'Zsiga'
+         AND COALESCE(variant_name, '') IN ('', '向往之处')
+         AND is_deleted = 0
        ORDER BY id LIMIT 1`
     );
     if (existingArchive) {
@@ -51,7 +53,7 @@ test("refines the Gazijie archive without inventing a dated 400-yuan price recor
           (category_id, category_name, object_id, object_name, archive_name,
            position_level, one_sentence_judgment, issue_info, risk_basis,
            experience_note, pending_questions, confidence, status)
-         VALUES (?, '泡泡玛特', ?, '嘎子姐', '嘎子姐', 'main', ?, ?, ?, ?, ?,
+         VALUES (?, '泡泡玛特', ?, 'Zsiga', 'Zsiga / 向往之处', 'main', ?, ?, ?, ?, ?,
                  'confirmed', 'active')`,
         [
           category.id,
@@ -74,7 +76,9 @@ test("refines the Gazijie archive without inventing a dated 400-yuan price recor
     const archive = await db.get(
       `SELECT id, issue_info, risk_basis, experience_note, pending_questions
        FROM product_archives
-       WHERE category_name = '泡泡玛特' AND object_name = '嘎子姐' AND is_deleted = 0`
+       WHERE category_name = '泡泡玛特' AND object_name = 'Zsiga'
+         AND COALESCE(variant_name, '') IN ('', '向往之处')
+         AND is_deleted = 0`
     );
     assert.ok(archive);
     assert.match(archive.issue_info, /阶段性大规模补货和通货补必须分开判断/);
@@ -105,7 +109,7 @@ test("refines the Gazijie archive without inventing a dated 400-yuan price recor
       `SELECT COUNT(*) AS total
        FROM price_records
        WHERE category = '泡泡玛特'
-         AND object_name = '嘎子姐'
+         AND object_name IN ('嘎子姐', 'Zsiga')
          AND price > 400
          AND price < 500`
     );
@@ -146,14 +150,16 @@ test("records Gazijie 520-area temporary stabilize without calling it a new floo
     const db = await manager.getDb();
     await db.run("INSERT OR IGNORE INTO categories (name) VALUES (?)", ["泡泡玛特"]);
     const category = await db.get("SELECT id FROM categories WHERE name = ?", ["泡泡玛特"]);
-    await db.run("INSERT OR IGNORE INTO objects (category_id, name) VALUES (?, ?)", [category.id, "嘎子姐"]);
     const object = await db.get(
-      "SELECT id FROM objects WHERE category_id = ? AND name = ?",
-      [category.id, "嘎子姐"]
+      "SELECT id FROM objects WHERE category_id = ? AND name = ? AND COALESCE(is_archived, 0) = 0",
+      [category.id, "Zsiga"]
     );
+    assert.ok(object);
     const existingArchive = await db.get(
       `SELECT id FROM product_archives
-       WHERE category_name = '泡泡玛特' AND object_name = '嘎子姐' AND is_deleted = 0
+       WHERE category_name = '泡泡玛特' AND object_name = 'Zsiga'
+         AND COALESCE(variant_name, '') IN ('', '向往之处')
+         AND is_deleted = 0
        ORDER BY id LIMIT 1`
     );
     if (!existingArchive) {
@@ -162,7 +168,7 @@ test("records Gazijie 520-area temporary stabilize without calling it a new floo
           (category_id, category_name, object_id, object_name, archive_name,
            position_level, one_sentence_judgment, issue_info, risk_basis,
            experience_note, pending_questions, confidence, status)
-         VALUES (?, '泡泡玛特', ?, '嘎子姐', '嘎子姐', 'main', ?, ?, ?, ?, ?,
+         VALUES (?, '泡泡玛特', ?, 'Zsiga', 'Zsiga / 向往之处', 'main', ?, ?, ?, ?, ?,
                  'confirmed', 'active')`,
         [
           category.id,
@@ -188,7 +194,9 @@ test("records Gazijie 520-area temporary stabilize without calling it a new floo
     const archive = await db.get(
       `SELECT id, experience_note, pending_questions
        FROM product_archives
-       WHERE category_name = '泡泡玛特' AND object_name = '嘎子姐' AND is_deleted = 0`
+       WHERE category_name = '泡泡玛特' AND object_name = 'Zsiga'
+         AND COALESCE(variant_name, '') IN ('', '向往之处')
+         AND is_deleted = 0`
     );
     assert.ok(archive);
     assert.match(archive.experience_note, /2026-09-12：520附近暂时稳定/);

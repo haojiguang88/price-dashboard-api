@@ -21,14 +21,16 @@ test("starts Gazijie core position as layered entry and forbids filling all at o
     const db = await manager.getDb();
     await db.run("INSERT OR IGNORE INTO categories (name) VALUES (?)", ["泡泡玛特"]);
     const category = await db.get("SELECT id FROM categories WHERE name = ?", ["泡泡玛特"]);
-    await db.run("INSERT OR IGNORE INTO objects (category_id, name) VALUES (?, ?)", [category.id, "嘎子姐"]);
     const object = await db.get(
-      "SELECT id FROM objects WHERE category_id = ? AND name = ?",
-      [category.id, "嘎子姐"]
+      "SELECT id FROM objects WHERE category_id = ? AND name = ? AND COALESCE(is_archived, 0) = 0",
+      [category.id, "Zsiga"]
     );
+    assert.ok(object);
     const existingArchive = await db.get(
       `SELECT id FROM product_archives
-       WHERE category_name = '泡泡玛特' AND object_name = '嘎子姐' AND is_deleted = 0
+       WHERE category_name = '泡泡玛特' AND object_name = 'Zsiga'
+         AND COALESCE(variant_name, '') IN ('', '向往之处')
+         AND is_deleted = 0
        ORDER BY id LIMIT 1`
     );
     if (!existingArchive) {
@@ -37,7 +39,7 @@ test("starts Gazijie core position as layered entry and forbids filling all at o
           (category_id, category_name, object_id, object_name, archive_name,
            position_level, one_sentence_judgment, issue_info, risk_basis,
            experience_note, pending_questions, confidence, status)
-         VALUES (?, '泡泡玛特', ?, '嘎子姐', '嘎子姐', 'main', ?, ?, ?, ?, ?,
+         VALUES (?, '泡泡玛特', ?, 'Zsiga', 'Zsiga / 向往之处', 'main', ?, ?, ?, ?, ?,
                  'confirmed', 'active')`,
         [
           category.id,
@@ -57,10 +59,11 @@ test("starts Gazijie core position as layered entry and forbids filling all at o
     );
 
     await db.run(
-      "DELETE FROM migrations WHERE id IN (?, ?)",
+      "DELETE FROM migrations WHERE id IN (?, ?, ?)",
       [
         "20260912_003_start_gazijie_layered_core_position",
-        "20260912_004_keep_gazijie_core_position_in_plans_only"
+        "20260912_004_keep_gazijie_core_position_in_plans_only",
+        "20260926_004_regroup_zsiga_series"
       ]
     );
     await runMigrations(filename);
@@ -68,7 +71,9 @@ test("starts Gazijie core position as layered entry and forbids filling all at o
     const archive = await db.get(
       `SELECT one_sentence_judgment, experience_note, pending_questions
        FROM product_archives
-       WHERE category_name = '泡泡玛特' AND object_name = '嘎子姐' AND is_deleted = 0`
+       WHERE category_name = '泡泡玛特' AND object_name = 'Zsiga'
+         AND COALESCE(variant_name, '') IN ('', '向往之处')
+         AND is_deleted = 0`
     );
     assert.ok(archive);
     assert.equal(archive.one_sentence_judgment, "等补货把价格砸下来就干");
@@ -78,7 +83,7 @@ test("starts Gazijie core position as layered entry and forbids filling all at o
     const annualItem = await db.get(
       `SELECT current_role, current_action, current_status, position_rule, thesis
        FROM annual_plan_items
-       WHERE category = '泡泡玛特' AND object_name = '嘎子姐' AND COALESCE(is_deleted, 0) = 0`
+       WHERE category = '泡泡玛特' AND object_name = 'Zsiga' AND COALESCE(is_deleted, 0) = 0`
     );
     assert.ok(annualItem);
     assert.equal(annualItem.current_role, "试错");
@@ -90,7 +95,7 @@ test("starts Gazijie core position as layered entry and forbids filling all at o
     const buyPlan = await db.get(
       `SELECT plan_name, status, plan_quantity, batches, note
        FROM buying_plans
-       WHERE plan_name = '嘎子姐底仓分层占位' AND object_name = '嘎子姐'`
+       WHERE plan_name = '嘎子姐底仓分层占位' AND object_name = 'Zsiga'`
     );
     assert.ok(buyPlan);
     assert.equal(buyPlan.status, "pending");
@@ -105,10 +110,11 @@ test("starts Gazijie core position as layered entry and forbids filling all at o
     assert.match(batches[1].note, /第一层没观察完不加/);
 
     await db.run(
-      "DELETE FROM migrations WHERE id IN (?, ?)",
+      "DELETE FROM migrations WHERE id IN (?, ?, ?)",
       [
         "20260912_003_start_gazijie_layered_core_position",
-        "20260912_004_keep_gazijie_core_position_in_plans_only"
+        "20260912_004_keep_gazijie_core_position_in_plans_only",
+        "20260926_004_regroup_zsiga_series"
       ]
     );
     await runMigrations(filename);
@@ -116,7 +122,7 @@ test("starts Gazijie core position as layered entry and forbids filling all at o
       `SELECT
          (SELECT COUNT(*) FROM buying_plans WHERE plan_name = '嘎子姐底仓分层占位') AS plan_total,
          (SELECT COUNT(*) FROM annual_plan_items
-          WHERE object_name = '嘎子姐' AND COALESCE(is_deleted, 0) = 0) AS item_total`
+          WHERE object_name = 'Zsiga' AND COALESCE(is_deleted, 0) = 0) AS item_total`
     );
     assert.equal(Number(duplicateCheck.plan_total), 1);
     assert.equal(Number(duplicateCheck.item_total), 1);

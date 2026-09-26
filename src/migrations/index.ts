@@ -8430,9 +8430,12 @@ const migrations: Migration[] = [
         `SELECT id, issue_info, risk_basis, experience_note, pending_questions
          FROM product_archives
          WHERE category_name = '泡泡玛特'
-           AND object_name = '嘎子姐'
+           AND (
+             object_name = '嘎子姐'
+             OR (object_name = 'Zsiga' AND COALESCE(variant_name, '') IN ('', '向往之处', '嘎子姐'))
+           )
            AND COALESCE(is_deleted, 0) = 0
-         ORDER BY id
+         ORDER BY CASE WHEN object_name = 'Zsiga' THEN 0 ELSE 1 END, id
          LIMIT 1`
       );
       if (!archive) return;
@@ -9165,9 +9168,12 @@ ${marker}：大网红本人亲自上阵、加价卖货。币圈一批大佬反�
         `SELECT id, experience_note, pending_questions
          FROM product_archives
          WHERE category_name = '泡泡玛特'
-           AND object_name = '嘎子姐'
+           AND (
+             object_name = '嘎子姐'
+             OR (object_name = 'Zsiga' AND COALESCE(variant_name, '') IN ('', '向往之处', '嘎子姐'))
+           )
            AND COALESCE(is_deleted, 0) = 0
-         ORDER BY id
+         ORDER BY CASE WHEN object_name = 'Zsiga' THEN 0 ELSE 1 END, id
          LIMIT 1`
       );
       if (!archive) return;
@@ -9309,8 +9315,8 @@ ${marker}：大网红本人亲自上阵、加价卖货。币圈一批大佬反�
              WHERE plan_id = ?
                AND COALESCE(is_deleted, 0) = 0
                AND category = '泡泡玛特'
-               AND object_name = '嘎子姐'
-             ORDER BY id LIMIT 1`,
+               AND object_name IN ('嘎子姐', 'Zsiga')
+             ORDER BY CASE WHEN object_name = 'Zsiga' THEN 0 ELSE 1 END, id LIMIT 1`,
             [plan.id]
           );
           if (existingItem) {
@@ -9339,7 +9345,7 @@ ${marker}：大网红本人亲自上阵、加价卖货。币圈一批大佬反�
             const inserted = await dbGet<{ id: number }>(
               db,
               `SELECT id FROM annual_plan_items
-               WHERE plan_id = ? AND category = '泡泡玛特' AND object_name = '嘎子姐'
+               WHERE plan_id = ? AND category = '泡泡玛特' AND object_name IN ('嘎子姐', 'Zsiga')
                  AND COALESCE(is_deleted, 0) = 0
                ORDER BY id DESC LIMIT 1`,
               [plan.id]
@@ -9372,8 +9378,8 @@ ${marker}：大网红本人亲自上阵、加价卖货。币圈一批大佬反�
         const existingPlan = await dbGet<{ id: number }>(
           db,
           `SELECT id FROM buying_plans
-           WHERE plan_name = ? AND object_name = '嘎子姐'
-           ORDER BY id LIMIT 1`,
+           WHERE plan_name = ? AND object_name IN ('嘎子姐', 'Zsiga')
+           ORDER BY CASE WHEN object_name = 'Zsiga' THEN 0 ELSE 1 END, id LIMIT 1`,
           [planName]
         );
         if (!existingPlan) {
@@ -9456,9 +9462,12 @@ ${marker}：大网红本人亲自上阵、加价卖货。币圈一批大佬反�
         `SELECT id, one_sentence_judgment, experience_note, pending_questions
          FROM product_archives
          WHERE category_name = '泡泡玛特'
-           AND object_name = '嘎子姐'
+           AND (
+             object_name = '嘎子姐'
+             OR (object_name = 'Zsiga' AND COALESCE(variant_name, '') IN ('', '向往之处', '嘎子姐'))
+           )
            AND COALESCE(is_deleted, 0) = 0
-         ORDER BY id LIMIT 1`
+         ORDER BY CASE WHEN object_name = 'Zsiga' THEN 0 ELSE 1 END, id LIMIT 1`
       );
       if (!archive) return;
 
@@ -11131,6 +11140,961 @@ ${marker}：大网红本人亲自上阵、加价卖货。币圈一批大佬反�
         query: '唐老鸭的歌唱',
         note: '千岛迪士尼联名系列搪胶毛绒挂件 / DIMOO；不要误接同名手办款和周边。'
       });
+    }
+  },
+  {
+    id: '20260926_003_regroup_mokoko_series',
+    name: 'Regroup MOKOKO SKUs under object MOKOKO系列 as variants',
+    run: async (db: any) => {
+      if (!(await migrationTableExists(db, 'categories'))) return;
+      if (!(await migrationTableExists(db, 'objects'))) return;
+      if (!(await migrationTableExists(db, 'variants'))) return;
+
+      const categoryName = '泡泡玛特';
+      const seriesName = 'MOKOKO系列';
+      const items = [
+        { oldObjectName: '大春花', variantName: '大春花', spuId: '704852597684613737', query: 'MOKOKO 春花', externalName: 'MOKOKO 春花' },
+        { oldObjectName: '大甜心', variantName: '大甜心', spuId: '675597453717760702', query: '大甜心', externalName: '大甜心' },
+        { oldObjectName: '小甜心', variantName: '小甜心', spuId: '672953785382971923', query: '小甜心', externalName: '小甜心' },
+        { oldObjectName: '毛球', variantName: '毛球', spuId: '915985249635145047', query: '毛球', externalName: '毛球' },
+        { oldObjectName: '白裙子', variantName: '白裙子', spuId: '704906800172085180', query: 'FALL INTO SPRING', externalName: 'FALL INTO SPRING' },
+        { oldObjectName: '闪闪', variantName: '闪闪', spuId: '801090280999627960', query: '闪闪', externalName: '闪闪' },
+        { oldObjectName: '醒醒', variantName: '醒醒', spuId: '970617028555622512', query: '醒醒', externalName: '醒醒' },
+        { oldObjectName: '晒晒', variantName: '晒晒', spuId: '897177903526088129', query: '晒晒', externalName: '晒晒' },
+        { oldObjectName: '万圣节', variantName: '万圣节', spuId: '789523968431240995', query: 'Magic of Pumpkin', externalName: 'Magic of Pumpkin' }
+      ];
+
+      const category = await dbGet<{ id: number; name: string }>(
+        db,
+        'SELECT id, name FROM categories WHERE name = ?',
+        [categoryName]
+      );
+      if (!category) return;
+
+      await dbRun(
+        db,
+        'UPDATE categories SET is_archived = 0, archived_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+        [category.id]
+      );
+
+      await dbRun(
+        db,
+        'INSERT OR IGNORE INTO objects (category_id, name, created_at, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)',
+        [category.id, seriesName]
+      );
+      const series = await dbGet<{ id: number; name: string }>(
+        db,
+        'SELECT id, name FROM objects WHERE category_id = ? AND name = ?',
+        [category.id, seriesName]
+      );
+      if (!series) throw new Error('Failed to ensure object MOKOKO系列');
+      await dbRun(
+        db,
+        'UPDATE objects SET is_archived = 0, archived_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+        [series.id]
+      );
+
+      const tableHasColumn = async (tableName: string, columnName: string) => {
+        if (!(await migrationTableExists(db, tableName))) return false;
+        const columns = await dbAll<{ name: string }>(
+          db,
+          `PRAGMA table_info(${quoteMigrationIdentifier(tableName)})`
+        );
+        return columns.some((column) => column.name === columnName);
+      };
+
+      const retargetNamedRows = async (
+        tableName: string,
+        objectColumn: string,
+        variantColumn: string | null,
+        oldObjectName: string,
+        variantName: string,
+        categoryColumn?: string
+      ) => {
+        if (!(await tableHasColumn(tableName, objectColumn))) return;
+        const quotedTable = quoteMigrationIdentifier(tableName);
+        const quotedObject = quoteMigrationIdentifier(objectColumn);
+        const hasUpdatedAt = await tableHasColumn(tableName, 'updated_at');
+        const setUpdatedAt = hasUpdatedAt ? ', updated_at = CURRENT_TIMESTAMP' : '';
+        const categoryFilter = categoryColumn && (await tableHasColumn(tableName, categoryColumn))
+          ? ` AND ${quoteMigrationIdentifier(categoryColumn)} = ?`
+          : '';
+        const categoryParams = categoryFilter ? [categoryName] : [];
+
+        if (variantColumn && (await tableHasColumn(tableName, variantColumn))) {
+          const quotedVariant = quoteMigrationIdentifier(variantColumn);
+          await dbRun(
+            db,
+            `UPDATE ${quotedTable}
+             SET ${quotedObject} = ?, ${quotedVariant} = ?${setUpdatedAt}
+             WHERE ${quotedObject} = ?
+               AND COALESCE(${quotedVariant}, '') IN ('', ?)
+               ${categoryFilter}`,
+            [seriesName, variantName, oldObjectName, variantName, ...categoryParams]
+          );
+          return;
+        }
+
+        await dbRun(
+          db,
+          `UPDATE ${quotedTable}
+           SET ${quotedObject} = ?${setUpdatedAt}
+           WHERE ${quotedObject} = ?${categoryFilter}`,
+          [seriesName, oldObjectName, ...categoryParams]
+        );
+      };
+
+      const retargetByObjectId = async (
+        tableName: string,
+        oldObjectId: number,
+        variantId: number,
+        variantName: string
+      ) => {
+        if (!(await tableHasColumn(tableName, 'object_id'))) return;
+        const quotedTable = quoteMigrationIdentifier(tableName);
+        const hasUpdatedAt = await tableHasColumn(tableName, 'updated_at');
+        const setUpdatedAt = hasUpdatedAt ? ', updated_at = CURRENT_TIMESTAMP' : '';
+        const sets = ['object_id = ?'];
+        const params: Array<number | string> = [series.id];
+        if (await tableHasColumn(tableName, 'variant_id')) {
+          sets.push('variant_id = ?');
+          params.push(variantId);
+        }
+        if (await tableHasColumn(tableName, 'object_name')) {
+          sets.push('object_name = ?');
+          params.push(seriesName);
+        }
+        if (await tableHasColumn(tableName, 'variant_name')) {
+          sets.push('variant_name = ?');
+          params.push(variantName);
+        }
+        if (await tableHasColumn(tableName, 'category_id')) {
+          sets.push('category_id = ?');
+          params.push(category.id);
+        }
+        params.push(oldObjectId);
+        await dbRun(
+          db,
+          `UPDATE ${quotedTable}
+           SET ${sets.join(', ')}${setUpdatedAt}
+           WHERE object_id = ?`,
+          params
+        );
+      };
+
+      for (const item of items) {
+        await dbRun(
+          db,
+          'INSERT OR IGNORE INTO variants (object_id, name, created_at, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)',
+          [series.id, item.variantName]
+        );
+        const variant = await dbGet<{ id: number; name: string }>(
+          db,
+          'SELECT id, name FROM variants WHERE object_id = ? AND name = ?',
+          [series.id, item.variantName]
+        );
+        if (!variant) throw new Error(`Failed to ensure variant ${item.variantName}`);
+        await dbRun(
+          db,
+          'UPDATE variants SET is_archived = 0, archived_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+          [variant.id]
+        );
+
+        const oldObject = await dbGet<{ id: number; name: string }>(
+          db,
+          'SELECT id, name FROM objects WHERE category_id = ? AND name = ?',
+          [category.id, item.oldObjectName]
+        );
+
+        if (oldObject && oldObject.id !== series.id) {
+          const oldVariants = await dbAll<{ id: number; name: string }>(
+            db,
+            'SELECT id, name FROM variants WHERE object_id = ? AND COALESCE(is_archived, 0) = 0',
+            [oldObject.id]
+          );
+          for (const oldVariant of oldVariants) {
+            if (oldVariant.name === item.variantName) {
+              await dbRun(
+                db,
+                `UPDATE variants
+                 SET is_archived = 1,
+                     archived_at = COALESCE(archived_at, CURRENT_TIMESTAMP),
+                     updated_at = CURRENT_TIMESTAMP
+                 WHERE id = ?`,
+                [oldVariant.id]
+              );
+              continue;
+            }
+            const clash = await dbGet<{ id: number }>(
+              db,
+              'SELECT id FROM variants WHERE object_id = ? AND name = ? AND COALESCE(is_archived, 0) = 0',
+              [series.id, oldVariant.name]
+            );
+            if (clash) {
+              await dbRun(
+                db,
+                `UPDATE variants
+                 SET is_archived = 1,
+                     archived_at = COALESCE(archived_at, CURRENT_TIMESTAMP),
+                     updated_at = CURRENT_TIMESTAMP
+                 WHERE id = ?`,
+                [oldVariant.id]
+              );
+              continue;
+            }
+            await dbRun(
+              db,
+              'UPDATE variants SET object_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+              [series.id, oldVariant.id]
+            );
+          }
+
+          await retargetByObjectId('source_mappings', oldObject.id, variant.id, item.variantName);
+          await retargetByObjectId('original_price_records', oldObject.id, variant.id, item.variantName);
+          await retargetByObjectId('product_archives', oldObject.id, variant.id, item.variantName);
+          await retargetByObjectId('follows', oldObject.id, variant.id, item.variantName);
+          await retargetByObjectId('watchlist_items', oldObject.id, variant.id, item.variantName);
+
+          await dbRun(
+            db,
+            `UPDATE objects
+             SET is_archived = 1,
+                 archived_at = COALESCE(archived_at, CURRENT_TIMESTAMP),
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?`,
+            [oldObject.id]
+          );
+        }
+
+        await retargetNamedRows('price_records', 'object_name', 'variant', item.oldObjectName, item.variantName, 'category');
+        await retargetNamedRows('buying_plans', 'object_name', 'variant_name', item.oldObjectName, item.variantName, 'category_name');
+        await retargetNamedRows('selling_plans', 'object_name', 'variant_name', item.oldObjectName, item.variantName, 'category_name');
+        await retargetNamedRows('positions', 'object_name', 'variant_name', item.oldObjectName, item.variantName, 'category_name');
+        await retargetNamedRows('ended_positions', 'object_name', 'variant_name', item.oldObjectName, item.variantName, 'category_name');
+        await retargetNamedRows('sell_records', 'object_name', 'variant_name', item.oldObjectName, item.variantName, 'category_name');
+        await retargetNamedRows('follows', 'object_name', 'variant_name', item.oldObjectName, item.variantName, 'category_name');
+        await retargetNamedRows('original_price_records', 'object_name', 'variant_name', item.oldObjectName, item.variantName, 'category_name');
+        await retargetNamedRows('annual_plan_items', 'object_name', null, item.oldObjectName, item.variantName, 'category');
+        await retargetNamedRows('abnormal_monitor_reads', 'object_name', 'variant_name', item.oldObjectName, item.variantName, 'category_name');
+        await retargetNamedRows('risk_reviews', 'object_name', 'variant_name', item.oldObjectName, item.variantName, 'category_name');
+        await retargetNamedRows('risk_check_records', 'object_name', 'variant_name', item.oldObjectName, item.variantName, 'category_name');
+        await retargetNamedRows('speculation_cycle_records', 'object_name', 'variant_name', item.oldObjectName, item.variantName, 'category_name');
+        await retargetNamedRows('category_profiles', 'object_name', 'variant_name', item.oldObjectName, item.variantName, 'category_name');
+        await retargetNamedRows('product_archives', 'object_name', 'variant_name', item.oldObjectName, item.variantName, 'category_name');
+        await retargetNamedRows('market_book_snapshots', 'object_name', 'variant', item.oldObjectName, item.variantName, 'category');
+        await retargetNamedRows('market_trades', 'object_name', 'variant', item.oldObjectName, item.variantName, 'category');
+        await retargetNamedRows('source_mappings', 'object_name', 'variant_name', item.oldObjectName, item.variantName, 'category_name');
+
+        if (await migrationTableExists(db, 'source_mappings')) {
+          const externalMeta = JSON.stringify({ query: item.query, spu_id: item.spuId });
+          await dbRun(
+            db,
+            `INSERT OR IGNORE INTO source_mappings
+               (source_key, source_name, external_key, external_name, external_meta_json,
+                category_id, object_id, variant_id, category_name, object_name, variant_name,
+                status, note)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              'qiandao_popmart',
+              '千岛泡泡玛特',
+              item.spuId,
+              item.externalName,
+              externalMeta,
+              category.id,
+              series.id,
+              variant.id,
+              category.name,
+              series.name,
+              variant.name,
+              'enabled',
+              '已归入 MOKOKO系列 变体；按单款 SPU 抓价，不把大小甜心合成一条。'
+            ]
+          );
+          await dbRun(
+            db,
+            `UPDATE source_mappings
+             SET source_name = ?,
+                 external_name = ?,
+                 external_meta_json = ?,
+                 category_id = ?,
+                 object_id = ?,
+                 variant_id = ?,
+                 category_name = ?,
+                 object_name = ?,
+                 variant_name = ?,
+                 status = CASE WHEN status = 'disabled' THEN status ELSE 'enabled' END,
+                 note = CASE WHEN status = 'disabled' THEN note ELSE ? END,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE source_key = ? AND external_key = ?`,
+            [
+              '千岛泡泡玛特',
+              item.externalName,
+              externalMeta,
+              category.id,
+              series.id,
+              variant.id,
+              category.name,
+              series.name,
+              variant.name,
+              '已归入 MOKOKO系列 变体；按单款 SPU 抓价，不把大小甜心合成一条。',
+              'qiandao_popmart',
+              item.spuId
+            ]
+          );
+        }
+      }
+    }
+  },
+  {
+    id: '20260926_004_regroup_zsiga_series',
+    name: 'Regroup Zsiga SKUs, rename 嘎子姐 to 向往之处, and enable 遇见的惊喜 scrape',
+    run: async (db: any) => {
+      if (!(await migrationTableExists(db, 'categories'))) return;
+      if (!(await migrationTableExists(db, 'objects'))) return;
+      if (!(await migrationTableExists(db, 'variants'))) return;
+
+      const categoryName = '泡泡玛特';
+      const seriesName = 'Zsiga';
+      const items = [
+        {
+          oldObjectNames: ['嘎子姐', '向往之处'],
+          variantName: '向往之处',
+          spuId: '875239228831738922',
+          query: '向往之处',
+          externalName: '向往之处',
+          note: '千岛 Zsiga 向往之处1/8可动人偶；对象由嘎子姐改名并归入 Zsiga。'
+        },
+        {
+          oldObjectNames: ['姜饼人'],
+          variantName: '姜饼人',
+          spuId: '927988138113005044',
+          query: '姜饼人1/8',
+          externalName: '姜饼人1/8',
+          note: '千岛 Zsiga 姜饼人1/8可动人偶。'
+        },
+        {
+          oldObjectNames: ['遇见的惊喜'],
+          variantName: '遇见的惊喜',
+          spuId: '1046003922327624571',
+          query: '遇见的惊喜1/8',
+          externalName: '遇见的惊喜1/8可动人偶',
+          note: '新品正式采集：千岛 Zsiga 遇见的惊喜1/8可动人偶。不要误接人生秀场系列迷你包、冰箱贴、胸针、斜挎包。'
+        }
+      ];
+
+      const category = await dbGet<{ id: number; name: string }>(
+        db,
+        'SELECT id, name FROM categories WHERE name = ?',
+        [categoryName]
+      );
+      if (!category) return;
+
+      await dbRun(
+        db,
+        'UPDATE categories SET is_archived = 0, archived_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+        [category.id]
+      );
+      await dbRun(
+        db,
+        'INSERT OR IGNORE INTO objects (category_id, name, created_at, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)',
+        [category.id, seriesName]
+      );
+      const series = await dbGet<{ id: number; name: string }>(
+        db,
+        'SELECT id, name FROM objects WHERE category_id = ? AND name = ?',
+        [category.id, seriesName]
+      );
+      if (!series) throw new Error('Failed to ensure object Zsiga');
+      await dbRun(
+        db,
+        'UPDATE objects SET is_archived = 0, archived_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+        [series.id]
+      );
+
+      const tableHasColumn = async (tableName: string, columnName: string) => {
+        if (!(await migrationTableExists(db, tableName))) return false;
+        const columns = await dbAll<{ name: string }>(
+          db,
+          `PRAGMA table_info(${quoteMigrationIdentifier(tableName)})`
+        );
+        return columns.some((column) => column.name === columnName);
+      };
+
+      const retargetNamedRows = async (
+        tableName: string,
+        objectColumn: string,
+        variantColumn: string | null,
+        oldObjectName: string,
+        variantName: string,
+        categoryColumn?: string
+      ) => {
+        if (!(await tableHasColumn(tableName, objectColumn))) return;
+        const quotedTable = quoteMigrationIdentifier(tableName);
+        const quotedObject = quoteMigrationIdentifier(objectColumn);
+        const hasUpdatedAt = await tableHasColumn(tableName, 'updated_at');
+        const setUpdatedAt = hasUpdatedAt ? ', updated_at = CURRENT_TIMESTAMP' : '';
+        const categoryFilter = categoryColumn && (await tableHasColumn(tableName, categoryColumn))
+          ? ` AND ${quoteMigrationIdentifier(categoryColumn)} = ?`
+          : '';
+        const categoryParams = categoryFilter ? [categoryName] : [];
+
+        if (variantColumn && (await tableHasColumn(tableName, variantColumn))) {
+          const quotedVariant = quoteMigrationIdentifier(variantColumn);
+          await dbRun(
+            db,
+            `UPDATE ${quotedTable}
+             SET ${quotedObject} = ?, ${quotedVariant} = ?${setUpdatedAt}
+             WHERE ${quotedObject} = ?
+               AND COALESCE(${quotedVariant}, '') IN ('', ?)
+               ${categoryFilter}`,
+            [seriesName, variantName, oldObjectName, variantName, ...categoryParams]
+          );
+          return;
+        }
+
+        await dbRun(
+          db,
+          `UPDATE ${quotedTable}
+           SET ${quotedObject} = ?${setUpdatedAt}
+           WHERE ${quotedObject} = ?${categoryFilter}`,
+          [seriesName, oldObjectName, ...categoryParams]
+        );
+      };
+
+      const retargetByObjectId = async (
+        tableName: string,
+        oldObjectId: number,
+        variantId: number,
+        variantName: string
+      ) => {
+        if (!(await tableHasColumn(tableName, 'object_id'))) return;
+        const quotedTable = quoteMigrationIdentifier(tableName);
+        const hasUpdatedAt = await tableHasColumn(tableName, 'updated_at');
+        const setUpdatedAt = hasUpdatedAt ? ', updated_at = CURRENT_TIMESTAMP' : '';
+        const sets = ['object_id = ?'];
+        const params: Array<number | string> = [series.id];
+        if (await tableHasColumn(tableName, 'variant_id')) {
+          sets.push('variant_id = ?');
+          params.push(variantId);
+        }
+        if (await tableHasColumn(tableName, 'object_name')) {
+          sets.push('object_name = ?');
+          params.push(seriesName);
+        }
+        if (await tableHasColumn(tableName, 'variant_name')) {
+          sets.push('variant_name = ?');
+          params.push(variantName);
+        }
+        if (await tableHasColumn(tableName, 'category_id')) {
+          sets.push('category_id = ?');
+          params.push(category.id);
+        }
+        params.push(oldObjectId);
+        await dbRun(
+          db,
+          `UPDATE ${quotedTable}
+           SET ${sets.join(', ')}${setUpdatedAt}
+           WHERE object_id = ?`,
+          params
+        );
+      };
+
+      const namedTables: Array<{
+        table: string;
+        objectColumn: string;
+        variantColumn: string | null;
+        categoryColumn?: string;
+      }> = [
+        { table: 'price_records', objectColumn: 'object_name', variantColumn: 'variant', categoryColumn: 'category' },
+        { table: 'buying_plans', objectColumn: 'object_name', variantColumn: 'variant_name', categoryColumn: 'category_name' },
+        { table: 'selling_plans', objectColumn: 'object_name', variantColumn: 'variant_name', categoryColumn: 'category_name' },
+        { table: 'positions', objectColumn: 'object_name', variantColumn: 'variant_name', categoryColumn: 'category_name' },
+        { table: 'ended_positions', objectColumn: 'object_name', variantColumn: 'variant_name', categoryColumn: 'category_name' },
+        { table: 'sell_records', objectColumn: 'object_name', variantColumn: 'variant_name', categoryColumn: 'category_name' },
+        { table: 'follows', objectColumn: 'object_name', variantColumn: 'variant_name', categoryColumn: 'category_name' },
+        { table: 'original_price_records', objectColumn: 'object_name', variantColumn: 'variant_name', categoryColumn: 'category_name' },
+        { table: 'annual_plan_items', objectColumn: 'object_name', variantColumn: null, categoryColumn: 'category' },
+        { table: 'abnormal_monitor_reads', objectColumn: 'object_name', variantColumn: 'variant_name', categoryColumn: 'category_name' },
+        { table: 'risk_reviews', objectColumn: 'object_name', variantColumn: 'variant_name', categoryColumn: 'category_name' },
+        { table: 'risk_check_records', objectColumn: 'object_name', variantColumn: 'variant_name', categoryColumn: 'category_name' },
+        { table: 'speculation_cycle_records', objectColumn: 'object_name', variantColumn: 'variant_name', categoryColumn: 'category_name' },
+        { table: 'category_profiles', objectColumn: 'object_name', variantColumn: 'variant_name', categoryColumn: 'category_name' },
+        { table: 'product_archives', objectColumn: 'object_name', variantColumn: 'variant_name', categoryColumn: 'category_name' },
+        { table: 'market_book_snapshots', objectColumn: 'object_name', variantColumn: 'variant', categoryColumn: 'category' },
+        { table: 'market_trades', objectColumn: 'object_name', variantColumn: 'variant', categoryColumn: 'category' },
+        { table: 'source_mappings', objectColumn: 'object_name', variantColumn: 'variant_name', categoryColumn: 'category_name' }
+      ];
+
+      for (const item of items) {
+        await dbRun(
+          db,
+          'INSERT OR IGNORE INTO variants (object_id, name, created_at, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)',
+          [series.id, item.variantName]
+        );
+        const variant = await dbGet<{ id: number; name: string }>(
+          db,
+          'SELECT id, name FROM variants WHERE object_id = ? AND name = ?',
+          [series.id, item.variantName]
+        );
+        if (!variant) throw new Error(`Failed to ensure variant ${item.variantName}`);
+        await dbRun(
+          db,
+          'UPDATE variants SET is_archived = 0, archived_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+          [variant.id]
+        );
+
+        for (const oldObjectName of item.oldObjectNames) {
+          const oldObject = await dbGet<{ id: number; name: string }>(
+            db,
+            'SELECT id, name FROM objects WHERE category_id = ? AND name = ?',
+            [category.id, oldObjectName]
+          );
+          if (oldObject && oldObject.id !== series.id) {
+            const oldVariants = await dbAll<{ id: number; name: string }>(
+              db,
+              'SELECT id, name FROM variants WHERE object_id = ? AND COALESCE(is_archived, 0) = 0',
+              [oldObject.id]
+            );
+            for (const oldVariant of oldVariants) {
+              if (oldVariant.name === item.variantName) {
+                await dbRun(
+                  db,
+                  `UPDATE variants
+                   SET is_archived = 1,
+                       archived_at = COALESCE(archived_at, CURRENT_TIMESTAMP),
+                       updated_at = CURRENT_TIMESTAMP
+                   WHERE id = ?`,
+                  [oldVariant.id]
+                );
+                continue;
+              }
+              const clash = await dbGet<{ id: number }>(
+                db,
+                'SELECT id FROM variants WHERE object_id = ? AND name = ? AND COALESCE(is_archived, 0) = 0',
+                [series.id, oldVariant.name]
+              );
+              if (clash) {
+                await dbRun(
+                  db,
+                  `UPDATE variants
+                   SET is_archived = 1,
+                       archived_at = COALESCE(archived_at, CURRENT_TIMESTAMP),
+                       updated_at = CURRENT_TIMESTAMP
+                   WHERE id = ?`,
+                  [oldVariant.id]
+                );
+                continue;
+              }
+              await dbRun(
+                db,
+                'UPDATE variants SET object_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+                [series.id, oldVariant.id]
+              );
+            }
+
+            await retargetByObjectId('source_mappings', oldObject.id, variant.id, item.variantName);
+            await retargetByObjectId('original_price_records', oldObject.id, variant.id, item.variantName);
+            await retargetByObjectId('product_archives', oldObject.id, variant.id, item.variantName);
+            await retargetByObjectId('follows', oldObject.id, variant.id, item.variantName);
+            await retargetByObjectId('watchlist_items', oldObject.id, variant.id, item.variantName);
+
+            await dbRun(
+              db,
+              `UPDATE objects
+               SET is_archived = 1,
+                   archived_at = COALESCE(archived_at, CURRENT_TIMESTAMP),
+                   updated_at = CURRENT_TIMESTAMP
+               WHERE id = ?`,
+              [oldObject.id]
+            );
+          }
+
+          for (const named of namedTables) {
+            await retargetNamedRows(
+              named.table,
+              named.objectColumn,
+              named.variantColumn,
+              oldObjectName,
+              item.variantName,
+              named.categoryColumn
+            );
+          }
+        }
+
+        if (item.variantName === '向往之处' && (await tableHasColumn('product_archives', 'archive_name'))) {
+          await dbRun(
+            db,
+            `UPDATE product_archives
+             SET archive_name = CASE
+                   WHEN archive_name = '嘎子姐' OR archive_name = '向往之处' THEN 'Zsiga / 向往之处'
+                   ELSE REPLACE(REPLACE(archive_name, '嘎子姐 /', 'Zsiga /'), '向往之处 /', 'Zsiga /')
+                 END,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE category_name = ?
+               AND object_name = ?
+               AND COALESCE(variant_name, '') = ?
+               AND COALESCE(is_deleted, 0) = 0`,
+            [categoryName, seriesName, item.variantName]
+          );
+        }
+
+        if (await migrationTableExists(db, 'source_mappings')) {
+          const externalMeta = JSON.stringify({ query: item.query, spu_id: item.spuId });
+          await dbRun(
+            db,
+            `INSERT OR IGNORE INTO source_mappings
+               (source_key, source_name, external_key, external_name, external_meta_json,
+                category_id, object_id, variant_id, category_name, object_name, variant_name,
+                status, note)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              'qiandao_popmart',
+              '千岛泡泡玛特',
+              item.spuId,
+              item.externalName,
+              externalMeta,
+              category.id,
+              series.id,
+              variant.id,
+              category.name,
+              series.name,
+              variant.name,
+              'enabled',
+              item.note
+            ]
+          );
+          await dbRun(
+            db,
+            `UPDATE source_mappings
+             SET source_name = ?,
+                 external_name = ?,
+                 external_meta_json = ?,
+                 category_id = ?,
+                 object_id = ?,
+                 variant_id = ?,
+                 category_name = ?,
+                 object_name = ?,
+                 variant_name = ?,
+                 status = CASE WHEN status = 'disabled' THEN status ELSE 'enabled' END,
+                 note = CASE WHEN status = 'disabled' THEN note ELSE ? END,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE source_key = ? AND external_key = ?`,
+            [
+              '千岛泡泡玛特',
+              item.externalName,
+              externalMeta,
+              category.id,
+              series.id,
+              variant.id,
+              category.name,
+              series.name,
+              variant.name,
+              item.note,
+              'qiandao_popmart',
+              item.spuId
+            ]
+          );
+        }
+      }
+    }
+  },
+  {
+    id: '20260926_005_regroup_lucky_bag_exclusive',
+    name: 'Regroup lucky-bag exclusive SKUs under object 福袋专属',
+    run: async (db: any) => {
+      if (!(await migrationTableExists(db, 'categories'))) return;
+      if (!(await migrationTableExists(db, 'objects'))) return;
+      if (!(await migrationTableExists(db, 'variants'))) return;
+
+      const categoryName = '泡泡玛特';
+      const seriesName = '福袋专属';
+      const items = [
+        { oldObjectName: '飞行员', variantName: '飞行员', spuId: '593651152747287737', query: 'JUMP FOR JOY', externalName: 'JUMP FOR JOY' },
+        { oldObjectName: '大米兰', variantName: '大米兰', spuId: '778075948925892646', query: '大米兰', externalName: '大米兰' },
+        { oldObjectName: '拿铁', variantName: '拿铁', spuId: '650794262396462371', query: '拿铁', externalName: '拿铁' },
+        { oldObjectName: '情人节', variantName: '情人节', spuId: '681855448701274650', query: 'Catch Me If You Like Me', externalName: 'Catch Me If You Like Me' },
+        { oldObjectName: '蓝裙子', variantName: '蓝裙子', spuId: '740254741795247881', query: 'The Blue Diamond', externalName: 'The Blue Diamond' }
+      ];
+
+      const category = await dbGet<{ id: number; name: string }>(
+        db,
+        'SELECT id, name FROM categories WHERE name = ?',
+        [categoryName]
+      );
+      if (!category) return;
+
+      await dbRun(
+        db,
+        'UPDATE categories SET is_archived = 0, archived_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+        [category.id]
+      );
+      await dbRun(
+        db,
+        'INSERT OR IGNORE INTO objects (category_id, name, created_at, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)',
+        [category.id, seriesName]
+      );
+      const series = await dbGet<{ id: number; name: string }>(
+        db,
+        'SELECT id, name FROM objects WHERE category_id = ? AND name = ?',
+        [category.id, seriesName]
+      );
+      if (!series) throw new Error('Failed to ensure object 福袋专属');
+      await dbRun(
+        db,
+        'UPDATE objects SET is_archived = 0, archived_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+        [series.id]
+      );
+
+      const tableHasColumn = async (tableName: string, columnName: string) => {
+        if (!(await migrationTableExists(db, tableName))) return false;
+        const columns = await dbAll<{ name: string }>(
+          db,
+          `PRAGMA table_info(${quoteMigrationIdentifier(tableName)})`
+        );
+        return columns.some((column) => column.name === columnName);
+      };
+
+      const retargetNamedRows = async (
+        tableName: string,
+        objectColumn: string,
+        variantColumn: string | null,
+        oldObjectName: string,
+        variantName: string,
+        categoryColumn?: string
+      ) => {
+        if (!(await tableHasColumn(tableName, objectColumn))) return;
+        const quotedTable = quoteMigrationIdentifier(tableName);
+        const quotedObject = quoteMigrationIdentifier(objectColumn);
+        const hasUpdatedAt = await tableHasColumn(tableName, 'updated_at');
+        const setUpdatedAt = hasUpdatedAt ? ', updated_at = CURRENT_TIMESTAMP' : '';
+        const categoryFilter = categoryColumn && (await tableHasColumn(tableName, categoryColumn))
+          ? ` AND ${quoteMigrationIdentifier(categoryColumn)} = ?`
+          : '';
+        const categoryParams = categoryFilter ? [categoryName] : [];
+
+        if (variantColumn && (await tableHasColumn(tableName, variantColumn))) {
+          const quotedVariant = quoteMigrationIdentifier(variantColumn);
+          await dbRun(
+            db,
+            `UPDATE ${quotedTable}
+             SET ${quotedObject} = ?, ${quotedVariant} = ?${setUpdatedAt}
+             WHERE ${quotedObject} = ?
+               AND COALESCE(${quotedVariant}, '') IN ('', ?)
+               ${categoryFilter}`,
+            [seriesName, variantName, oldObjectName, variantName, ...categoryParams]
+          );
+          return;
+        }
+
+        await dbRun(
+          db,
+          `UPDATE ${quotedTable}
+           SET ${quotedObject} = ?${setUpdatedAt}
+           WHERE ${quotedObject} = ?${categoryFilter}`,
+          [seriesName, oldObjectName, ...categoryParams]
+        );
+      };
+
+      const retargetByObjectId = async (
+        tableName: string,
+        oldObjectId: number,
+        variantId: number,
+        variantName: string
+      ) => {
+        if (!(await tableHasColumn(tableName, 'object_id'))) return;
+        const quotedTable = quoteMigrationIdentifier(tableName);
+        const hasUpdatedAt = await tableHasColumn(tableName, 'updated_at');
+        const setUpdatedAt = hasUpdatedAt ? ', updated_at = CURRENT_TIMESTAMP' : '';
+        const sets = ['object_id = ?'];
+        const params: Array<number | string> = [series.id];
+        if (await tableHasColumn(tableName, 'variant_id')) {
+          sets.push('variant_id = ?');
+          params.push(variantId);
+        }
+        if (await tableHasColumn(tableName, 'object_name')) {
+          sets.push('object_name = ?');
+          params.push(seriesName);
+        }
+        if (await tableHasColumn(tableName, 'variant_name')) {
+          sets.push('variant_name = ?');
+          params.push(variantName);
+        }
+        if (await tableHasColumn(tableName, 'category_id')) {
+          sets.push('category_id = ?');
+          params.push(category.id);
+        }
+        params.push(oldObjectId);
+        await dbRun(
+          db,
+          `UPDATE ${quotedTable}
+           SET ${sets.join(', ')}${setUpdatedAt}
+           WHERE object_id = ?`,
+          params
+        );
+      };
+
+      for (const item of items) {
+        await dbRun(
+          db,
+          'INSERT OR IGNORE INTO variants (object_id, name, created_at, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)',
+          [series.id, item.variantName]
+        );
+        const variant = await dbGet<{ id: number; name: string }>(
+          db,
+          'SELECT id, name FROM variants WHERE object_id = ? AND name = ?',
+          [series.id, item.variantName]
+        );
+        if (!variant) throw new Error(`Failed to ensure variant ${item.variantName}`);
+        await dbRun(
+          db,
+          'UPDATE variants SET is_archived = 0, archived_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+          [variant.id]
+        );
+
+        const oldObject = await dbGet<{ id: number; name: string }>(
+          db,
+          'SELECT id, name FROM objects WHERE category_id = ? AND name = ?',
+          [category.id, item.oldObjectName]
+        );
+
+        if (oldObject && oldObject.id !== series.id) {
+          const oldVariants = await dbAll<{ id: number; name: string }>(
+            db,
+            'SELECT id, name FROM variants WHERE object_id = ? AND COALESCE(is_archived, 0) = 0',
+            [oldObject.id]
+          );
+          for (const oldVariant of oldVariants) {
+            if (oldVariant.name === item.variantName) {
+              await dbRun(
+                db,
+                `UPDATE variants
+                 SET is_archived = 1,
+                     archived_at = COALESCE(archived_at, CURRENT_TIMESTAMP),
+                     updated_at = CURRENT_TIMESTAMP
+                 WHERE id = ?`,
+                [oldVariant.id]
+              );
+              continue;
+            }
+            const clash = await dbGet<{ id: number }>(
+              db,
+              'SELECT id FROM variants WHERE object_id = ? AND name = ? AND COALESCE(is_archived, 0) = 0',
+              [series.id, oldVariant.name]
+            );
+            if (clash) {
+              await dbRun(
+                db,
+                `UPDATE variants
+                 SET is_archived = 1,
+                     archived_at = COALESCE(archived_at, CURRENT_TIMESTAMP),
+                     updated_at = CURRENT_TIMESTAMP
+                 WHERE id = ?`,
+                [oldVariant.id]
+              );
+              continue;
+            }
+            await dbRun(
+              db,
+              'UPDATE variants SET object_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+              [series.id, oldVariant.id]
+            );
+          }
+
+          await retargetByObjectId('source_mappings', oldObject.id, variant.id, item.variantName);
+          await retargetByObjectId('original_price_records', oldObject.id, variant.id, item.variantName);
+          await retargetByObjectId('product_archives', oldObject.id, variant.id, item.variantName);
+          await retargetByObjectId('follows', oldObject.id, variant.id, item.variantName);
+          await retargetByObjectId('watchlist_items', oldObject.id, variant.id, item.variantName);
+
+          await dbRun(
+            db,
+            `UPDATE objects
+             SET is_archived = 1,
+                 archived_at = COALESCE(archived_at, CURRENT_TIMESTAMP),
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?`,
+            [oldObject.id]
+          );
+        }
+
+        await retargetNamedRows('price_records', 'object_name', 'variant', item.oldObjectName, item.variantName, 'category');
+        await retargetNamedRows('buying_plans', 'object_name', 'variant_name', item.oldObjectName, item.variantName, 'category_name');
+        await retargetNamedRows('selling_plans', 'object_name', 'variant_name', item.oldObjectName, item.variantName, 'category_name');
+        await retargetNamedRows('positions', 'object_name', 'variant_name', item.oldObjectName, item.variantName, 'category_name');
+        await retargetNamedRows('ended_positions', 'object_name', 'variant_name', item.oldObjectName, item.variantName, 'category_name');
+        await retargetNamedRows('sell_records', 'object_name', 'variant_name', item.oldObjectName, item.variantName, 'category_name');
+        await retargetNamedRows('follows', 'object_name', 'variant_name', item.oldObjectName, item.variantName, 'category_name');
+        await retargetNamedRows('original_price_records', 'object_name', 'variant_name', item.oldObjectName, item.variantName, 'category_name');
+        await retargetNamedRows('annual_plan_items', 'object_name', null, item.oldObjectName, item.variantName, 'category');
+        await retargetNamedRows('abnormal_monitor_reads', 'object_name', 'variant_name', item.oldObjectName, item.variantName, 'category_name');
+        await retargetNamedRows('risk_reviews', 'object_name', 'variant_name', item.oldObjectName, item.variantName, 'category_name');
+        await retargetNamedRows('risk_check_records', 'object_name', 'variant_name', item.oldObjectName, item.variantName, 'category_name');
+        await retargetNamedRows('speculation_cycle_records', 'object_name', 'variant_name', item.oldObjectName, item.variantName, 'category_name');
+        await retargetNamedRows('category_profiles', 'object_name', 'variant_name', item.oldObjectName, item.variantName, 'category_name');
+        await retargetNamedRows('product_archives', 'object_name', 'variant_name', item.oldObjectName, item.variantName, 'category_name');
+        await retargetNamedRows('market_book_snapshots', 'object_name', 'variant', item.oldObjectName, item.variantName, 'category');
+        await retargetNamedRows('market_trades', 'object_name', 'variant', item.oldObjectName, item.variantName, 'category');
+        await retargetNamedRows('source_mappings', 'object_name', 'variant_name', item.oldObjectName, item.variantName, 'category_name');
+
+        if (await migrationTableExists(db, 'source_mappings')) {
+          const externalMeta = JSON.stringify({ query: item.query, spu_id: item.spuId });
+          const note = '已归入福袋专属变体；按单款 SPU 抓价。';
+          await dbRun(
+            db,
+            `INSERT OR IGNORE INTO source_mappings
+               (source_key, source_name, external_key, external_name, external_meta_json,
+                category_id, object_id, variant_id, category_name, object_name, variant_name,
+                status, note)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              'qiandao_popmart',
+              '千岛泡泡玛特',
+              item.spuId,
+              item.externalName,
+              externalMeta,
+              category.id,
+              series.id,
+              variant.id,
+              category.name,
+              series.name,
+              variant.name,
+              'enabled',
+              note
+            ]
+          );
+          await dbRun(
+            db,
+            `UPDATE source_mappings
+             SET source_name = ?,
+                 external_name = ?,
+                 external_meta_json = ?,
+                 category_id = ?,
+                 object_id = ?,
+                 variant_id = ?,
+                 category_name = ?,
+                 object_name = ?,
+                 variant_name = ?,
+                 status = CASE WHEN status = 'disabled' THEN status ELSE 'enabled' END,
+                 note = CASE WHEN status = 'disabled' THEN note ELSE ? END,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE source_key = ? AND external_key = ?`,
+            [
+              '千岛泡泡玛特',
+              item.externalName,
+              externalMeta,
+              category.id,
+              series.id,
+              variant.id,
+              category.name,
+              series.name,
+              variant.name,
+              note,
+              'qiandao_popmart',
+              item.spuId
+            ]
+          );
+        }
+      }
     }
   }
 ];
