@@ -10256,6 +10256,882 @@ ${marker}：大网红本人亲自上阵、加价卖货。币圈一批大佬反�
         ]
       });
     }
+  },
+  {
+    id: '20260926_001_seed_crybaby_gulu_disney_collab',
+    name: 'Seed Crybaby Gulu/Lianxia and Disney collab catalog plus portraits',
+    run: async (db: any) => {
+      if (!(await migrationTableExists(db, 'categories'))) return;
+      if (!(await migrationTableExists(db, 'objects'))) return;
+      if (!(await migrationTableExists(db, 'variants'))) return;
+
+      const freezeDate = '2026-09-26';
+      const freezeMarker = `认知冻结日：${freezeDate}`;
+      const categoryName = '泡泡玛特';
+      const disneyObject = '迪士尼联名';
+
+      const appendOnce = (current: unknown, marker: string, addition: string) => {
+        const text = String(current || '').trim();
+        if (text.includes(marker)) return text;
+        return [text, addition].filter(Boolean).join('\n\n');
+      };
+
+      const category = await dbGet<{ id: number; name: string }>(
+        db,
+        'SELECT id, name FROM categories WHERE name = ?',
+        [categoryName]
+      );
+      if (!category) return;
+
+      await dbRun(
+        db,
+        'UPDATE categories SET is_archived = 0, archived_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+        [category.id]
+      );
+
+      const ensureObject = async (name: string) => {
+        await dbRun(
+          db,
+          'INSERT OR IGNORE INTO objects (category_id, name, created_at, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)',
+          [category.id, name]
+        );
+        const object = await dbGet<{ id: number; name: string }>(
+          db,
+          'SELECT id, name FROM objects WHERE category_id = ? AND name = ?',
+          [category.id, name]
+        );
+        if (!object) throw new Error(`Failed to ensure object ${name}`);
+        await dbRun(
+          db,
+          'UPDATE objects SET is_archived = 0, archived_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+          [object.id]
+        );
+        return object;
+      };
+
+      const ensureVariant = async (objectId: number, name: string) => {
+        await dbRun(
+          db,
+          'INSERT OR IGNORE INTO variants (object_id, name, created_at, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)',
+          [objectId, name]
+        );
+        const variant = await dbGet<{ id: number; name: string }>(
+          db,
+          'SELECT id, name FROM variants WHERE object_id = ? AND name = ?',
+          [objectId, name]
+        );
+        if (!variant) throw new Error(`Failed to ensure variant ${name}`);
+        await dbRun(
+          db,
+          'UPDATE variants SET is_archived = 0, archived_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+          [variant.id]
+        );
+        return variant;
+      };
+
+      const existingCrybaby = await dbGet<{ id: number; name: string }>(
+        db,
+        "SELECT id, name FROM objects WHERE category_id = ? AND name = ? AND COALESCE(is_archived, 0) = 0",
+        [category.id, '哭娃']
+      );
+      const existingTears = await dbGet<{ id: number; name: string }>(
+        db,
+        "SELECT id, name FROM objects WHERE category_id = ? AND name = ? AND COALESCE(is_archived, 0) = 0",
+        [category.id, '眼泪工厂']
+      );
+      const tears = existingCrybaby || existingTears || await ensureObject('哭娃');
+      const disney = await ensureObject(disneyObject);
+      const gulu = await ensureVariant(tears.id, '咕噜咕噜');
+      const lianxia = await ensureVariant(tears.id, '恋夏一族');
+      const chipDale = await ensureVariant(disney.id, '奇奇和蒂蒂');
+      const donald = await ensureVariant(disney.id, '唐老鸭的歌唱');
+
+      const seedOriginalPrice = async (input: {
+        object: { id: number; name: string };
+        variant: { id: number; name: string };
+        price: number;
+        effectiveDate: string;
+        reason: string;
+        note: string;
+      }) => {
+        if (!(await migrationTableExists(db, 'original_price_records'))) return;
+        const existing = await dbGet<{ id: number }>(
+          db,
+          `SELECT id FROM original_price_records
+           WHERE category_id = ?
+             AND object_id = ?
+             AND COALESCE(variant_id, 0) = ?
+             AND original_price = ?
+             AND effective_date = ?
+             AND COALESCE(is_deleted, 0) = 0
+           LIMIT 1`,
+          [category.id, input.object.id, input.variant.id, input.price, input.effectiveDate]
+        );
+        if (existing) return;
+        await dbRun(
+          db,
+          `INSERT INTO original_price_records
+            (category_id, category_name, object_id, object_name, variant_id, variant_name,
+             original_price, effective_date, source, reason, note, is_deleted, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [
+            category.id,
+            categoryName,
+            input.object.id,
+            input.object.name,
+            input.variant.id,
+            input.variant.name,
+            input.price,
+            input.effectiveDate,
+            '用户口述',
+            input.reason,
+            input.note
+          ]
+        );
+      };
+
+      await seedOriginalPrice({
+        object: tears,
+        variant: gulu,
+        price: 129,
+        effectiveDate: '2025-10-01',
+        reason: '哭娃二代官方原价',
+        note: `${freezeMarker}。25年10月推出，日期按月份锚，不补造具体发售日。`
+      });
+      await seedOriginalPrice({
+        object: tears,
+        variant: lianxia,
+        price: 129,
+        effectiveDate: '2025-10-01',
+        reason: '哭娃二代同口径官方原价',
+        note: `${freezeMarker}。原价129按哭娃二代系列口径记录；恋夏一族单品回收价未单独口述，不把134写到它头上。`
+      });
+      await seedOriginalPrice({
+        object: disney,
+        variant: chipDale,
+        price: 179,
+        effectiveDate: '2025-03-01',
+        reason: '迪士尼联名端盒单盒官方原价',
+        note: `${freezeMarker}。25年3月发行，日期按月份锚；一端6个，原价179是单盒不是整端。`
+      });
+      await seedOriginalPrice({
+        object: disney,
+        variant: donald,
+        price: 179,
+        effectiveDate: '2025-03-01',
+        reason: '迪士尼联名端盒单盒官方原价',
+        note: `${freezeMarker}。25年3月发行，日期按月份锚；一端6个，原价179是单盒不是整端。`
+      });
+
+      const seedProfile = async (input: {
+        objectName: string;
+        variantName: string;
+        businessStyle: string;
+        operationScene: string;
+        supplyMode: string;
+        salesMode: string;
+        pricePattern: string;
+        riskPoints: string;
+        operatingDiscipline: string;
+        dataCaliber: string;
+        experienceNotes: string;
+        decisionNotes: string;
+        extra: Record<string, unknown>;
+        note: string;
+      }) => {
+        if (!(await migrationTableExists(db, 'category_profiles'))) return;
+        const existing = await dbGet<{ id: number }>(
+          db,
+          `SELECT id FROM category_profiles
+           WHERE category_name = ?
+             AND COALESCE(object_name, '') = ?
+             AND COALESCE(variant_name, '') = ?
+             AND COALESCE(is_deleted, 0) = 0
+           LIMIT 1`,
+          [categoryName, input.objectName, input.variantName]
+        );
+        if (existing) return;
+        await dbRun(
+          db,
+          `INSERT INTO category_profiles
+            (category_id, category_name, object_name, variant_name, business_style, operation_scene,
+             supply_mode, sales_mode, price_pattern, risk_points, operating_discipline, data_caliber,
+             experience_notes, decision_notes, extra_json, status, note, is_deleted, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [
+            category.id,
+            categoryName,
+            input.objectName,
+            input.variantName,
+            input.businessStyle,
+            input.operationScene,
+            input.supplyMode,
+            input.salesMode,
+            input.pricePattern,
+            input.riskPoints,
+            input.operatingDiscipline,
+            input.dataCaliber,
+            input.experienceNotes,
+            input.decisionNotes,
+            JSON.stringify(input.extra),
+            input.note
+          ]
+        );
+      };
+
+      await seedProfile({
+        objectName: tears.name,
+        variantName: '咕噜咕噜',
+        businessStyle: 'mixed',
+        operationScene: 'online_offline',
+        supplyMode: '哭娃二代。25年10月推出，先预售；年后炒了一段后官方加大放货。截止2026-09-26，线上基本放开卖，覆盖小程序、直播间，线下部分机器也有。还没补死：不是线上线下长期随处可买、持续数月的通货补。大概率后续会像一代哭哭兔一样停一段时间，因为官方还要产别的。持续跟踪补货，不把当前放开卖写成已经补死。',
+        salesMode: '没破发就证明有承接、有硬度，也好卖。原价129，截止今天回收大约134。端盒里照样有爆款有雷款，出货看单款热度和整端消化，不把整端硬度写成每个盒子都好卖。',
+        pricePattern: '先预售炒作，再官方放货。当前回收仍在原价上方，说明放货加大后真实需求还接得住。后续若转成通货补，原价附近保护力会下降；若停补，再重新看稀缺。不把后续停产或破发写进当前判断。',
+        riskPoints: '最大风险是官方继续加大放货，从“放开卖但没补死”滑成通货补。一代哭哭兔就是先热再放再停的路径，二代可能重复。端盒爆款/雷款分化，整端看起来硬也可能被雷款拖。不要用当前134反推以后还能炒。',
+        operatingDiscipline: '当前只定义为有承接的二代跟踪仓，不是追炒许可。先看补货有没有停、回收能不能稳在原价附近。没破发=有人接，可以卖；一旦变成长期随处可买，按供给结构反转处理，不再用“还没补死”护航。价格记录备注持续记补货渠道。',
+        dataCaliber: '原价129、回收约134是2026-09-26用户口述，不是千岛自动价。发售按2025-10月份锚。补货观察看小程序、直播间、线下机器是否继续有货，以及之后会不会停。不向价格历史补写虚构日线。',
+        experienceNotes: `${freezeMarker}。咕噜咕噜是哭娃二代，不是一代哭哭兔。一代的经验只用来提醒“热完会停一段时间”，不把一代价格套到二代。当前硬度来自还没补死、回收仍高于原价，不来自高溢价。`,
+        decisionNotes: '决策时先问三件事：还在不在放货、回收还在不在原价上方、有没有变成通货补。没破发可以当成承接信号；破发以后再看是阶段性放量还是补死。不把后续停产写成已经发生。',
+        extra: {
+          series: 'crybaby_gen2',
+          cognition_frozen_at: freezeDate,
+          retail_price: 129,
+          recycle_price_as_of: { date: freezeDate, price: 134, caliber: 'user_oral' },
+          replenishment: {
+            started_as: 'preorder',
+            as_of: freezeDate,
+            channels: ['mini_program', 'livestream', 'some_offline_machines'],
+            status: 'online_mostly_open_not_yet_currency_supply',
+            likely_later: 'pause_like_gen1_crying_bunny'
+          }
+        },
+        note: `${freezeMarker}。用户口述整理；持续跟踪补货，不改写后续结局。`
+      });
+
+      await seedProfile({
+        objectName: tears.name,
+        variantName: '恋夏一族',
+        businessStyle: 'mixed',
+        operationScene: 'online_offline',
+        supplyMode: '哭娃二代系列里和咕噜咕噜并列的硬品。官方还没给它补死。补货节奏按二代系列一起看：先预售后放货，后续可能停一段时间，因为官方还要产别的。单品渠道细节未单独口述，不把咕噜咕噜的小程序/直播间/机器原样抄过来。',
+        salesMode: '和咕噜咕噜一起被判断为很硬、好卖。没破发说明有承接。端盒同样有爆款有雷款。单品回收价未单独报，不把134记到恋夏一族。',
+        pricePattern: '原价按哭娃二代口径129。当前系列判断是还没补死、仍有硬度。其它几个已经破发，所以没破发的才证明有人接。后续价格以实际回收/千岛为准，不补造日线。',
+        riskPoints: '系列放货加大后，硬品也可能被带崩。单品证据比咕噜咕噜少，不要用系列硬度代替单款成交。若后续只补咕噜咕噜不补它，或反过来，要分开记。',
+        operatingDiscipline: '先跟系列补货，再核单款回收有没有破发。没单独报价前，只当观察对象，不把咕噜咕噜的134当成它的底。',
+        dataCaliber: '原价129是二代系列口径。回收价待核。认知冻结2026-09-26。',
+        experienceNotes: `${freezeMarker}。恋夏一族和咕噜咕噜被放在同一硬度篮子里：还没补死。其它破发款用来对照，不把破发款的路径提前写到它头上。`,
+        decisionNotes: '有系列硬度、缺单品盘口。计划草稿前先补回收价和补货渠道，不要直接套咕噜咕噜。',
+        extra: {
+          series: 'crybaby_gen2',
+          cognition_frozen_at: freezeDate,
+          retail_price: 129,
+          recycle_price_as_of: { date: freezeDate, price: null, caliber: 'not_separately_quoted' },
+          hardness_with: '咕噜咕噜'
+        },
+        note: `${freezeMarker}。系列硬度已口述，单品回收价留空。`
+      });
+
+      await seedProfile({
+        objectName: disneyObject,
+        variantName: '',
+        businessStyle: 'mixed',
+        operationScene: 'online_offline',
+        supplyMode: '泡泡玛特迪士尼联名系列。25年3月发行，经历过大规模补货；截止2026-09-26官方不太补了。补过不等于现在还在通货补。',
+        salesMode: '端盒逻辑：一端6个，有爆款有雷款。承接比哭娃二代略弱，毕竟发行更早。破发过，但不厉害。整端记得最低大约950。',
+        pricePattern: '单盒原价179。一端6个原价合计1074，记得整端最低约950，大约一成出头的破发，所以说破发不厉害。现在官方不怎么补，价格要看存量消化，不把“以前补过”写成现在还在放。',
+        riskPoints: '发行时间更早，真爱消耗和炒作热度都可能更弱。大规模补货已经发生过，结构不是纯稀缺。端盒爆款/雷款分化，整端950不能保证每个单款都有同样承接。950是记忆锚，日期和精确低点待核，不写入价格历史。',
+        operatingDiscipline: '系列只观察承接和补货是否重新打开。破发不深不等于还能当硬品加仓。单款分开看奇奇和蒂蒂、唐老鸭的歌唱，不要用整端均价给雷款托底。',
+        dataCaliber: '原价179、一端6个、整端最低约950、发行2025-03、当前官方不太补，均为2026-09-26用户口述。950不补造到日线。',
+        experienceNotes: `${freezeMarker}。迪士尼联名和哭娃二代对照：二代还没补死、回收仍在原价上；迪士尼补过一轮、破发过但不深、现在停补，承接略弱。`,
+        decisionNotes: '先看官方还补不补。不补时用整端950当历史压力记忆，不当时价。单款成交和爆款/雷款要分开。',
+        extra: {
+          series: 'popmart_disney_collab',
+          cognition_frozen_at: freezeDate,
+          retail_price: 179,
+          box_size: 6,
+          remembered_box_low: 950,
+          released: '2025-03',
+          replenishment_as_of: { date: freezeDate, status: 'previously_large_now_mostly_stopped' }
+        },
+        note: `${freezeMarker}。系列画像；单款另有对象画像。`
+      });
+
+      await seedProfile({
+        objectName: disneyObject,
+        variantName: '奇奇和蒂蒂',
+        businessStyle: 'mixed',
+        operationScene: 'online_offline',
+        supplyMode: '挂在迪士尼联名下面。系列经历过大补，现在官方不怎么补。单款补货未单独口述。',
+        salesMode: '端盒爆款/雷款之一，具体是爆是雷未点名。出货看单款热度，不拿整端950给它托底。',
+        pricePattern: '单盒原价179。系列破发过但不深。单款回收/千岛价待核。',
+        riskPoints: '联名热度比哭娃二代弱，发行更早。若是雷款，整端看起来还行也会卖不动。',
+        operatingDiscipline: '先跟系列补货开关，再等单款盘口。没有单款回收价之前只观察。',
+        dataCaliber: '沿用系列原价179和2025-03发行月。单款价格未口述。',
+        experienceNotes: `${freezeMarker}。只确认它属于迪士尼联名端盒成员，不发明单款走势。`,
+        decisionNotes: '无单款承接证据时，不把系列“破发不厉害”写成这款可做。',
+        extra: {
+          series: 'popmart_disney_collab',
+          cognition_frozen_at: freezeDate,
+          retail_price: 179,
+          hit_or_dud: 'unknown'
+        },
+        note: `${freezeMarker}。单款盘口待补。`
+      });
+
+      await seedProfile({
+        objectName: disneyObject,
+        variantName: '唐老鸭的歌唱',
+        businessStyle: 'mixed',
+        operationScene: 'online_offline',
+        supplyMode: '挂在迪士尼联名下面。系列经历过大补，现在官方不怎么补。单款补货未单独口述。',
+        salesMode: '端盒爆款/雷款之一，具体是爆是雷未点名。出货看单款热度，不拿整端950给它托底。',
+        pricePattern: '单盒原价179。系列破发过但不深。单款回收/千岛价待核。',
+        riskPoints: '联名热度比哭娃二代弱，发行更早。若是雷款，整端看起来还行也会卖不动。',
+        operatingDiscipline: '先跟系列补货开关，再等单款盘口。没有单款回收价之前只观察。',
+        dataCaliber: '沿用系列原价179和2025-03发行月。单款价格未口述。',
+        experienceNotes: `${freezeMarker}。只确认它属于迪士尼联名端盒成员，不发明单款走势。`,
+        decisionNotes: '无单款承接证据时，不把系列“破发不厉害”写成这款可做。',
+        extra: {
+          series: 'popmart_disney_collab',
+          cognition_frozen_at: freezeDate,
+          retail_price: 179,
+          hit_or_dud: 'unknown'
+        },
+        note: `${freezeMarker}。单款盘口待补。`
+      });
+
+      const seedArchive = async (input: {
+        object: { id: number; name: string };
+        variant?: { id: number; name: string };
+        archiveName: string;
+        positionLevel: string;
+        judgment: string;
+        rawDescription: string;
+        issueInfo: string;
+        themeDesign: string;
+        tradingProcess: string;
+        riskBasis: string;
+        experienceNote: string;
+        pendingQuestions: string;
+        confidence: string;
+        stages: Array<{
+          name: string;
+          time: string;
+          type: string;
+          summary: string;
+          actionRule: string;
+          evidence: string;
+          sortOrder: number;
+        }>;
+      }) => {
+        if (!(await migrationTableExists(db, 'product_archives'))) return;
+        const existing = await dbGet<{ id: number }>(
+          db,
+          `SELECT id FROM product_archives
+           WHERE archive_name = ? AND COALESCE(is_deleted, 0) = 0
+           LIMIT 1`,
+          [input.archiveName]
+        );
+        let archiveId = existing?.id;
+        if (!archiveId) {
+          await dbRun(
+            db,
+            `INSERT INTO product_archives
+              (category_id, category_name, object_id, object_name, variant_id, variant_name,
+               archive_name, position_level, one_sentence_judgment, raw_description,
+               issue_info, theme_design, trading_process, risk_basis, experience_note,
+               pending_questions, confidence, status, note, is_deleted, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+            [
+              category.id,
+              categoryName,
+              input.object.id,
+              input.object.name,
+              input.variant?.id || null,
+              input.variant?.name || '',
+              input.archiveName,
+              input.positionLevel,
+              input.judgment,
+              input.rawDescription,
+              input.issueInfo,
+              input.themeDesign,
+              input.tradingProcess,
+              input.riskBasis,
+              input.experienceNote,
+              input.pendingQuestions,
+              input.confidence,
+              `${freezeMarker}。用户口述建档，后续只追加带日期变化，不改写V0.1。`
+            ]
+          );
+          const created = await dbGet<{ id: number }>(
+            db,
+            'SELECT id FROM product_archives WHERE archive_name = ? AND COALESCE(is_deleted, 0) = 0 LIMIT 1',
+            [input.archiveName]
+          );
+          archiveId = created?.id;
+        }
+        if (!archiveId || !(await migrationTableExists(db, 'product_archive_stages'))) return;
+        for (const stage of input.stages) {
+          const existingStage = await dbGet<{ id: number }>(
+            db,
+            `SELECT id FROM product_archive_stages
+             WHERE archive_id = ? AND stage_name = ? AND COALESCE(is_deleted, 0) = 0
+             LIMIT 1`,
+            [archiveId, stage.name]
+          );
+          if (existingStage) continue;
+          await dbRun(
+            db,
+            `INSERT INTO product_archive_stages
+              (archive_id, stage_name, time_text, stage_type, stage_summary, action_rule,
+               evidence_note, confidence, sort_order, note, is_deleted, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, 'rough', ?, ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+            [
+              archiveId,
+              stage.name,
+              stage.time,
+              stage.type,
+              stage.summary,
+              stage.actionRule,
+              stage.evidence,
+              stage.sortOrder,
+              '不向价格历史补写虚构日期或精确价格。'
+            ]
+          );
+        }
+      };
+
+      await seedArchive({
+        object: tears,
+        variant: gulu,
+        archiveName: `${tears.name} / 咕噜咕噜`,
+        positionLevel: 'watch',
+        judgment: '二代还没补死，回收仍高于原价，持续跟踪补货，不追炒。',
+        rawDescription: '哭娃二代。原价129，截止2026-09-26回收大约134。没破发=有承接、有硬度、也好卖。',
+        issueInfo: '25年10月推出。先预售，年后炒过一轮，随后官方加大放货。今天线上基本放开卖：小程序、直播间都能买，线下部分机器也有。这还不是通货补——通货补要线上线下随处可买并持续至少一个月甚至数月。当前只定义为放开卖但没补死。',
+        themeDesign: '眼泪工厂二代。一代哭哭兔的经验是热完会停一段时间，因为官方还要产别的；二代可能走同一条供给节奏，但不能把一代价格套过来。',
+        tradingProcess: '线上小程序/直播间和部分线下机器都能看到货。出货看回收是否还在原价上方。端盒有爆款有雷款。',
+        riskBasis: '供给如果继续加大，134这点溢价保护不住。一代停补是后话，现在不能写成已经停。',
+        experienceNote: `${freezeMarker}。其它几个已经破发，咕噜咕噜还在原价上，这是当前硬度的证据。后续停补或补死都只追加带日期记录。`,
+        pendingQuestions: '补货会不会停、会不会变成通货补、线下机器覆盖会不会扩大、回收134能不能稳住。我会持续跟踪补货并写在价格备注里。',
+        confidence: 'rough',
+        stages: [
+          {
+            name: '预售到年后炒作',
+            time: '2025-10推出，年后到加大放货前',
+            type: '预售 / 炒作',
+            summary: '二代推出后先走预售，年后火过一段时间、炒过一段时间。具体高点没有留存，不补造。',
+            actionRule: '炒作阶段的溢价不作当前依据。',
+            evidence: '用户2026-09-26口述。无本地价格序列。',
+            sortOrder: 1
+          },
+          {
+            name: '官方加大放货但未补死',
+            time: '加大放货后至2026-09-26',
+            type: '放货 / 承接观察',
+            summary: '从预售转到线上基本放开卖，小程序、直播间和部分线下机器有货。回收大约134，相对原价129没破发。',
+            actionRule: '跟踪补货，不把放开卖当成通货补，也不把134写成买入许可。',
+            evidence: '用户当天口述回收约134。未写入日线。',
+            sortOrder: 2
+          }
+        ]
+      });
+
+      await seedArchive({
+        object: tears,
+        variant: lianxia,
+        archiveName: `${tears.name} / 恋夏一族`,
+        positionLevel: 'watch',
+        judgment: '和咕噜咕噜一样还没补死、有硬度；单品回收价待核。',
+        rawDescription: '哭娃二代硬品之一。原价按系列口径129。单品回收价用户没单独报。',
+        issueInfo: '供给按二代系列看：还没补死，后续可能停一段时间。不要把咕噜咕噜的渠道细节直接算到它头上。',
+        themeDesign: '眼泪工厂二代。',
+        tradingProcess: '端盒有爆款有雷款。没破发才证明有承接。',
+        riskBasis: '单品盘口不足，系列硬度不能代替成交。',
+        experienceNote: `${freezeMarker}。和咕噜咕噜放在同一硬度篮子；其它破发款只作对照。`,
+        pendingQuestions: '单品回收价、补货渠道、是否比咕噜咕噜更早或更晚停补。',
+        confidence: 'rough',
+        stages: [
+          {
+            name: '二代硬品观察',
+            time: '至2026-09-26',
+            type: '系列硬度 / 单品待核',
+            summary: '用户把它和咕噜咕噜一起判断为很硬、还没补死。缺少单独回收价。',
+            actionRule: '先观察，补齐回收价再谈计划。',
+            evidence: '用户口述系列判断。',
+            sortOrder: 1
+          }
+        ]
+      });
+
+      await seedArchive({
+        object: disney,
+        archiveName: '迪士尼联名',
+        positionLevel: 'watch',
+        judgment: '补过一轮、破发不深、现在不太补，承接比哭娃二代弱。',
+        rawDescription: '原价179，一端6个。25年3月发行。整端记得最低约950。',
+        issueInfo: '经历过大规模补货，现在官方不怎么补。以前大补不等于通货补还在继续。',
+        themeDesign: '迪士尼联名端盒。有爆款有雷款。',
+        tradingProcess: '系列承接略弱。单款奇奇和蒂蒂、唐老鸭的歌唱要分开看。',
+        riskBasis: '950是记忆低点，日期待核，不写入价格历史。破发不厉害只说明没被打穿，不说明现在好做。',
+        experienceNote: `${freezeMarker}。对照哭娃二代：那边还没补死且未破发；这边补过、破发过、现在停补。`,
+        pendingQuestions: '当前整端/单款回收价、官方是否会再补、950出现的大致时间。',
+        confidence: 'rough',
+        stages: [
+          {
+            name: '发行后大规模补货',
+            time: '2025-03发行后，具体大补日期待核',
+            type: '大规模补货',
+            summary: '系列经历过大规模补货，并出现过破发，但整端记得最低大约950，相对6×179并不深。',
+            actionRule: '大补阶段的破发只作记忆，不当时价。',
+            evidence: '用户记忆整端最低约950。无本地价格序列。',
+            sortOrder: 1
+          },
+          {
+            name: '官方不怎么补货',
+            time: '至2026-09-26',
+            type: '停补观察',
+            summary: '现在官方也不怎么补了。承接略弱，因为已经是25年3月的货。',
+            actionRule: '停补后看存量消化和单款热度，不自动升级成硬品。',
+            evidence: '用户2026-09-26口述当前供给。',
+            sortOrder: 2
+          }
+        ]
+      });
+
+      if (await migrationTableExists(db, 'category_profiles')) {
+        const parent = await dbGet<{ id: number; experience_notes: string; decision_notes: string }>(
+          db,
+          `SELECT id, experience_notes, decision_notes
+           FROM category_profiles
+           WHERE category_name = ?
+             AND COALESCE(object_name, '') = ''
+             AND COALESCE(variant_name, '') = ''
+             AND COALESCE(is_deleted, 0) = 0
+           ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END, id
+           LIMIT 1`,
+          [categoryName]
+        );
+        if (parent) {
+          await dbRun(
+            db,
+            `UPDATE category_profiles
+             SET experience_notes = ?,
+                 decision_notes = ?,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?`,
+            [
+              appendOnce(
+                parent.experience_notes,
+                '2026-09-26补充哭娃二代和迪士尼联名',
+                '2026-09-26补充哭娃二代和迪士尼联名：眼泪工厂下跟踪咕噜咕噜、恋夏一族；泡泡玛特下新增对象迪士尼联名，单款奇奇和蒂蒂、唐老鸭的歌唱。咕噜咕噜原价129、回收约134，还没补死；迪士尼原价179、一端6个、记得整端最低约950，补过但现在不太补，承接略弱。没破发证明有承接，端盒仍有爆款有雷款。'
+              ),
+              appendOnce(
+                parent.decision_notes,
+                '哭娃二代先看还没补死',
+                '哭娃二代先看还没补死、回收还在不在原价上方；迪士尼联名先看官方还补不补、整端破发深不深。都不要用系列均价给雷款托底。'
+              ),
+              parent.id
+            ]
+          );
+        }
+      }
+
+      if (await migrationTableExists(db, 'audit_logs')) {
+        await dbRun(
+          db,
+          `INSERT OR IGNORE INTO audit_logs
+            (id, timestamp, module, action, target, status, detail, entity_id, path, domain, workspace, created_at, updated_at)
+           VALUES ('audit-popmart-crybaby-disney-20260926', CURRENT_TIMESTAMP,
+                   '品类画像', 'create', ?, 'success', ?, '20260926_001',
+                   '/risk-control/category-profiles', 'business', 'business',
+                   CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [
+            '泡泡玛特 / 哭娃 / 咕噜咕噜、恋夏一族；迪士尼联名 / 奇奇和蒂蒂、唐老鸭的歌唱',
+            JSON.stringify({
+              cognitionFrozenAt: freezeDate,
+              catalog: ['咕噜咕噜', '恋夏一族', '迪士尼联名', '奇奇和蒂蒂', '唐老鸭的歌唱']
+            })
+          ]
+        );
+      }
+    }
+  },
+  {
+    id: '20260926_002_rename_crybaby_and_seed_qiandao_spus',
+    name: 'Rename 眼泪工厂 to 哭娃 and enable Qiandao SPUs for Gulu/Lianxia/Disney plush',
+    run: async (db: any) => {
+      if (!(await migrationTableExists(db, 'categories'))) return;
+      if (!(await migrationTableExists(db, 'objects'))) return;
+
+      const category = await dbGet<{ id: number; name: string }>(
+        db,
+        "SELECT id, name FROM categories WHERE name = ? AND COALESCE(is_archived, 0) = 0",
+        ['泡泡玛特']
+      );
+      if (!category) return;
+
+      const tears = await dbGet<{ id: number; name: string }>(
+        db,
+        'SELECT id, name FROM objects WHERE category_id = ? AND name = ?',
+        [category.id, '眼泪工厂']
+      );
+      let crybaby = await dbGet<{ id: number; name: string }>(
+        db,
+        'SELECT id, name FROM objects WHERE category_id = ? AND name = ?',
+        [category.id, '哭娃']
+      );
+
+      if (tears && !crybaby) {
+        await dbRun(
+          db,
+          'UPDATE objects SET name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+          ['哭娃', tears.id]
+        );
+        crybaby = { id: tears.id, name: '哭娃' };
+      } else if (tears && crybaby && tears.id !== crybaby.id) {
+        const tearsVariants = await dbAll<{ id: number; name: string }>(
+          db,
+          'SELECT id, name FROM variants WHERE object_id = ? AND COALESCE(is_archived, 0) = 0',
+          [tears.id]
+        );
+        for (const variant of tearsVariants) {
+          const clash = await dbGet<{ id: number }>(
+            db,
+            'SELECT id FROM variants WHERE object_id = ? AND name = ? AND COALESCE(is_archived, 0) = 0',
+            [crybaby.id, variant.name]
+          );
+          if (clash) {
+            await dbRun(
+              db,
+              `UPDATE variants
+               SET is_archived = 1,
+                   archived_at = COALESCE(archived_at, CURRENT_TIMESTAMP),
+                   updated_at = CURRENT_TIMESTAMP
+               WHERE id = ?`,
+              [variant.id]
+            );
+            continue;
+          }
+          await dbRun(
+            db,
+            'UPDATE variants SET object_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+            [crybaby.id, variant.id]
+          );
+        }
+        for (const tableName of ['source_mappings', 'original_price_records', 'product_archives', 'follows', 'watchlist_items']) {
+          if (!(await migrationTableExists(db, tableName))) continue;
+          const columns = await dbAll<{ name: string }>(db, `PRAGMA table_info(${quoteMigrationIdentifier(tableName)})`);
+          if (!columns.some((column) => column.name === 'object_id')) continue;
+          await dbRun(
+            db,
+            `UPDATE ${quoteMigrationIdentifier(tableName)} SET object_id = ? WHERE object_id = ?`,
+            [crybaby.id, tears.id]
+          );
+        }
+        await dbRun(
+          db,
+          'UPDATE objects SET is_archived = 1, archived_at = COALESCE(archived_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+          [tears.id]
+        );
+      }
+
+      const tableHasColumn = async (tableName: string, columnName: string) => {
+        if (!(await migrationTableExists(db, tableName))) return false;
+        const columns = await dbAll<{ name: string }>(
+          db,
+          `PRAGMA table_info(${quoteMigrationIdentifier(tableName)})`
+        );
+        return columns.some((column) => column.name === columnName);
+      };
+
+      const renameObjectNameColumn = async (tableName: string, columnName: string) => {
+        if (!(await tableHasColumn(tableName, columnName))) return;
+        await dbRun(
+          db,
+          `UPDATE ${quoteMigrationIdentifier(tableName)}
+           SET ${quoteMigrationIdentifier(columnName)} = ?
+           WHERE ${quoteMigrationIdentifier(columnName)} = ?`,
+          ['哭娃', '眼泪工厂']
+        );
+      };
+
+      await renameObjectNameColumn('price_records', 'object_name');
+      await renameObjectNameColumn('buying_plans', 'object_name');
+      await renameObjectNameColumn('selling_plans', 'object_name');
+      await renameObjectNameColumn('positions', 'object_name');
+      await renameObjectNameColumn('follows', 'object_name');
+      await renameObjectNameColumn('original_price_records', 'object_name');
+      await renameObjectNameColumn('annual_plan_items', 'object_name');
+      await renameObjectNameColumn('ended_positions', 'object_name');
+      await renameObjectNameColumn('sell_records', 'object_name');
+      await renameObjectNameColumn('abnormal_monitor_reads', 'object_name');
+      await renameObjectNameColumn('risk_reviews', 'object_name');
+      await renameObjectNameColumn('risk_check_records', 'object_name');
+      await renameObjectNameColumn('speculation_cycle_records', 'object_name');
+      await renameObjectNameColumn('source_mappings', 'object_name');
+      await renameObjectNameColumn('category_profiles', 'object_name');
+      await renameObjectNameColumn('product_archives', 'object_name');
+      await renameObjectNameColumn('market_book_snapshots', 'object_name');
+      await renameObjectNameColumn('market_trades', 'object_name');
+      await renameObjectNameColumn('event_records', 'related_object');
+      await renameObjectNameColumn('rejected_opportunities', 'related_object');
+
+      if (await tableHasColumn('product_archives', 'archive_name')) {
+        await dbRun(
+          db,
+          `UPDATE product_archives
+           SET archive_name = REPLACE(archive_name, '眼泪工厂 /', '哭娃 /')
+           WHERE archive_name LIKE '眼泪工厂 /%'`
+        );
+      }
+
+      if (!(await migrationTableExists(db, 'source_mappings')) || !(await migrationTableExists(db, 'variants'))) {
+        return;
+      }
+
+      const disney = await dbGet<{ id: number; name: string }>(
+        db,
+        'SELECT id, name FROM objects WHERE category_id = ? AND name = ?',
+        [category.id, '迪士尼联名']
+      );
+
+      const findVariant = async (objectId: number | undefined, name: string) => {
+        if (!objectId) return undefined;
+        return dbGet<{ id: number; name: string }>(
+          db,
+          'SELECT id, name FROM variants WHERE object_id = ? AND name = ? AND COALESCE(is_archived, 0) = 0',
+          [objectId, name]
+        );
+      };
+
+      const cryingBunny = await findVariant(crybaby?.id, '哭哭兔');
+      const gulu = await findVariant(crybaby?.id, '咕噜咕噜');
+      const lianxia = await findVariant(crybaby?.id, '恋夏一族');
+      const chipDale = await findVariant(disney?.id, '奇奇和蒂蒂');
+      const donald = await findVariant(disney?.id, '唐老鸭的歌唱');
+
+      const upsertMapping = async (input: {
+        object?: { id: number; name: string };
+        variant?: { id: number; name: string };
+        fallbackObjectName: string;
+        fallbackVariantName: string;
+        spuId: string;
+        query: string;
+        note: string;
+      }) => {
+        const ready = Boolean(input.object && input.variant);
+        const status = ready ? 'enabled' : 'unmapped';
+        const note = ready
+          ? input.note
+          : `初始化时未找到泡泡玛特/${input.fallbackObjectName}/${input.fallbackVariantName}主数据，请在数据源映射页面确认`;
+        const externalMeta = JSON.stringify({
+          query: input.query,
+          spu_id: input.spuId
+        });
+        await dbRun(
+          db,
+          `INSERT OR IGNORE INTO source_mappings
+             (source_key, source_name, external_key, external_name, external_meta_json,
+              category_id, object_id, variant_id, category_name, object_name, variant_name,
+              status, note)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            'qiandao_popmart',
+            '千岛泡泡玛特',
+            input.spuId,
+            input.fallbackVariantName,
+            externalMeta,
+            category.id,
+            input.object?.id || null,
+            input.variant?.id || 0,
+            category.name,
+            input.object?.name || input.fallbackObjectName,
+            input.variant?.name || input.fallbackVariantName,
+            status,
+            note
+          ]
+        );
+        await dbRun(
+          db,
+          `UPDATE source_mappings
+           SET source_name = ?,
+               external_name = ?,
+               external_meta_json = ?,
+               category_id = ?,
+               object_id = ?,
+               variant_id = ?,
+               category_name = ?,
+               object_name = ?,
+               variant_name = ?,
+               status = CASE WHEN status = 'disabled' THEN status ELSE ? END,
+               note = CASE WHEN status = 'disabled' THEN note ELSE ? END,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE source_key = ? AND external_key = ?`,
+          [
+            '千岛泡泡玛特',
+            input.fallbackVariantName,
+            externalMeta,
+            category.id,
+            input.object?.id || null,
+            input.variant?.id || 0,
+            category.name,
+            input.object?.name || input.fallbackObjectName,
+            input.variant?.name || input.fallbackVariantName,
+            status,
+            note,
+            'qiandao_popmart',
+            input.spuId
+          ]
+        );
+      };
+
+      await upsertMapping({
+        object: crybaby,
+        variant: cryingBunny,
+        fallbackObjectName: '哭娃',
+        fallbackVariantName: '哭哭兔',
+        spuId: '791072292330313271',
+        query: '眼泪工厂 哭哭兔',
+        note: '千岛眼泪工厂系列-搪胶脸毛绒盲盒；不要误接同名40元手办款。主数据对象已改名为哭娃。'
+      });
+      await upsertMapping({
+        object: crybaby,
+        variant: gulu,
+        fallbackObjectName: '哭娃',
+        fallbackVariantName: '咕噜咕噜',
+        spuId: '923539750290195305',
+        query: '咕噜咕噜',
+        note: '千岛 Vacation Mode On系列搪胶毛绒挂件 / Crybaby哭娃；不要误接挂绳、冰箱贴、周边挂件。'
+      });
+      await upsertMapping({
+        object: crybaby,
+        variant: lianxia,
+        fallbackObjectName: '哭娃',
+        fallbackVariantName: '恋夏一族',
+        spuId: '923539678349500863',
+        query: '恋夏一族',
+        note: '千岛 Vacation Mode On系列搪胶毛绒挂件 / Crybaby哭娃；不要误接挂绳、冰箱贴、周边挂件。'
+      });
+      await upsertMapping({
+        object: disney,
+        variant: chipDale,
+        fallbackObjectName: '迪士尼联名',
+        fallbackVariantName: '奇奇和蒂蒂',
+        spuId: '839239377744850095',
+        query: '奇奇和蒂蒂',
+        note: '千岛迪士尼联名系列搪胶毛绒挂件 / DIMOO；不要误接同名手办款和周边。'
+      });
+      await upsertMapping({
+        object: disney,
+        variant: donald,
+        fallbackObjectName: '迪士尼联名',
+        fallbackVariantName: '唐老鸭的歌唱',
+        spuId: '839239297214219448',
+        query: '唐老鸭的歌唱',
+        note: '千岛迪士尼联名系列搪胶毛绒挂件 / DIMOO；不要误接同名手办款和周边。'
+      });
+    }
   }
 ];
 
