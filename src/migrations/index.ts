@@ -12096,6 +12096,704 @@ ${marker}：大网红本人亲自上阵、加价卖货。币圈一批大佬反�
         }
       }
     }
+  },
+  {
+    id: '20260926_006_seed_zsiga_gen3_surprise_portrait',
+    name: 'Freeze Zsiga gen3 遇见的惊喜 watch portrait without inventing prices or outcomes',
+    run: async (db: any) => {
+      if (!(await migrationTableExists(db, 'categories'))) return;
+      if (!(await migrationTableExists(db, 'objects'))) return;
+      if (!(await migrationTableExists(db, 'variants'))) return;
+
+      const freezeDate = '2026-09-26';
+      const freezeMarker = `认知冻结日：${freezeDate}`;
+      const categoryName = '泡泡玛特';
+      const seriesName = 'Zsiga';
+      const variantName = '遇见的惊喜';
+
+      const appendOnce = (current: unknown, marker: string, addition: string) => {
+        const text = String(current || '').trim();
+        if (text.includes(marker)) return text;
+        return [text, addition].filter(Boolean).join('\n\n');
+      };
+
+      const category = await dbGet<{ id: number; name: string }>(
+        db,
+        'SELECT id, name FROM categories WHERE name = ?',
+        [categoryName]
+      );
+      if (!category) return;
+
+      const series = await dbGet<{ id: number; name: string }>(
+        db,
+        'SELECT id, name FROM objects WHERE category_id = ? AND name = ?',
+        [category.id, seriesName]
+      );
+      if (!series) return;
+      const variant = await dbGet<{ id: number; name: string }>(
+        db,
+        'SELECT id, name FROM variants WHERE object_id = ? AND name = ? AND COALESCE(is_archived, 0) = 0',
+        [series.id, variantName]
+      );
+      if (!variant) return;
+
+      if (await migrationTableExists(db, 'category_profiles')) {
+        const existingVariantProfile = await dbGet<{ id: number }>(
+          db,
+          `SELECT id FROM category_profiles
+           WHERE category_name = ?
+             AND COALESCE(object_name, '') = ?
+             AND COALESCE(variant_name, '') = ?
+             AND COALESCE(is_deleted, 0) = 0
+           LIMIT 1`,
+          [categoryName, seriesName, variantName]
+        );
+        if (!existingVariantProfile) {
+          await dbRun(
+            db,
+            `INSERT INTO category_profiles
+              (category_id, category_name, object_name, variant_name, business_style, operation_scene,
+               supply_mode, sales_mode, price_pattern, risk_points, operating_discipline, data_caliber,
+               experience_notes, decision_notes, extra_json, status, note, is_deleted, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+            [
+              category.id,
+              categoryName,
+              seriesName,
+              variantName,
+              'mixed',
+              'offline_first',
+              'Zsiga 嘎子姐第三代。用户口述前两天发布，约2026-09-24前后，精确发售日待核。截止2026-09-26，线下部分门店还在补。这不是通货补，也还没写成线上线下随处可买。持续跟踪补货范围会不会扩大，不把当前部分门店有货写成已经补死或已经停补。',
+              '新品窗口有热度，也有一定溢价。热度和溢价只说明当下有人追，不证明能囤。一代向往之处已经走过阶段性大补和停补后的承接；三代刚发，不能把一代底仓逻辑套过来。',
+              '刚发就有溢价。没有口述原价和回收价，不补造数字。价格高本身也是风险：溢价里已经含了新品热度和更好看的预期。后续若线下补货扩大或滑成通货补，这段溢价会先被供给打。不把千岛当天价写成原价或底部。',
+              '最大风险是把三代新品溢价当成布局位。当前还在补，只是范围还停在部分线下门店。若补货从部分门店扩到线上随时能买，供给结构会变。更好看是主观设计判断，不是硬度，也不能替代群里是否长期收。',
+              '当前只盯、不加仓。先看线下补货停不停、会不会扩大、溢价还在不在。价格高时不动，和哭娃、迪士尼同一条纪律。一代向往之处的A仓不自动授权三代。补货变化写在价格备注里。',
+              '发布按“前两天”记到约2026-09-24，精确发售日待核。热度、一定溢价、线下部分门店还在补、主观比一代好看一点，均为2026-09-26用户口述。未报原价和回收价，不写进原价表，也不向日线补写虚构价格。千岛只采1/8可动人偶，不接迷你包/冰箱贴/胸针/斜挎包。',
+              `${freezeMarker}。遇见的惊喜是嘎子姐第三代，一代是向往之处。二代是哪款这次没点名，不把姜饼人自动写成二代。一代经验只用来提醒供给节奏，不把一代价格、A仓和停补后的承接套到三代刚发的溢价上。`,
+              '决策时先问：还在不在补、补的范围有没有扩大、溢价还在不在、有没有变成通货补。有热度可以盯，不能买。更好看只作设计备注。',
+              JSON.stringify({
+                series: 'zsiga_gen3',
+                generation: 3,
+                gen1: '向往之处',
+                cognition_frozen_at: freezeDate,
+                released_about: '2026-09-24',
+                released_caliber: 'user_said_two_days_ago',
+                premium: 'some_unspecified',
+                heat: true,
+                looks_better_than_gen1: 'subjective',
+                replenishment: {
+                  as_of: freezeDate,
+                  channels: ['some_offline_stores'],
+                  status: 'partial_offline_restock_not_currency_supply'
+                }
+              }),
+              `${freezeMarker}。用户口述整理；持续跟踪补货，不改写后续结局。`
+            ]
+          );
+        }
+
+        const existingSeriesProfile = await dbGet<{ id: number }>(
+          db,
+          `SELECT id FROM category_profiles
+           WHERE category_name = ?
+             AND COALESCE(object_name, '') = ?
+             AND COALESCE(variant_name, '') = ''
+             AND COALESCE(is_deleted, 0) = 0
+           LIMIT 1`,
+          [categoryName, seriesName]
+        );
+        if (!existingSeriesProfile) {
+          await dbRun(
+            db,
+            `INSERT INTO category_profiles
+              (category_id, category_name, object_name, variant_name, business_style, operation_scene,
+               supply_mode, sales_mode, price_pattern, risk_points, operating_discipline, data_caliber,
+               experience_notes, decision_notes, extra_json, status, note, is_deleted, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+            [
+              category.id,
+              categoryName,
+              seriesName,
+              '',
+              'mixed',
+              'online_offline',
+              'Zsiga 1/8可动人偶线。一代向往之处已经历阶段性大补，不是通货补，现在做底仓分层占位。三代遇见的惊喜刚发，线下部分门店还在补。各代供给分开看，不把一代停补后的稀缺写成三代刚发也稀缺。',
+              '一代有真实消耗和长期承接，已经验证过。三代当前有热度、有一定溢价、主观比一代好看一点，仍只是新品窗口，不是同一套仓位逻辑。',
+              '一代看停补后的供给压力锚；三代看首发溢价还在不在、线下补货扩不扩大。两套价格不能混用。',
+              '换代更好看和有热度，都不能授权加仓。三代若被养成下一个通货主力，溢价会被供给打穿。',
+              '一代继续按已有A仓纪律；三代只盯。不把泡泡玛特升回主做。',
+              `${freezeMarker}。系列画像只固定代际关系：向往之处=一代，遇见的惊喜=三代。二代未点名。`,
+              `${freezeMarker}。系列拆代看供给，不把一代A仓复制到三代。`,
+              '先认代，再认供给。三代没走完补货观察前，不加仓。',
+              JSON.stringify({
+                series: 'zsiga',
+                cognition_frozen_at: freezeDate,
+                gen1: '向往之处',
+                gen3: '遇见的惊喜'
+              }),
+              `${freezeMarker}。对象级画像；单款另有变体画像。`
+            ]
+          );
+        }
+      }
+
+      if (await migrationTableExists(db, 'product_archives')) {
+        const archiveName = `${seriesName} / ${variantName}`;
+        const existingArchive = await dbGet<{ id: number }>(
+          db,
+          `SELECT id FROM product_archives
+           WHERE archive_name = ? AND COALESCE(is_deleted, 0) = 0
+           LIMIT 1`,
+          [archiveName]
+        );
+        let archiveId = existingArchive?.id;
+        if (!archiveId) {
+          await dbRun(
+            db,
+            `INSERT INTO product_archives
+              (category_id, category_name, object_id, object_name, variant_id, variant_name,
+               archive_name, position_level, one_sentence_judgment, raw_description,
+               issue_info, theme_design, trading_process, risk_basis, experience_note,
+               pending_questions, confidence, status, note, is_deleted, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+            [
+              category.id,
+              categoryName,
+              series.id,
+              series.name,
+              variant.id,
+              variant.name,
+              archiveName,
+              'watch',
+              '嘎子姐第三代，刚发有热度也有溢价，线下部分门店还在补，只盯不买。',
+              'Zsiga 三代 1/8。用户口述前两天发布，有热度、有一定溢价，主观上比一代好看一点。原价和回收价未报。',
+              '约2026-09-24前后发布，精确发售日待核。截止2026-09-26线下部分门店还在补。部分门店补货不等于通货补，也不等于已经停补。',
+              '用户主观判断比一代向往之处好看一点。这是设计观感，不是硬度和承接证据。',
+              '千岛只采1/8可动人偶。群里热度和溢价用来判断当下有没有人追，不用来开仓。',
+              '新品溢价和更好看都会在补货扩大时先被打。一代向往之处能做A仓，是因为已经走过阶段性大补并且没有通货补；三代还在这个观察的起点。',
+              `${freezeMarker}。有热度、有一定溢价、线下部分门店还在补、比一代好看一点。后续补货扩大、停补或破发都只追加带日期记录，不改写V0.1。`,
+              '精确发售日、原价、回收价、线下补货会不会扩大、会不会上线放开卖、会不会变成通货补。补货变化写在价格备注里。',
+              'rough',
+              `${freezeMarker}。用户口述建档，后续只追加带日期变化，不改写V0.1。`
+            ]
+          );
+          const created = await dbGet<{ id: number }>(
+            db,
+            'SELECT id FROM product_archives WHERE archive_name = ? AND COALESCE(is_deleted, 0) = 0 LIMIT 1',
+            [archiveName]
+          );
+          archiveId = created?.id;
+        }
+
+        if (archiveId && (await migrationTableExists(db, 'product_archive_stages'))) {
+          const stages = [
+            {
+              name: '首发窗口',
+              time: '约2026-09-24前后至2026-09-26',
+              type: '新品首发 / 溢价观察',
+              summary: '前两天发布的嘎子姐第三代。有热度，有一定溢价，主观比一代好看一点。原价和精确发售日未留存，不补造。',
+              actionRule: '新品溢价只观察，不把更好看和有热度写成买入许可。',
+              evidence: '用户2026-09-26口述。无本地价格序列，不向日线补写。',
+              sortOrder: 1
+            },
+            {
+              name: '线下部分门店补货',
+              time: '至2026-09-26',
+              type: '阶段性补货 / 未补死',
+              summary: '现在还在线下部分门店补。范围有限，不是线上线下长期随处可买的通货补。会不会扩大待看。',
+              actionRule: '跟踪补货范围。部分门店有货时不动；一旦扩大或变通货补，按供给结构处理，不再用首发热度护航。',
+              evidence: '用户当天口述当前供给。未写入日线。',
+              sortOrder: 2
+            }
+          ];
+          for (const stage of stages) {
+            const existingStage = await dbGet<{ id: number }>(
+              db,
+              `SELECT id FROM product_archive_stages
+               WHERE archive_id = ? AND stage_name = ? AND COALESCE(is_deleted, 0) = 0
+               LIMIT 1`,
+              [archiveId, stage.name]
+            );
+            if (existingStage) continue;
+            await dbRun(
+              db,
+              `INSERT INTO product_archive_stages
+                (archive_id, stage_name, time_text, stage_type, stage_summary, action_rule,
+                 evidence_note, confidence, sort_order, note, is_deleted, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'rough', ?, ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+              [
+                archiveId,
+                stage.name,
+                stage.time,
+                stage.type,
+                stage.summary,
+                stage.actionRule,
+                stage.evidence,
+                stage.sortOrder,
+                '不向价格历史补写虚构日期或精确价格。'
+              ]
+            );
+          }
+        }
+      }
+
+      if (await migrationTableExists(db, 'product_archives')) {
+        const gen1 = await dbGet<{ id: number; experience_note: string; pending_questions: string }>(
+          db,
+          `SELECT id, experience_note, pending_questions
+           FROM product_archives
+           WHERE category_name = ?
+             AND object_name = ?
+             AND COALESCE(variant_name, '') IN ('向往之处', '嘎子姐', '')
+             AND COALESCE(is_deleted, 0) = 0
+           ORDER BY CASE WHEN variant_name = '向往之处' THEN 0 ELSE 1 END, id
+           LIMIT 1`,
+          [categoryName, seriesName]
+        );
+        if (gen1) {
+          await dbRun(
+            db,
+            `UPDATE product_archives
+             SET experience_note = ?,
+                 pending_questions = ?,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?`,
+            [
+              appendOnce(
+                gen1.experience_note,
+                '2026-09-26补充：嘎子姐第三代遇见的惊喜已发',
+                '2026-09-26补充：嘎子姐第三代遇见的惊喜已发。前两天左右上的，有热度、有一定溢价，线下部分门店还在补，主观比一代好看一点。一代已有的底仓分层不自动复制到三代；三代只盯供给和溢价。'
+              ),
+              appendOnce(
+                gen1.pending_questions,
+                '三代遇见的惊喜补货范围',
+                '三代遇见的惊喜待确认：线下部分门店补货会不会扩大、会不会上线放开卖、溢价能维持多久。不把这些问题写回一代底仓条件。'
+              ),
+              gen1.id
+            ]
+          );
+        }
+      }
+
+      if (await migrationTableExists(db, 'category_profiles')) {
+        const parent = await dbGet<{ id: number; experience_notes: string; decision_notes: string }>(
+          db,
+          `SELECT id, experience_notes, decision_notes
+           FROM category_profiles
+           WHERE category_name = ?
+             AND COALESCE(object_name, '') = ''
+             AND COALESCE(variant_name, '') = ''
+             AND COALESCE(is_deleted, 0) = 0
+           ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END, id
+           LIMIT 1`,
+          [categoryName]
+        );
+        if (parent) {
+          await dbRun(
+            db,
+            `UPDATE category_profiles
+             SET experience_notes = ?,
+                 decision_notes = ?,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?`,
+            [
+              appendOnce(
+                parent.experience_notes,
+                '2026-09-26补充Zsiga三代遇见的惊喜',
+                '2026-09-26补充Zsiga三代遇见的惊喜：嘎子姐第三代，前两天左右发布，有热度、有一定溢价，线下部分门店还在补，主观比一代好看一点。只盯不买。原价回收价未报，不补造。'
+              ),
+              appendOnce(
+                parent.decision_notes,
+                'Zsiga三代先看线下补货范围',
+                'Zsiga三代遇见的惊喜先看线下补货范围和溢价还在不在，不把一代向往之处的A仓套过去。'
+              ),
+              parent.id
+            ]
+          );
+        }
+      }
+    }
+  },
+  {
+    id: '20260927_001_add_mokoko_find_labubu',
+    name: 'Add 寻找LABUBU系列 as a MOKOKO系列 variant with Qiandao 搪胶毛绒吊卡 scrape',
+    run: async (db: any) => {
+      if (!(await migrationTableExists(db, 'categories'))) return;
+      if (!(await migrationTableExists(db, 'objects'))) return;
+      if (!(await migrationTableExists(db, 'variants'))) return;
+
+      const categoryName = '泡泡玛特';
+      const seriesName = 'MOKOKO系列';
+      const variantName = '寻找LABUBU系列';
+      const spuId = '1037744361988697639';
+      const query = '寻找LABUBU系列MOKOKO搪胶毛绒吊卡';
+      const externalName = '寻找LABUBU系列MOKOKO搪胶毛绒吊卡';
+      const note = '新品采集：千岛 寻找LABUBU系列MOKOKO搪胶毛绒吊卡。不要误接陶瓷杯、爆米花桶、系列周边。';
+      const leftoverObjectNames = ['寻找LABUBU', '寻找LABUBU系列'];
+
+      const category = await dbGet<{ id: number; name: string }>(
+        db,
+        'SELECT id, name FROM categories WHERE name = ?',
+        [categoryName]
+      );
+      if (!category) return;
+
+      await dbRun(
+        db,
+        'UPDATE categories SET is_archived = 0, archived_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+        [category.id]
+      );
+      await dbRun(
+        db,
+        'INSERT OR IGNORE INTO objects (category_id, name, created_at, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)',
+        [category.id, seriesName]
+      );
+      const series = await dbGet<{ id: number; name: string }>(
+        db,
+        'SELECT id, name FROM objects WHERE category_id = ? AND name = ?',
+        [category.id, seriesName]
+      );
+      if (!series) throw new Error('Failed to ensure object MOKOKO系列');
+      await dbRun(
+        db,
+        'UPDATE objects SET is_archived = 0, archived_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+        [series.id]
+      );
+
+      await dbRun(
+        db,
+        'INSERT OR IGNORE INTO variants (object_id, name, created_at, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)',
+        [series.id, variantName]
+      );
+      const variant = await dbGet<{ id: number; name: string }>(
+        db,
+        'SELECT id, name FROM variants WHERE object_id = ? AND name = ?',
+        [series.id, variantName]
+      );
+      if (!variant) throw new Error('Failed to ensure variant 寻找LABUBU系列');
+      await dbRun(
+        db,
+        'UPDATE variants SET is_archived = 0, archived_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+        [variant.id]
+      );
+
+      for (const leftoverName of leftoverObjectNames) {
+        const leftover = await dbGet<{ id: number; name: string }>(
+          db,
+          'SELECT id, name FROM objects WHERE category_id = ? AND name = ?',
+          [category.id, leftoverName]
+        );
+        if (!leftover || leftover.id === series.id) continue;
+
+        await dbRun(
+          db,
+          `UPDATE variants
+           SET is_archived = 1,
+               archived_at = COALESCE(archived_at, CURRENT_TIMESTAMP),
+               updated_at = CURRENT_TIMESTAMP
+           WHERE object_id = ? AND COALESCE(is_archived, 0) = 0`,
+          [leftover.id]
+        );
+        if (await migrationTableExists(db, 'price_records')) {
+          await dbRun(
+            db,
+            `UPDATE price_records
+             SET object_name = ?, variant = ?, updated_at = CURRENT_TIMESTAMP
+             WHERE category = ? AND object_name = ? AND COALESCE(variant, '') IN ('', ?)`,
+            [seriesName, variantName, categoryName, leftoverName, variantName]
+          );
+        }
+        if (await migrationTableExists(db, 'source_mappings')) {
+          await dbRun(
+            db,
+            `UPDATE source_mappings
+             SET object_id = ?,
+                 variant_id = ?,
+                 object_name = ?,
+                 variant_name = ?,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE object_id = ?`,
+            [series.id, variant.id, seriesName, variantName, leftover.id]
+          );
+        }
+        await dbRun(
+          db,
+          `UPDATE objects
+           SET is_archived = 1,
+               archived_at = COALESCE(archived_at, CURRENT_TIMESTAMP),
+               updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?`,
+          [leftover.id]
+        );
+      }
+
+      if (await migrationTableExists(db, 'source_mappings')) {
+        const externalMeta = JSON.stringify({ query, spu_id: spuId });
+        await dbRun(
+          db,
+          `INSERT OR IGNORE INTO source_mappings
+             (source_key, source_name, external_key, external_name, external_meta_json,
+              category_id, object_id, variant_id, category_name, object_name, variant_name,
+              status, note)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            'qiandao_popmart',
+            '千岛泡泡玛特',
+            spuId,
+            externalName,
+            externalMeta,
+            category.id,
+            series.id,
+            variant.id,
+            category.name,
+            series.name,
+            variant.name,
+            'enabled',
+            note
+          ]
+        );
+        await dbRun(
+          db,
+          `UPDATE source_mappings
+           SET source_name = ?,
+               external_name = ?,
+               external_meta_json = ?,
+               category_id = ?,
+               object_id = ?,
+               variant_id = ?,
+               category_name = ?,
+               object_name = ?,
+               variant_name = ?,
+               status = CASE WHEN status = 'disabled' THEN status ELSE 'enabled' END,
+               note = CASE WHEN status = 'disabled' THEN note ELSE ? END,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE source_key = ? AND external_key = ?`,
+          [
+            '千岛泡泡玛特',
+            externalName,
+            externalMeta,
+            category.id,
+            series.id,
+            variant.id,
+            category.name,
+            series.name,
+            variant.name,
+            note,
+            'qiandao_popmart',
+            spuId
+          ]
+        );
+      }
+    }
+  },
+  {
+    id: '20260927_002_seed_sony_camera_category',
+    name: 'Seed Sony camera category with FE 600mm F6.3 GM, FX5 and RX10 V plus official price anchors and a daily quote todo',
+    run: async (db: any) => {
+      if (!(await migrationTableExists(db, 'categories'))) return;
+      if (!(await migrationTableExists(db, 'objects'))) return;
+      if (!(await migrationTableExists(db, 'variants'))) return;
+
+      const categoryName = '索尼相机';
+      let category = await dbGet<{ id: number }>(
+        db,
+        "SELECT id FROM categories WHERE name = ?",
+        [categoryName]
+      );
+      if (!category) {
+        await dbRun(
+          db,
+          "INSERT INTO categories (name, created_at, updated_at) VALUES (?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+          [categoryName]
+        );
+        category = await dbGet<{ id: number }>(
+          db,
+          "SELECT id FROM categories WHERE name = ?",
+          [categoryName]
+        );
+      }
+      if (!category) return;
+
+      await dbRun(
+        db,
+        "UPDATE categories SET tracking_mode = 'active', is_archived = 0, archived_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        [category.id]
+      );
+
+      const objectsWithVariants: Array<{ objectName: string; variants: string[] }> = [
+        { objectName: '索尼 FE 600mm F6.3 GM OSS', variants: ['国行', '港版'] },
+        { objectName: '索尼 FX5 单机', variants: ['国行'] },
+        { objectName: '索尼 RX10 V', variants: ['国行', '港版'] }
+      ];
+
+      const objectIds: Record<string, number> = {};
+      const variantIds: Record<string, { id: number; name: string }> = {};
+      for (const item of objectsWithVariants) {
+        await dbRun(
+          db,
+          "INSERT OR IGNORE INTO objects (category_id, name, created_at, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+          [category.id, item.objectName]
+        );
+        const object = await dbGet<{ id: number }>(
+          db,
+          "SELECT id FROM objects WHERE category_id = ? AND name = ?",
+          [category.id, item.objectName]
+        );
+        if (!object) throw new Error(`Failed to ensure object ${item.objectName}`);
+        objectIds[item.objectName] = object.id;
+
+        await dbRun(
+          db,
+          "UPDATE objects SET is_archived = 0, archived_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+          [object.id]
+        );
+
+        for (const variantName of item.variants) {
+          await dbRun(
+            db,
+            "INSERT OR IGNORE INTO variants (object_id, name, created_at, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            [object.id, variantName]
+          );
+          const variant = await dbGet<{ id: number; name: string }>(
+            db,
+            "SELECT id, name FROM variants WHERE object_id = ? AND name = ?",
+            [object.id, variantName]
+          );
+          if (!variant) throw new Error(`Failed to ensure variant ${item.objectName} / ${variantName}`);
+          variantIds[`${item.objectName} / ${variantName}`] = variant;
+
+          await dbRun(
+            db,
+            "UPDATE variants SET is_archived = 0, archived_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE object_id = ? AND name = ?",
+            [object.id, variantName]
+          );
+        }
+      }
+
+      if (await migrationTableExists(db, 'original_price_records')) {
+        const seedOriginalPrice = async (input: {
+          objectName: string;
+          variantName: string;
+          price: number;
+          effectiveDate: string;
+          reason: string;
+        }) => {
+          const variant = variantIds[`${input.objectName} / ${input.variantName}`];
+          if (!variant) throw new Error(`Missing variant for original price anchor: ${input.objectName} / ${input.variantName}`);
+          const existing = await dbGet<{ id: number }>(
+            db,
+            `SELECT id FROM original_price_records
+             WHERE category_id = ?
+               AND object_id = ?
+               AND COALESCE(variant_id, 0) = ?
+               AND original_price = ?
+               AND effective_date = ?
+               AND COALESCE(is_deleted, 0) = 0
+             LIMIT 1`,
+            [category.id, objectIds[input.objectName], variant.id, input.price, input.effectiveDate]
+          );
+          if (existing) return;
+          await dbRun(
+            db,
+            `INSERT INTO original_price_records
+              (category_id, category_name, object_id, object_name, variant_id, variant_name,
+               original_price, effective_date, source, reason, note, is_deleted, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+            [
+              category.id,
+              categoryName,
+              objectIds[input.objectName],
+              input.objectName,
+              variant.id,
+              variant.name,
+              input.price,
+              input.effectiveDate,
+              '索尼中国官方建议零售价',
+              input.reason,
+              `索尼中国官方建议零售价：${input.objectName}（${input.variantName}）${input.price} 元，${input.effectiveDate} 发布。`
+            ]
+          );
+        };
+
+        await seedOriginalPrice({
+          objectName: '索尼 FE 600mm F6.3 GM OSS',
+          variantName: '国行',
+          price: 24999,
+          effectiveDate: '2026-09-15',
+          reason: 'FE 600mm F6.3 GM OSS（SEL600F63GM）国行官方建议零售价，2026-09-15 发布'
+        });
+        await seedOriginalPrice({
+          objectName: '索尼 FX5 单机',
+          variantName: '国行',
+          price: 32000,
+          effectiveDate: '2026-07-22',
+          reason: 'FX5 单机（ILME-FX5B）国行官方建议零售价，2026-07-22 发布'
+        });
+        await seedOriginalPrice({
+          objectName: '索尼 RX10 V',
+          variantName: '国行',
+          price: 15199,
+          effectiveDate: '2026-07-09',
+          reason: 'RX10 V（DSC-RX10M5）国行官方建议零售价，2026-07-09 发布'
+        });
+      }
+
+      if (await migrationTableExists(db, 'manual_todos')) {
+        const todoTitle = '建立索尼相机档口日报价渠道';
+        const existingTodo = await dbGet<{ id: number }>(
+          db,
+          "SELECT id FROM manual_todos WHERE title = ?",
+          [todoTitle]
+        );
+        if (!existingTodo) {
+          await dbRun(
+            db,
+            `INSERT INTO manual_todos
+              (title, priority, status, due_date, note, domain, workspace, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+            [
+              todoTitle,
+              'high',
+              'pending',
+              null,
+              '从相机回收档口/圈内朋友圈每日获取 FE 600 F6.3 / FX5 / RX10 V 国行港版回收报价，走 POST /api/price-records（type=manual）录入，品类：索尼相机。',
+              'business',
+              'business'
+            ]
+          );
+        }
+      }
+
+      if (await migrationTableExists(db, 'audit_logs')) {
+        await dbRun(
+          db,
+          `INSERT OR IGNORE INTO audit_logs
+            (id, timestamp, module, action, target, status, detail, entity_id,
+             path, domain, workspace, created_at, updated_at)
+           VALUES ('audit-seed-sony-camera-category-20260927', CURRENT_TIMESTAMP,
+                   '主数据', 'create', '索尼相机', 'success', ?, ?,
+                   '/master-data', 'business', 'business',
+                   CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [
+            JSON.stringify({
+              category: categoryName,
+              trackingMode: 'active',
+              objects: objectsWithVariants.map((item) => ({
+                name: item.objectName,
+                variants: item.variants
+              })),
+              officialPriceAnchors: [
+                { object: '索尼 FE 600mm F6.3 GM OSS', variant: '国行', price: 24999, effectiveDate: '2026-09-15' },
+                { object: '索尼 FX5 单机', variant: '国行', price: 32000, effectiveDate: '2026-07-22' },
+                { object: '索尼 RX10 V', variant: '国行', price: 15199, effectiveDate: '2026-07-09' }
+              ],
+              source: '索尼中国官方建议零售价'
+            }),
+            String(category.id)
+          ]
+        );
+      }
+    }
   }
 ];
 

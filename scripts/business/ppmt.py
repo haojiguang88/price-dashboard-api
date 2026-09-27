@@ -68,6 +68,12 @@ SOURCE_TARGETS = [
     },
     {
         "object": "MOKOKO系列",
+        "variant": "寻找LABUBU系列",
+        "query": "寻找LABUBU系列MOKOKO搪胶毛绒吊卡",
+        "spu_id": "1037744361988697639",
+    },
+    {
+        "object": "MOKOKO系列",
         "variant": "大春花",
         "query": "MOKOKO 春花",
         "spu_id": "704852597684613737",
