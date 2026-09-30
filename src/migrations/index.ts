@@ -12794,6 +12794,518 @@ ${marker}：大网红本人亲自上阵、加价卖货。币圈一批大佬反�
         );
       }
     }
+  },
+  {
+    id: '20260928_001_seed_riftbound_category',
+    name: 'Seed Riftbound trading card category with anniversary gift box, official price anchor and Qiandao quote todo',
+    run: async (db: any) => {
+      if (!(await migrationTableExists(db, 'categories'))) return;
+      if (!(await migrationTableExists(db, 'objects'))) return;
+      if (!(await migrationTableExists(db, 'variants'))) return;
+
+      const categoryName = '符文战场卡牌';
+      let category = await dbGet<{ id: number }>(
+        db,
+        "SELECT id FROM categories WHERE name = ?",
+        [categoryName]
+      );
+      if (!category) {
+        await dbRun(
+          db,
+          "INSERT INTO categories (name, created_at, updated_at) VALUES (?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+          [categoryName]
+        );
+        category = await dbGet<{ id: number }>(
+          db,
+          "SELECT id FROM categories WHERE name = ?",
+          [categoryName]
+        );
+      }
+      if (!category) return;
+
+      await dbRun(
+        db,
+        "UPDATE categories SET tracking_mode = 'active', is_archived = 0, archived_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        [category.id]
+      );
+
+      const objectName = '一周年纪念套装礼盒';
+      const variantName = '简中版';
+
+      await dbRun(
+        db,
+        "INSERT OR IGNORE INTO objects (category_id, name, created_at, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+        [category.id, objectName]
+      );
+      const object = await dbGet<{ id: number }>(
+        db,
+        "SELECT id FROM objects WHERE category_id = ? AND name = ?",
+        [category.id, objectName]
+      );
+      if (!object) throw new Error(`Failed to ensure object ${objectName}`);
+
+      await dbRun(
+        db,
+        "UPDATE objects SET is_archived = 0, archived_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        [object.id]
+      );
+
+      await dbRun(
+        db,
+        "INSERT OR IGNORE INTO variants (object_id, name, created_at, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+        [object.id, variantName]
+      );
+      const variant = await dbGet<{ id: number; name: string }>(
+        db,
+        "SELECT id, name FROM variants WHERE object_id = ? AND name = ?",
+        [object.id, variantName]
+      );
+      if (!variant) throw new Error(`Failed to ensure variant ${objectName} / ${variantName}`);
+
+      await dbRun(
+        db,
+        "UPDATE variants SET is_archived = 0, archived_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE object_id = ? AND name = ?",
+        [object.id, variantName]
+      );
+
+      if (await migrationTableExists(db, 'original_price_records')) {
+        const existing = await dbGet<{ id: number }>(
+          db,
+          `SELECT id FROM original_price_records
+           WHERE category_id = ?
+             AND object_id = ?
+             AND COALESCE(variant_id, 0) = ?
+             AND original_price = ?
+             AND effective_date = ?
+             AND COALESCE(is_deleted, 0) = 0
+           LIMIT 1`,
+          [category.id, object.id, variant.id, 358, '2026-09-28']
+        );
+        if (!existing) {
+          await dbRun(
+            db,
+            `INSERT INTO original_price_records
+              (category_id, category_name, object_id, object_name, variant_id, variant_name,
+               original_price, effective_date, source, reason, note, is_deleted, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+            [
+              category.id,
+              categoryName,
+              object.id,
+              objectName,
+              variant.id,
+              variant.name,
+              358,
+              '2026-09-28',
+              '拳头官方商城建议零售价',
+              '《符文战场》（Riftbound）简中版一周年纪念套装礼盒官方定价，2026-09-28 正式发售',
+              '拳头官方商城建议零售价：一周年纪念套装礼盒（简中版）358 元，2026-09-28 发售；每人限购 2 盒（供给上限靠限购）；含周年纪念卡 + 36 张闪卡符文卡 + 进阶补充包。'
+            ]
+          );
+        }
+      }
+
+      if (await migrationTableExists(db, 'manual_todos')) {
+        const todoTitle = '监控符文战场礼盒千岛盘口';
+        const existingTodo = await dbGet<{ id: number }>(
+          db,
+          "SELECT id FROM manual_todos WHERE title = ?",
+          [todoTitle]
+        );
+        if (!existingTodo) {
+          await dbRun(
+            db,
+            `INSERT INTO manual_todos
+              (title, priority, status, due_date, note, domain, workspace, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+            [
+              todoTitle,
+              'high',
+              'pending',
+              null,
+              '上千岛查看一周年纪念套装礼盒求购价/闪购价（官方锚 358 元）；纪律：快进快出不留仓，官方加印公告 = 立即离场信号；后续 T1 主题礼盒等新发售按官宣补充 SKU。品类：符文战场卡牌。',
+              'business',
+              'business'
+            ]
+          );
+        }
+      }
+
+      if (await migrationTableExists(db, 'audit_logs')) {
+        await dbRun(
+          db,
+          `INSERT OR IGNORE INTO audit_logs
+            (id, timestamp, module, action, target, status, detail, entity_id,
+             path, domain, workspace, created_at, updated_at)
+           VALUES ('audit-seed-riftbound-category-20260928', CURRENT_TIMESTAMP,
+                   '主数据', 'create', '符文战场卡牌', 'success', ?, ?,
+                   '/master-data', 'business', 'business',
+                   CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [
+            JSON.stringify({
+              category: categoryName,
+              trackingMode: 'active',
+              objects: [{ name: objectName, variants: [variantName] }],
+              officialPriceAnchors: [
+                { object: objectName, variant: variantName, price: 358, effectiveDate: '2026-09-28' }
+              ],
+              source: '拳头官方商城建议零售价'
+            }),
+            String(category.id)
+          ]
+        );
+      }
+    }
+  },
+  {
+    id: '20260930_001_seed_oppo_vivo_ota_activation_ban',
+    name: 'Freeze OPPO/VIVO unactivated-phone pass-on ban after OTA activation chargebacks',
+    run: async (db: any) => {
+      if (!(await migrationTableExists(db, 'categories'))) return;
+      if (!(await migrationTableExists(db, 'category_profiles'))) return;
+
+      const freezeDate = '2026-09-30';
+      const freezeMarker = `认知冻结日：${freezeDate}`;
+      const categoryNames = ['OPPO', 'VIVO'];
+
+      const appendOnce = (current: unknown, marker: string, addition: string) => {
+        const text = String(current || '').trim();
+        if (text.includes(marker)) return text;
+        return [text, addition].filter(Boolean).join('\n\n');
+      };
+
+      const profileText = {
+        supplyMode: '未激活机看起来能当原装过手，但激活状态可能事后被空中改掉。这不是当时验机一定能看见的供货瑕疵。',
+        salesMode: '卖给档口时按原装收；过几天空中激活后，档口会按已激活机来追，要求退钱。当时显示原装，不够作为出货确认。',
+        pricePattern: '这次不写价。差价再好看也不能覆盖事后追退。潮收汇报价只记账，不授权过手。',
+        riskPoints: `${freezeMarker}。OPPO、VIVO 未激活机撸出去时显示原装，卖了过几天可能被空中激活，人家档口会找上门退钱。这是事后才爆的坑，不是当时屏幕上能验掉的。`,
+        operatingDiscipline: `${freezeMarker}。这类未激活机暂时不能撸。后续官方/渠道政策还不清楚，政策清楚前不当过手货，也不因为当时显示原装就铺货。`,
+        dataCaliber: '2026-09-30用户口述。没有点具体SKU和价格，不补造机型和报价。潮收汇可以继续记价，但不能把有报价写成可以撸。',
+        experienceNotes: '撸的时候显示原装；卖了过几天空中激活，档口追退。太坑。同一条坑 OPPO 和 VIVO 都有。',
+        decisionNotes: '决策时先当不能做。政策变化只追加带日期备注，不改写这次冻结，也不事后补写成已经可以撸或永远不能撸。',
+        extra: {
+          cognition_frozen_at: freezeDate,
+          topic: 'ota_activation_after_pass_on',
+          brands: ['OPPO', 'VIVO'],
+          can_flip: false,
+          reason: 'shows_original_then_ota_activates_then_stall_chargeback',
+          policy_status: 'unclear',
+          specific_skus: 'not_named'
+        },
+        note: `${freezeMarker}。用户口述整理：未激活机暂时不能撸，后续政策不清楚。`
+      };
+
+      for (const categoryName of categoryNames) {
+        const category = await dbGet<{ id: number; name: string }>(
+          db,
+          'SELECT id, name FROM categories WHERE name = ?',
+          [categoryName]
+        );
+        if (!category) continue;
+
+        const existing = await dbGet<{
+          id: number;
+          supply_mode: string | null;
+          sales_mode: string | null;
+          price_pattern: string | null;
+          risk_points: string | null;
+          operating_discipline: string | null;
+          data_caliber: string | null;
+          experience_notes: string | null;
+          decision_notes: string | null;
+          extra_json: string | null;
+          note: string | null;
+        }>(
+          db,
+          `SELECT id, supply_mode, sales_mode, price_pattern, risk_points, operating_discipline,
+                  data_caliber, experience_notes, decision_notes, extra_json, note
+           FROM category_profiles
+           WHERE category_name = ?
+             AND COALESCE(object_name, '') = ''
+             AND COALESCE(variant_name, '') = ''
+             AND COALESCE(is_deleted, 0) = 0
+           ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END, id
+           LIMIT 1`,
+          [categoryName]
+        );
+
+        if (!existing) {
+          await dbRun(
+            db,
+            `INSERT INTO category_profiles
+              (category_id, category_name, object_name, variant_name, business_style, operation_scene,
+               supply_mode, sales_mode, price_pattern, risk_points, operating_discipline, data_caliber,
+               experience_notes, decision_notes, extra_json, status, note, is_deleted, created_at, updated_at)
+             VALUES (?, ?, '', '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+            [
+              category.id,
+              categoryName,
+              'channel_spread',
+              'observe_only',
+              profileText.supplyMode,
+              profileText.salesMode,
+              profileText.pricePattern,
+              profileText.riskPoints,
+              profileText.operatingDiscipline,
+              profileText.dataCaliber,
+              profileText.experienceNotes,
+              profileText.decisionNotes,
+              JSON.stringify(profileText.extra),
+              profileText.note
+            ]
+          );
+          continue;
+        }
+
+        let extra: Record<string, unknown> = {};
+        try {
+          extra = JSON.parse(String(existing.extra_json || '{}')) as Record<string, unknown>;
+        } catch {
+          extra = {};
+        }
+        if (!extra.cognition_frozen_at) extra.cognition_frozen_at = freezeDate;
+        if (!extra.topic) extra.topic = 'ota_activation_after_pass_on';
+
+        await dbRun(
+          db,
+          `UPDATE category_profiles
+           SET business_style = CASE WHEN COALESCE(business_style, '') = '' THEN ? ELSE business_style END,
+               operation_scene = CASE WHEN COALESCE(operation_scene, '') = '' THEN ? ELSE operation_scene END,
+               supply_mode = ?,
+               sales_mode = ?,
+               price_pattern = ?,
+               risk_points = ?,
+               operating_discipline = ?,
+               data_caliber = ?,
+               experience_notes = ?,
+               decision_notes = ?,
+               extra_json = ?,
+               note = ?,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?`,
+          [
+            'channel_spread',
+            'observe_only',
+            appendOnce(existing.supply_mode, freezeMarker, profileText.supplyMode),
+            appendOnce(existing.sales_mode, freezeMarker, profileText.salesMode),
+            appendOnce(existing.price_pattern, freezeMarker, profileText.pricePattern),
+            appendOnce(existing.risk_points, freezeMarker, profileText.riskPoints),
+            appendOnce(existing.operating_discipline, freezeMarker, profileText.operatingDiscipline),
+            appendOnce(existing.data_caliber, freezeMarker, profileText.dataCaliber),
+            appendOnce(existing.experience_notes, freezeMarker, profileText.experienceNotes),
+            appendOnce(existing.decision_notes, freezeMarker, profileText.decisionNotes),
+            JSON.stringify(extra),
+            appendOnce(existing.note, freezeMarker, profileText.note),
+            existing.id
+          ]
+        );
+      }
+    }
+  },
+  {
+    id: '20260930_002_elevate_popmart_secondary_zsiga_only',
+    name: 'Elevate Pop Mart one tier to secondary; only Zsiga small-lot remains executable',
+    run: async (db: any) => {
+      if (!(await migrationTableExists(db, 'annual_plan_items'))) return;
+
+      const changeDate = '2026-09-30';
+      const freezeMarker = `认知冻结日：${changeDate}`;
+      const appendOnce = (current: unknown, marker: string, addition: string) => {
+        const text = String(current || '').trim();
+        if (text.includes(marker)) return text;
+        return [text, addition].filter(Boolean).join('\n\n');
+      };
+
+      const trackThesisAdd = `${freezeMarker}。赛道从试错升到次主线，因为目录和价格系统开始干活，不用凭记忆乱干。执行只限嘎子姐/向往之处小仓。哭娃、迪士尼、MOKOKO、福袋、Labubu通货补等其它品类暂时还不行，不跟升、不授权开仓。不把泡泡玛特整体升回主做。`;
+      const trackReasonAdd = `${freezeMarker}。嘎子姐可以干了，虽然是小仓。整体从已降级恢复为生效中，动作改为只观察，避免其它品类被当成可以跟升。`;
+      const trackPositionAdd = `${freezeMarker}。赛道升档不等于全品可做。唯一执行口子是 Zsiga / 向往之处小仓。其它泡泡玛特对象继续不主动加仓。`;
+      const trackNoteAdd = `${freezeMarker}。升一档到次主线/只观察。系统开始干活。唯一可执行对象是向往之处小仓。`;
+      const trackResumeAdd = `${freezeMarker}。其它品类要恢复执行，必须单独升对象，不因赛道升档自动跟升。`;
+
+      const zsigaThesisAdd = `${freezeMarker}。对象从试错升到次主线，仍是轻仓参与/分层小仓。赛道升档不等于全品可做。不把泡泡玛特整体升回主做。`;
+      const zsigaReasonAdd = `${freezeMarker}。嘎子姐可以干了，虽然是小仓。分层规则仍按 2026-09-12：禁止一次打满，520+ 第一层、500 附近第二层。其它品类暂时还不行。`;
+      const zsigaNoteAdd = `${freezeMarker}。对象与赛道同升次主线。执行仍只限本对象小仓，禁止一次打满。其它泡泡玛特品类不授权。`;
+
+      const insertChange = async (
+        itemId: number,
+        oldRole: string,
+        newRole: string,
+        oldAction: string,
+        newAction: string,
+        oldStatus: string,
+        newStatus: string,
+        reason: string,
+        decisionNote: string,
+        nextAction: string
+      ) => {
+        if (!(await migrationTableExists(db, 'annual_plan_item_changes'))) return;
+        const existingChange = await dbGet<{ id: number }>(
+          db,
+          `SELECT id FROM annual_plan_item_changes
+           WHERE plan_item_id = ?
+             AND change_date = ?
+             AND COALESCE(reason, '') LIKE ?
+           LIMIT 1`,
+          [itemId, changeDate, `%${freezeMarker}%`]
+        );
+        if (existingChange) return;
+        await dbRun(
+          db,
+          `INSERT INTO annual_plan_item_changes
+            (plan_item_id, change_date, change_type, old_role, new_role, old_action, new_action,
+             old_status, new_status, reason, trigger_condition, evidence_note, decision_note,
+             next_action, created_at, updated_at)
+           VALUES (?, ?, '升级', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [
+            itemId,
+            changeDate,
+            oldRole,
+            newRole,
+            oldAction,
+            newAction,
+            oldStatus,
+            newStatus,
+            reason,
+            '嘎子姐小仓可执行，系统开始按目录和价格干活，其它泡泡玛特品类仍不可做。',
+            '用户 2026-09-30：年度计划把泡泡玛特提升一个档次；嘎子姐可以干了，虽然是小仓；其它品类暂时还不行。不改写 2026-09-12 分层价。',
+            decisionNote,
+            nextAction
+          ]
+        );
+      };
+
+      const trackItems = await dbAll<{
+        id: number;
+        current_role: string | null;
+        current_action: string | null;
+        current_status: string | null;
+        thesis: string | null;
+        current_reason: string | null;
+        position_rule: string | null;
+        resume_condition: string | null;
+        note: string | null;
+      }>(
+        db,
+        `SELECT id, current_role, current_action, current_status, thesis, current_reason,
+                position_rule, resume_condition, note
+         FROM annual_plan_items
+         WHERE category = '泡泡玛特'
+           AND object_name = '整体'
+           AND COALESCE(is_deleted, 0) = 0`
+      );
+
+      for (const item of trackItems) {
+        if (String(item.current_reason || '').includes(freezeMarker)) continue;
+        await dbRun(
+          db,
+          `UPDATE annual_plan_items
+           SET current_role = '次主线',
+               current_action = '只观察',
+               current_status = '生效中',
+               thesis = ?,
+               current_reason = ?,
+               position_rule = ?,
+               resume_condition = ?,
+               note = ?,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?`,
+          [
+            appendOnce(item.thesis, freezeMarker, trackThesisAdd),
+            appendOnce(item.current_reason, freezeMarker, trackReasonAdd),
+            appendOnce(item.position_rule, freezeMarker, trackPositionAdd),
+            appendOnce(item.resume_condition, freezeMarker, trackResumeAdd),
+            appendOnce(item.note, freezeMarker, trackNoteAdd),
+            item.id
+          ]
+        );
+        await insertChange(
+          item.id,
+          item.current_role || '试错',
+          '次主线',
+          item.current_action || '轻仓参与',
+          '只观察',
+          item.current_status || '已降级',
+          '生效中',
+          `${freezeMarker}。泡泡玛特赛道升一档到次主线/只观察。系统开始干活。执行只限向往之处小仓，其它品类不跟升，不升回主做。`,
+          '赛道升档是因为系统能干活、嘎子姐小仓可执行，不是全品授权。',
+          '赛道按只观察。真正动手只看 Zsiga / 向往之处分层小仓。'
+        );
+      }
+
+      const zsigaItems = await dbAll<{
+        id: number;
+        current_role: string | null;
+        current_action: string | null;
+        current_status: string | null;
+        thesis: string | null;
+        current_reason: string | null;
+        note: string | null;
+      }>(
+        db,
+        `SELECT id, current_role, current_action, current_status, thesis, current_reason, note
+         FROM annual_plan_items
+         WHERE category = '泡泡玛特'
+           AND object_name IN ('Zsiga', '嘎子姐', '向往之处')
+           AND COALESCE(is_deleted, 0) = 0`
+      );
+
+      for (const item of zsigaItems) {
+        if (String(item.current_reason || '').includes(freezeMarker)) continue;
+        await dbRun(
+          db,
+          `UPDATE annual_plan_items
+           SET current_role = '次主线',
+               current_action = '轻仓参与',
+               current_status = '生效中',
+               thesis = ?,
+               current_reason = ?,
+               note = ?,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?`,
+          [
+            appendOnce(item.thesis, freezeMarker, zsigaThesisAdd),
+            appendOnce(item.current_reason, freezeMarker, zsigaReasonAdd),
+            appendOnce(item.note, freezeMarker, zsigaNoteAdd),
+            item.id
+          ]
+        );
+        await insertChange(
+          item.id,
+          item.current_role || '试错',
+          '次主线',
+          item.current_action || '轻仓参与',
+          '轻仓参与',
+          item.current_status || '生效中',
+          '生效中',
+          `${freezeMarker}。嘎子姐/向往之处从试错升到次主线，仍轻仓参与。不改写 2026-09-12 分层价。不把泡泡玛特整体升回主做。`,
+          '对象升档不等于一次打满，也不等于其它泡泡玛特品类可做。',
+          '继续按分层小仓执行：第一层 520+ 少量占位，第二层 500 附近再加。禁止一次打满。'
+        );
+      }
+
+      if (await migrationTableExists(db, 'audit_logs')) {
+        await dbRun(
+          db,
+          `INSERT OR IGNORE INTO audit_logs
+            (id, timestamp, module, action, target, status, detail, entity_id,
+             path, domain, workspace, created_at, updated_at)
+           VALUES ('audit-popmart-elevate-secondary-zsiga-only-20260930', CURRENT_TIMESTAMP,
+                   '年度计划', 'update', '泡泡玛特', 'success', ?, NULL,
+                   '/plan/annual', 'business', 'business', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [
+            JSON.stringify({
+              change: 'elevate-popmart-one-tier-zsiga-only',
+              trackRole: '次主线',
+              trackAction: '只观察',
+              executableObject: 'Zsiga',
+              positionStillLayered: true,
+              otherSkusExecutable: false,
+              notPromotedToMain: true
+            })
+          ]
+        );
+      }
+    }
   }
 ];
 

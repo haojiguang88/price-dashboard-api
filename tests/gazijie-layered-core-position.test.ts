@@ -59,11 +59,12 @@ test("starts Gazijie core position as layered entry and forbids filling all at o
     );
 
     await db.run(
-      "DELETE FROM migrations WHERE id IN (?, ?, ?)",
+      "DELETE FROM migrations WHERE id IN (?, ?, ?, ?)",
       [
         "20260912_003_start_gazijie_layered_core_position",
         "20260912_004_keep_gazijie_core_position_in_plans_only",
-        "20260926_004_regroup_zsiga_series"
+        "20260926_004_regroup_zsiga_series",
+        "20260930_002_elevate_popmart_secondary_zsiga_only"
       ]
     );
     await runMigrations(filename);
@@ -86,7 +87,7 @@ test("starts Gazijie core position as layered entry and forbids filling all at o
        WHERE category = '泡泡玛特' AND object_name = 'Zsiga' AND COALESCE(is_deleted, 0) = 0`
     );
     assert.ok(annualItem);
-    assert.equal(annualItem.current_role, "试错");
+    assert.equal(annualItem.current_role, "次主线");
     assert.equal(annualItem.current_action, "轻仓参与");
     assert.equal(annualItem.current_status, "生效中");
     assert.match(annualItem.position_rule, /禁止一次打满/);
@@ -110,11 +111,12 @@ test("starts Gazijie core position as layered entry and forbids filling all at o
     assert.match(batches[1].note, /第一层没观察完不加/);
 
     await db.run(
-      "DELETE FROM migrations WHERE id IN (?, ?, ?)",
+      "DELETE FROM migrations WHERE id IN (?, ?, ?, ?)",
       [
         "20260912_003_start_gazijie_layered_core_position",
         "20260912_004_keep_gazijie_core_position_in_plans_only",
-        "20260926_004_regroup_zsiga_series"
+        "20260926_004_regroup_zsiga_series",
+        "20260930_002_elevate_popmart_secondary_zsiga_only"
       ]
     );
     await runMigrations(filename);
