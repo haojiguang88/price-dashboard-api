@@ -193,6 +193,18 @@ SOURCE_TARGETS = [
         "query": "唐老鸭的歌唱",
         "spu_id": "839239297214219448",
     },
+    {
+        "object": "大娃",
+        "variant": "mega400%梵高博物馆杏花",
+        "query": "MEGA ROYAL MOLLY 400% 梵高博物馆·杏花",
+        "spu_id": "713221358640770544",
+    },
+    {
+        "object": "大娃",
+        "variant": "mega400%漫漫花落-绒",
+        "query": "MEGA ROYAL MOLLY 400% 漫缦花落-绒",
+        "spu_id": "890886808303317137",
+    },
 ]
 
 

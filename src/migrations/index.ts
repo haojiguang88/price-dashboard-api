@@ -13306,6 +13306,154 @@ ${marker}：大网红本人亲自上阵、加价卖货。币圈一批大佬反�
         );
       }
     }
+  },
+  {
+    id: '20261001_001_seed_dawawa_mega400_variants',
+    name: 'Add Pop Mart object 大娃 with MEGA 400% 梵高博物馆杏花 and 漫漫花落-绒',
+    run: async (db: any) => {
+      if (!(await migrationTableExists(db, 'categories'))) return;
+      if (!(await migrationTableExists(db, 'objects'))) return;
+      if (!(await migrationTableExists(db, 'variants'))) return;
+
+      const categoryName = '泡泡玛特';
+      const objectName = '大娃';
+      const variants = [
+        {
+          name: 'mega400%梵高博物馆杏花',
+          spuId: '713221358640770544',
+          query: 'MEGA ROYAL MOLLY 400% 梵高博物馆·杏花',
+          externalName: 'MEGA ROYAL MOLLY 400% 梵高博物馆·杏花',
+          note: '千岛 MEGA ROYAL MOLLY 400% 梵高博物馆·杏花。不要误接 1000%、SPACE MOLLY、向日葵、明信片、展示柜和周边。'
+        },
+        {
+          name: 'mega400%漫漫花落-绒',
+          spuId: '890886808303317137',
+          query: 'MEGA ROYAL MOLLY 400% 漫缦花落-绒',
+          externalName: 'MEGA ROYAL MOLLY 400% 漫缦花落-绒',
+          note: '千岛 MEGA ROYAL MOLLY 400% 漫缦花落-绒。用户变体名按漫漫花落；不要误接 1000% 和周边。'
+        }
+      ];
+
+      const category = await dbGet<{ id: number; name: string }>(
+        db,
+        'SELECT id, name FROM categories WHERE name = ?',
+        [categoryName]
+      );
+      if (!category) return;
+
+      await dbRun(
+        db,
+        'UPDATE categories SET is_archived = 0, archived_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+        [category.id]
+      );
+      await dbRun(
+        db,
+        'INSERT OR IGNORE INTO objects (category_id, name, created_at, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)',
+        [category.id, objectName]
+      );
+      const object = await dbGet<{ id: number; name: string }>(
+        db,
+        'SELECT id, name FROM objects WHERE category_id = ? AND name = ?',
+        [category.id, objectName]
+      );
+      if (!object) throw new Error('Failed to ensure object 大娃');
+      await dbRun(
+        db,
+        'UPDATE objects SET is_archived = 0, archived_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+        [object.id]
+      );
+
+      const upsertMapping = async (input: {
+        variant: { id: number; name: string };
+        spuId: string;
+        query: string;
+        externalName: string;
+        note: string;
+      }) => {
+        if (!(await migrationTableExists(db, 'source_mappings'))) return;
+        const externalMeta = JSON.stringify({ query: input.query, spu_id: input.spuId });
+        await dbRun(
+          db,
+          `INSERT OR IGNORE INTO source_mappings
+             (source_key, source_name, external_key, external_name, external_meta_json,
+              category_id, object_id, variant_id, category_name, object_name, variant_name,
+              status, note)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            'qiandao_popmart',
+            '千岛泡泡玛特',
+            input.spuId,
+            input.externalName,
+            externalMeta,
+            category.id,
+            object.id,
+            input.variant.id,
+            category.name,
+            object.name,
+            input.variant.name,
+            'enabled',
+            input.note
+          ]
+        );
+        await dbRun(
+          db,
+          `UPDATE source_mappings
+           SET source_name = ?,
+               external_name = ?,
+               external_meta_json = ?,
+               category_id = ?,
+               object_id = ?,
+               variant_id = ?,
+               category_name = ?,
+               object_name = ?,
+               variant_name = ?,
+               status = CASE WHEN status = 'disabled' THEN status ELSE 'enabled' END,
+               note = CASE WHEN status = 'disabled' THEN note ELSE ? END,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE source_key = ? AND external_key = ?`,
+          [
+            '千岛泡泡玛特',
+            input.externalName,
+            externalMeta,
+            category.id,
+            object.id,
+            input.variant.id,
+            category.name,
+            object.name,
+            input.variant.name,
+            input.note,
+            'qiandao_popmart',
+            input.spuId
+          ]
+        );
+      };
+
+      for (const item of variants) {
+        await dbRun(
+          db,
+          'INSERT OR IGNORE INTO variants (object_id, name, created_at, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)',
+          [object.id, item.name]
+        );
+        const variant = await dbGet<{ id: number; name: string }>(
+          db,
+          'SELECT id, name FROM variants WHERE object_id = ? AND name = ?',
+          [object.id, item.name]
+        );
+        if (!variant) throw new Error(`Failed to ensure variant ${item.name}`);
+        await dbRun(
+          db,
+          'UPDATE variants SET is_archived = 0, archived_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+          [variant.id]
+        );
+        await upsertMapping({
+          variant,
+          spuId: item.spuId,
+          query: item.query,
+          externalName: item.externalName,
+          note: item.note
+        });
+      }
+    }
   }
 ];
 
