@@ -7,6 +7,7 @@ import {
   validateOptionalAnnualPlanItemLink
 } from '../utils/annualPlanLinks';
 import { validateActiveMasterTargetByNames } from '../utils/masterData';
+import { parseIncludeArchivedPlans, planArchivedFilter, setPlanArchived, type PlanArchiveTable } from '../utils/planArchive';
 
 const router = express.Router();
 
@@ -15,7 +16,7 @@ type PlanKind = 'buying' | 'selling';
 interface PlanConfig {
   kind: PlanKind;
   endpoint: string;
-  tableName: string;
+  tableName: PlanArchiveTable;
   label: string;
 }
 
@@ -275,6 +276,8 @@ const serializePlan = (plan: any, kind: PlanKind) => {
     market_type_preset: plan.market_type_preset,
     annual_plan_item_id: plan.annual_plan_item_id ? String(plan.annual_plan_item_id) : '',
     annual_plan_item: serializeAnnualPlanLink(plan),
+    is_archived: Number(plan.is_archived || 0) === 1,
+    archived_at: plan.archived_at || null,
     created_at: plan.created_at,
     updated_at: plan.updated_at
   };
@@ -315,6 +318,7 @@ const getBuyingPlanPriceAlerts = async (db: any) => {
     FROM buying_plans p
     ${annualPlanLinkJoins('p')}
     WHERE p.status IN ('pending', 'in_progress')
+      AND ${planArchivedFilter('p')}
       AND ${ACTIVE_PLAN_MASTER_FILTER}
     ORDER BY p.updated_at DESC, p.id DESC
   `);
@@ -510,6 +514,9 @@ const registerPlanRoutes = (config: PlanConfig) => {
       if (!existingPlan) {
         return res.status(404).json({ success: false, message: `${config.label}不存在` });
       }
+      if (Number(existingPlan.is_archived) === 1) {
+        return res.status(409).json({ success: false, message: `已归档的${config.label}不可编辑，请先恢复` });
+      }
 
       const result = await buildPlanPayload(db, req.body, existingPlan);
       if (result.error || !result.payload) {
@@ -564,11 +571,46 @@ const registerPlanRoutes = (config: PlanConfig) => {
     }
   });
 
+  const handleArchiveChange = (archived: boolean) => async (req: any, res: any) => {
+    const actionLabel = archived ? '归档' : '恢复';
+    try {
+      const db = await getDb();
+      const result = await setPlanArchived(db, {
+        tableName: config.tableName,
+        label: config.label,
+        id: req.params.id,
+        archived
+      });
+
+      if (!result.ok) {
+        return res.status(result.status).json({ success: false, message: result.message });
+      }
+
+      res.json({
+        success: true,
+        data: {
+          id: parseInt(String(req.params.id), 10),
+          is_archived: result.archived,
+          changes: result.changes,
+          message: result.message
+        }
+      });
+    } catch (error) {
+      console.error(`Error ${actionLabel} ${config.endpoint}:`, error);
+      res.status(500).json({ success: false, message: `${actionLabel}${config.label}失败` });
+    }
+  };
+
+  // 归档后默认不再出现在列表里，数据保留；只有已完成的计划允许归档。
+  router.patch(`/${config.endpoint}/:id/archive`, handleArchiveChange(true));
+  router.patch(`/${config.endpoint}/:id/restore`, handleArchiveChange(false));
+
   router.get(`/${config.endpoint}`, async (req, res) => {
     try {
       const db = await getDb();
       const { status } = req.query;
       const includeArchived = ['1', 'true'].includes(String(req.query.include_archived || '').toLowerCase());
+      const includeArchivedPlans = parseIncludeArchivedPlans(req.query.include_archived_plans);
       const params: any[] = [];
       let query = `
         SELECT p.*, ${annualPlanLinkSelectFields}
@@ -580,6 +622,9 @@ const registerPlanRoutes = (config: PlanConfig) => {
       if (status) {
         query += ' AND p.status = ?';
         params.push(status);
+      }
+      if (!includeArchivedPlans) {
+        query += ` AND ${planArchivedFilter('p')}`;
       }
       if (!includeArchived) {
         query += ` AND ${ACTIVE_PLAN_MASTER_FILTER}`;
@@ -636,6 +681,9 @@ const registerPlanRoutes = (config: PlanConfig) => {
       const currentPlan = await db.get(`SELECT * FROM ${config.tableName} WHERE id = ?`, [id]);
       if (!currentPlan) {
         return res.status(404).json({ success: false, message: `${config.label}不存在` });
+      }
+      if (Number(currentPlan.is_archived) === 1) {
+        return res.status(409).json({ success: false, message: `已归档的${config.label}不可改状态，请先恢复` });
       }
 
       const currentStatus = currentPlan.status || 'pending';
@@ -754,6 +802,7 @@ router.get('/plans/stats', async (req, res) => {
       `SELECT COUNT(*) as count, COALESCE(SUM(total_amount), 0) as amount
        FROM buying_plans p
        WHERE p.status IN (?, ?)
+         AND ${planArchivedFilter('p')}
          AND ${ACTIVE_PLAN_MASTER_FILTER}`,
       ['pending', 'in_progress']
     );
@@ -762,6 +811,7 @@ router.get('/plans/stats', async (req, res) => {
       `SELECT COUNT(*) as count, COALESCE(SUM(total_amount), 0) as amount
        FROM selling_plans p
        WHERE p.status IN (?, ?)
+         AND ${planArchivedFilter('p')}
          AND ${ACTIVE_PLAN_MASTER_FILTER}`,
       ['pending', 'in_progress']
     );
@@ -770,6 +820,7 @@ router.get('/plans/stats', async (req, res) => {
       `SELECT p.category_name, COUNT(*) as count, COALESCE(SUM(p.total_amount), 0) as amount
        FROM buying_plans p
        WHERE p.status IN (?, ?)
+         AND ${planArchivedFilter('p')}
          AND ${ACTIVE_PLAN_MASTER_FILTER}
        GROUP BY p.category_name`,
       ['pending', 'in_progress']
@@ -779,6 +830,7 @@ router.get('/plans/stats', async (req, res) => {
       `SELECT p.category_name, COUNT(*) as count, COALESCE(SUM(p.total_amount), 0) as amount
        FROM selling_plans p
        WHERE p.status IN (?, ?)
+         AND ${planArchivedFilter('p')}
          AND ${ACTIVE_PLAN_MASTER_FILTER}
        GROUP BY p.category_name`,
       ['pending', 'in_progress']

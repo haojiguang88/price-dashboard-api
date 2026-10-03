@@ -87,6 +87,7 @@ const definitions: SearchDefinition[] = [
       NULL AS date, p.updated_at AS updated_at`,
     from: `buying_plans p LEFT JOIN categories c ON c.name = p.category_name LEFT JOIN objects o ON o.category_id = c.id AND o.name = p.object_name LEFT JOIN variants v ON v.object_id = o.id AND v.name = COALESCE(p.variant_name, '')`,
     searchColumns: ["p.plan_name", "p.category_name", "p.object_name", "p.variant_name", "p.note", "p.status"],
+    baseWhere: "COALESCE(p.is_archived, 0) = 0",
     orderBy: "datetime(p.updated_at) DESC, p.id DESC"
   },
   {
@@ -101,6 +102,7 @@ const definitions: SearchDefinition[] = [
       NULL AS date, p.updated_at AS updated_at`,
     from: `selling_plans p LEFT JOIN categories c ON c.name = p.category_name LEFT JOIN objects o ON o.category_id = c.id AND o.name = p.object_name LEFT JOIN variants v ON v.object_id = o.id AND v.name = COALESCE(p.variant_name, '')`,
     searchColumns: ["p.plan_name", "p.category_name", "p.object_name", "p.variant_name", "p.note", "p.status"],
+    baseWhere: "COALESCE(p.is_archived, 0) = 0",
     orderBy: "datetime(p.updated_at) DESC, p.id DESC"
   },
   {

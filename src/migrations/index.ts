@@ -13454,6 +13454,21 @@ ${marker}：大网红本人亲自上阵、加价卖货。币圈一批大佬反�
         });
       }
     }
+  },
+  {
+    id: '20261003_001_add_plan_archive_columns',
+    name: 'Add is_archived/archived_at to buying_plans and selling_plans',
+    run: async (db: any) => {
+      for (const tableName of ['buying_plans', 'selling_plans']) {
+        if (!(await migrationTableExists(db, tableName))) continue;
+        await ensureMigrationColumn(db, tableName, 'is_archived', 'INTEGER NOT NULL DEFAULT 0');
+        await ensureMigrationColumn(db, tableName, 'archived_at', 'TEXT');
+        await dbExec(
+          db,
+          `CREATE INDEX IF NOT EXISTS idx_${tableName}_archive ON ${tableName}(is_archived, created_at DESC, id DESC)`
+        );
+      }
+    }
   }
 ];
 
