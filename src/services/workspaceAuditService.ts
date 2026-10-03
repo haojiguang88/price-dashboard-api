@@ -2,7 +2,7 @@ import getDb from "../config/database";
 import { appendWorkspaceCondition, inferAuditWorkspace, resolveDomainForWorkspace } from "../utils/workspace";
 import { WorkspaceCenterError } from "./workspaceCenterErrors";
 
-const validActions = new Set(["create", "update", "delete", "execute", "status"]);
+const validActions = new Set(["create", "update", "delete", "execute", "status", "archive", "restore"]);
 const validStatuses = new Set(["success", "failed"]);
 
 export interface AuditLogInput {
