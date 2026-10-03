@@ -13,6 +13,7 @@ import { assessPriceMove } from "../services/priceAnomalyDetection";
 import { ELECTRONICS_HIGH_UNIT_PRICE_CATEGORIES } from "../constants/electronicsCategories";
 import { buildQualityAlertRecheckMetadata } from "../services/priceQualityAlertService";
 import { calculatePriceWorkbenchCoinSilverPremium } from "../services/coinSilverPremiumService";
+import { resolveOriginalPricePremium } from "../services/originalPricePremiumService";
 import { attachMarketBooks, listMarketTrades } from "../services/marketBookService";
 
 const router = express.Router();
@@ -1503,6 +1504,15 @@ router.get("/price-records", async (req, res) => {
         });
       }
 
+      // 原始价格溢价率：只要该品类/对象登记过原始价格就计算，与上面的银值口径互不影响。
+      const originalPricePremium = await resolveOriginalPricePremium(db, {
+        category_name: String(category),
+        object_name: String(object_name),
+        variant_name: variant === undefined ? "" : String(variant),
+        current_price: latest?.price,
+        current_price_date: latest?.date
+      });
+
       const chartPeriod = String(req.query.chart_period || "30");
       const listWhere = [...where];
       const listParams = [...whereParams];
@@ -1596,7 +1606,8 @@ router.get("/price-records", async (req, res) => {
           high_date: high?.date ?? null,
           low_price: low?.price ?? null,
           low_date: low?.date ?? null,
-          coin_silver_premium: coinSilverPremium
+          coin_silver_premium: coinSilverPremium,
+          original_price_premium: originalPricePremium
         },
         chart_data: chartRecords
       });
