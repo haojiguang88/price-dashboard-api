@@ -609,7 +609,7 @@ const registerPlanRoutes = (config: PlanConfig) => {
     try {
       const db = await getDb();
       const { status } = req.query;
-      const includeArchived = ['1', 'true'].includes(String(req.query.include_archived || '').toLowerCase());
+      const includeArchived = parseIncludeArchivedPlans(req.query.include_archived);
       const includeArchivedPlans = parseIncludeArchivedPlans(req.query.include_archived_plans);
       const params: any[] = [];
       let query = `
