@@ -36,6 +36,7 @@ import cognitionEvidenceRoutes from "./cognitionEvidenceRoutes";
 import globalSearchRoutes from "./globalSearchRoutes";
 import selfCognitionProfileRoutes from "./selfCognitionProfileRoutes";
 import humanCaseLibraryRoutes from "./humanCaseLibraryRoutes";
+import signalRoutes from "./signalRoutes";
 
 export const registerBusinessRoutes = (app: Express) => {
   app.use("/api", priceRoutes);
@@ -75,4 +76,5 @@ export const registerBusinessRoutes = (app: Express) => {
   app.use("/api", globalSearchRoutes);
   app.use("/api", selfCognitionProfileRoutes);
   app.use("/api", humanCaseLibraryRoutes);
+  app.use("/api/signal", signalRoutes);
 };

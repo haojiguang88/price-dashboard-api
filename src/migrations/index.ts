@@ -13469,6 +13469,179 @@ ${marker}：大网红本人亲自上阵、加价卖货。币圈一批大佬反�
         );
       }
     }
+  },
+  {
+    id: '20261007_001_add_signal_monitoring',
+    name: 'Create signal monitoring tables (source / raw_signal / normalized_signal)',
+    sql: `
+      -- 线报监控：采集层。三个公开采集器共用一张源表。
+      CREATE TABLE IF NOT EXISTS signal_source (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        source_key TEXT NOT NULL UNIQUE,
+        name TEXT NOT NULL,
+        type TEXT NOT NULL DEFAULT 'html',
+        base_url TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        collector_type TEXT NOT NULL,
+        poll_interval INTEGER NOT NULL DEFAULT 60,
+        min_request_interval INTEGER NOT NULL DEFAULT 5,
+        priority TEXT NOT NULL DEFAULT 'A',
+        note TEXT,
+        last_success_at TEXT,
+        last_error_at TEXT,
+        last_error_message TEXT,
+        last_collected_at TEXT,
+        consecutive_failures INTEGER NOT NULL DEFAULT 0,
+        disabled_reason TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+
+      -- 原始采集数据：按 (source_key, dedupe_key) 唯一，重复采集只累加 seen_count，
+      -- 保证「同一条线报被轮询抓到 2880 次」不会写成 2880 行，同时保留原始 JSON/HTML。
+      CREATE TABLE IF NOT EXISTS raw_signal (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        source_id INTEGER NOT NULL,
+        source_key TEXT NOT NULL,
+        collector_source TEXT NOT NULL,
+        origin_source TEXT NOT NULL DEFAULT '未知',
+        external_id TEXT,
+        normalized_signal_id INTEGER,
+        title TEXT NOT NULL,
+        content TEXT,
+        url TEXT,
+        published_at TEXT,
+        first_collected_at TEXT NOT NULL,
+        last_collected_at TEXT NOT NULL,
+        seen_count INTEGER NOT NULL DEFAULT 1,
+        raw_data TEXT NOT NULL,
+        content_hash TEXT NOT NULL,
+        normalized_hash TEXT NOT NULL,
+        dedupe_key TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'new',
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE UNIQUE INDEX IF NOT EXISTS ux_raw_signal_source_dedupe
+      ON raw_signal(source_key, dedupe_key);
+
+      CREATE INDEX IF NOT EXISTS idx_raw_signal_published
+      ON raw_signal(published_at DESC, id DESC);
+
+      CREATE INDEX IF NOT EXISTS idx_raw_signal_origin
+      ON raw_signal(origin_source, published_at DESC);
+
+      CREATE INDEX IF NOT EXISTS idx_raw_signal_normalized
+      ON raw_signal(normalized_signal_id);
+
+      -- 归一线报：跨采集器合并后的唯一事件，是审核与分析的主表。
+      CREATE TABLE IF NOT EXISTS normalized_signal (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        raw_signal_id INTEGER,
+        dedupe_hash TEXT NOT NULL,
+        origin_source TEXT NOT NULL DEFAULT '未知',
+        title TEXT NOT NULL,
+        content TEXT,
+        url TEXT,
+        deal_url TEXT,
+        published_at TEXT,
+        first_seen_at TEXT NOT NULL,
+        last_seen_at TEXT NOT NULL,
+        first_seen_source TEXT NOT NULL,
+        source_count INTEGER NOT NULL DEFAULT 1,
+        collectors_json TEXT NOT NULL DEFAULT '[]',
+        observations_json TEXT NOT NULL DEFAULT '[]',
+        content_hash TEXT NOT NULL,
+        normalized_hash TEXT NOT NULL,
+        product_price_hash TEXT,
+        product_name TEXT,
+        sku TEXT,
+        category_name TEXT,
+        object_name TEXT,
+        variant_name TEXT,
+        platform TEXT,
+        raw_price_text TEXT,
+        buy_price REAL,
+        coupon_price REAL,
+        final_price REAL,
+        quantity INTEGER,
+        final_buy_price REAL,
+        price_status TEXT NOT NULL DEFAULT 'unparsed',
+        price_detail_json TEXT,
+        keyword_tags TEXT,
+        match_status TEXT NOT NULL DEFAULT 'unmatched',
+        match_confidence REAL,
+        matched_product_name TEXT,
+        current_recycle_price REAL,
+        recycle_price_updated_at TEXT,
+        recycle_source TEXT,
+        recycle_confidence REAL,
+        gross_spread REAL,
+        gross_margin_rate REAL,
+        profit_status TEXT NOT NULL DEFAULT 'UNMATCHED',
+        account_requirement TEXT DEFAULT '未知',
+        account_risk TEXT NOT NULL DEFAULT 'UNKNOWN',
+        region_requirement TEXT,
+        qualification_requirement TEXT,
+        purchase_limit TEXT,
+        inventory_status TEXT,
+        execution_level TEXT NOT NULL DEFAULT 'UNKNOWN',
+        private_candidate INTEGER NOT NULL DEFAULT 0,
+        review_status TEXT NOT NULL DEFAULT 'pending',
+        review_verdict TEXT,
+        review_note TEXT,
+        reviewer TEXT,
+        reviewed_at TEXT,
+        outcome_status TEXT,
+        actual_recycle_price REAL,
+        actual_cost REAL,
+        actual_profit REAL,
+        outcome_note TEXT,
+        expired_at TEXT,
+        expiration_reason TEXT,
+        opportunity_window_minutes INTEGER,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE UNIQUE INDEX IF NOT EXISTS ux_normalized_signal_dedupe
+      ON normalized_signal(dedupe_hash);
+
+      CREATE INDEX IF NOT EXISTS idx_normalized_signal_review
+      ON normalized_signal(review_status, profit_status, published_at DESC, id DESC);
+
+      CREATE INDEX IF NOT EXISTS idx_normalized_signal_profit
+      ON normalized_signal(profit_status, gross_spread DESC, id DESC);
+
+      CREATE INDEX IF NOT EXISTS idx_normalized_signal_origin
+      ON normalized_signal(origin_source, first_seen_at DESC);
+
+      -- 阈值等运行参数，后台可配置（Rule 6：阈值不要写死）。
+      CREATE TABLE IF NOT EXISTS signal_settings (
+        setting_key TEXT PRIMARY KEY,
+        setting_value TEXT NOT NULL,
+        note TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+
+      INSERT OR IGNORE INTO signal_settings (setting_key, setting_value, note) VALUES
+        ('minimum_profit', '100', '理论空间达到该金额才算 HIGH_VALUE_CANDIDATE'),
+        ('minimum_margin_rate', '0.05', '理论空间率达到该比例才算 HIGH_VALUE_CANDIDATE'),
+        ('collector_enabled', '1', '线报采集调度总开关'),
+        ('private_candidate_min_source_gap_minutes', '30', '首次发现后 N 分钟内仍未被其它采集器看到，才算私家车候选');
+
+      INSERT OR IGNORE INTO signal_source
+        (source_key, name, type, base_url, enabled, collector_type, poll_interval, min_request_interval, priority, note)
+      VALUES
+        ('xianbaoku', '线报酷', 'api', 'https://new.ixbk.net', 1, 'xianbaoku', 30, 5, 'S',
+         '官方公开 JSON 接口，官方限制最快 5 秒一次。'),
+        ('xb86', '86实时线报', 'html', 'https://v.jiujiuxb.com', 1, 'xb86', 60, 10, 'S',
+         '公开列表页 + 详情页 og 元数据；不使用任何非公开接口。'),
+        ('zuankeba', '赚客吧', 'html', 'https://www.zuankeba.cn', 1, 'zuankeba', 120, 20, 'A',
+         '公开线报页 + 首页 JSON-LD ItemList；赚客吧推送服务本身是聚合，只作第三个时间观察点。');
+    `
   }
 ];
 

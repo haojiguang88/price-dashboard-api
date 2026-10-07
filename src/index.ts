@@ -14,6 +14,7 @@ import {
 } from "./config/serverSecurity";
 import { getExpectedMigrationIds, runMigrations } from "./migrations";
 import { cleanupTaskCenterStartupState, startTaskCenterScheduler } from "./services/taskCenterScheduler";
+import { startSignalCollectorScheduler } from "./services/signal/signalCollectorScheduler";
 import { registerApiRoutes } from "./routes/apiRouteRegistry";
 import {
   registerProtectedAuthRoutes,
@@ -171,6 +172,8 @@ initDatabase().then(() => {
       console.warn("Development API is explicitly bound to a non-loopback HOST");
     }
     startTaskCenterScheduler();
+    // 线报采集调度：三个公开源按各自节拍轮询，失败退避、连续失败自动暂停，不影响主 API。
+    void startSignalCollectorScheduler();
   });
 }).catch((error) => {
   const errorMessage = error instanceof Error ? error.message : "Unknown startup error";
