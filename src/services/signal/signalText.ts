@@ -180,7 +180,10 @@ export interface SignalDedupeResult {
 export const buildDedupeKeys = (input: SignalDedupeInput): SignalDedupeResult => {
   const contentHash = contentHashOf(input.title, input.content);
   const normalizedHash = normalizedHashOf(input.title, input.content);
-  const dealUrl = normalizeUrl(input.dealUrl) || null;
+  // 归一化后的形态只用来算哈希；落库展示要保留可点击的完整 URL，
+  // 否则前端 <a href> 会把它当相对路径。
+  const dealUrlKey = normalizeUrl(input.dealUrl) || null;
+  const dealUrl = cleanUrlCandidate(input.dealUrl) || null;
 
   const externalId = String(input.externalId ?? "").trim();
   const normalizedPageUrl = normalizeUrl(input.url);
@@ -193,7 +196,7 @@ export const buildDedupeKeys = (input: SignalDedupeInput): SignalDedupeResult =>
       : `hash:${normalizedHash}`;
 
   // 跨源：外链（同一个车）最可靠，其次归一化文本。
-  const crossSourceDedupeHash = dealUrl ? `deal:${sha1(dealUrl)}` : `text:${normalizedHash}`;
+  const crossSourceDedupeHash = dealUrlKey ? `deal:${sha1(dealUrlKey)}` : `text:${normalizedHash}`;
 
   return { contentHash, normalizedHash, sourceDedupeKey, crossSourceDedupeHash, dealUrl };
 };

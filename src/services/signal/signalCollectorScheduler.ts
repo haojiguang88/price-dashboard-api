@@ -18,7 +18,16 @@ const TICK_MS = 5000;
 const MAX_CONSECUTIVE_FAILURES_BEFORE_DISABLE = 10;
 const SLOWDOWN_AFTER_FAILURES = 3;
 const MAX_BACKOFF_MULTIPLIER = 8;
-const DETAIL_FETCH_BUDGET = 4;
+/**
+ * 每轮最多补几个详情页。
+ *
+ * 这个数字直接决定实际节拍：86 的最短请求间隔是 10s、赚客吧 20s，
+ * 「1 个列表 + N 个详情」在节流下要花 (1+N)×间隔 秒。取 4 的话 86 要 50s、
+ * 赚客吧要 100s，再加上轮询间隔，实际就变成 105s / 220s —— 采集器之间的
+ * 抓取密度差 3~7 倍，「哪个来源最早出现」会被采样节奏带偏，而不是真实领先。
+ * 取 2 之后：86 约 30s、赚客吧约 60s，都能塞进各自配置的轮询间隔里。
+ */
+const DETAIL_FETCH_BUDGET = 2;
 
 interface SourceRuntime {
   sourceKey: string;
@@ -56,9 +65,13 @@ const backoffMultiplier = (failures: number): number => (
     : 1
 );
 
-const scheduleNext = (runtime: SourceRuntime) => {
+/**
+ * 从本轮「开始时间」往后排下一轮，而不是从结束时间。
+ * 否则单轮耗时会被加到间隔上，实际节拍 = 耗时 + 间隔，配置就失真了。
+ */
+const scheduleNext = (runtime: SourceRuntime, cycleStartedAt: number) => {
   const multiplier = backoffMultiplier(runtime.consecutiveFailures);
-  runtime.nextRunAt = Date.now() + runtime.pollIntervalMs * multiplier;
+  runtime.nextRunAt = cycleStartedAt + runtime.pollIntervalMs * multiplier;
 };
 
 const recordSuccess = async (runtime: SourceRuntime) => {
@@ -106,6 +119,7 @@ const recordFailure = async (runtime: SourceRuntime, message: string) => {
 const collectOnce = async (runtime: SourceRuntime): Promise<{ collected: number; partial: number } | null> => {
   if (runtime.running || runtime.disabledReason) return null;
   runtime.running = true;
+  const cycleStartedAt = Date.now();
   try {
     // 已经完整入库的跳过详情页；仍缺正文的（partial）不在集合里，会被继续补抓，
     // 每轮受 DETAIL_FETCH_BUDGET 限制，几轮之后自然补齐。
@@ -139,7 +153,7 @@ const collectOnce = async (runtime: SourceRuntime): Promise<{ collected: number;
     return null;
   } finally {
     runtime.running = false;
-    scheduleNext(runtime);
+    scheduleNext(runtime, cycleStartedAt);
   }
 };
 

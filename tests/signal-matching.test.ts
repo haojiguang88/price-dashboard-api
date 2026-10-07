@@ -34,6 +34,8 @@ const seedCatalog = async (db: any) => {
   await ensure("纪念币", "龙银币", ["2025年", "2026年"]);
   await ensure("纪念币", "马年银币", ["15g小马"]);
   await ensure("纪念币", "农行卡", []);
+  await ensure("iQOO", "触控笔 2s", ["象牙白"]);
+  await ensure("影石", "影石360街拍配件套装", ["星辉银"]);
 
   // 让这些 SKU 变成「正在采价的目标 SKU」
   const priceRows: Array<[string, string, string, number]> = [
@@ -43,7 +45,9 @@ const seedCatalog = async (db: any) => {
     ["苹果手机", "iPhone 18 Pro Max 256G", "", 9999],
     ["纪念币", "龙银币", "2025年", 500],
     ["纪念币", "马年银币", "15g小马", 610],
-    ["纪念币", "农行卡", "", 900]
+    ["纪念币", "农行卡", "", 900],
+    ["iQOO", "触控笔 2s", "象牙白", 199],
+    ["影石", "影石360街拍配件套装", "星辉银", 299]
   ];
   for (const [category, object, variant, price] of priceRows) {
     await db.run(
@@ -124,6 +128,34 @@ test("SKU 匹配：无关线报必须 unmatched，跨对象冲突必须 ambiguou
     assert.equal(conflict.match_status, "ambiguous");
     assert.equal(conflict.sku, null);
     assert.ok(conflict.candidates.length >= 2);
+  });
+});
+
+test("颜色类变体名不能单独当 SKU（真实误配回归）", async () => {
+  await withDatabase(async db => {
+    const dictionary = await buildSkuDictionary(db, { force: true });
+
+    // 这两条是线上真实产生的误配：整条线报跟目标 SKU 毫无关系，只是恰好都带同一个颜色词
+    const coffee = matchSignalToSku(
+      "GEMILAI 云象One G3828A咖啡机 研磨一体冷萃半自动意式电动咖啡磨豆机 象牙白 3117.79元",
+      "",
+      dictionary
+    );
+    assert.equal(coffee.match_status, "unmatched", `咖啡机不该匹配到触控笔：${coffee.sku}`);
+    assert.equal(coffee.sku, null);
+
+    const fridge = matchSignalToSku(
+      "海尔 BCD-217WGHC3E9S9风冷三门冰箱 217L 星辉银 999.81元",
+      "",
+      dictionary
+    );
+    assert.equal(fridge.match_status, "unmatched", `冰箱不该匹配到相机配件：${fridge.sku}`);
+    assert.equal(fridge.sku, null);
+
+    // 但对象名同时出现时，变体仍然要能精确落到具体 SKU
+    const realMatch = matchSignalToSku("iQOO 触控笔 2s 象牙白 199元", "", dictionary);
+    assert.equal(realMatch.match_status, "matched");
+    assert.equal(realMatch.sku, "iQOO/触控笔 2s/象牙白");
   });
 });
 

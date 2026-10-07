@@ -27,6 +27,12 @@ export interface SkuDictionaryEntry {
 
 export interface SkuDictionary {
   entries: SkuDictionaryEntry[];
+  /**
+   * 「这个对象确实被提到了」的证据词，按 品类|对象 归类。
+   * 变体名（尤其颜色、规格这类属性词）单独出现时不足以认定 SKU ——
+   * 「象牙白」不是商品，「iQOO 触控笔 2s 象牙白」才是。
+   */
+  objectEvidence: Record<string, string[]>;
   size: number;
   builtAt: string;
 }
@@ -100,6 +106,15 @@ export const buildSkuDictionary = async (db: any, options: { force?: boolean } =
 
   const entries: SkuDictionaryEntry[] = [];
   const seen = new Set<string>();
+  const objectEvidence: Record<string, string[]> = {};
+  const addObjectEvidence = (categoryName: string, objectName: string, value: unknown) => {
+    const norm = normalizeSignalText(value);
+    if (norm.length < MIN_ALIAS_LENGTH) return;
+    const key = `${categoryName}|${objectName}`;
+    const list = objectEvidence[key] ?? [];
+    if (!list.includes(norm)) list.push(norm);
+    objectEvidence[key] = list;
+  };
 
   const push = (
     aliasRaw: unknown,
@@ -137,6 +152,7 @@ export const buildSkuDictionary = async (db: any, options: { force?: boolean } =
     WHERE COALESCE(c.is_archived, 0) = 0
   `);
   for (const row of catalog as Array<{ category_name: string; object_name: string; variant_name: string }>) {
+    addObjectEvidence(row.category_name, row.object_name, row.object_name);
     if (row.variant_name) push(row.variant_name, "variant", row.category_name, row.object_name, row.variant_name);
     push(row.object_name, "object", row.category_name, row.object_name, "");
   }
@@ -149,6 +165,8 @@ export const buildSkuDictionary = async (db: any, options: { force?: boolean } =
   `);
   for (const row of mappings as Array<{ external_name: string; category_name: string; object_name: string; variant_name: string }>) {
     if (!row.category_name || !row.object_name) continue;
+    // 只有对象级别名才能证明「对象被提到」；变体级别名不能反向证明对象
+    if (!row.variant_name) addObjectEvidence(row.category_name, row.object_name, row.external_name);
     push(row.external_name, "alias", row.category_name, row.object_name, row.variant_name || "");
   }
 
@@ -183,6 +201,7 @@ export const buildSkuDictionary = async (db: any, options: { force?: boolean } =
 
   cachedDictionary = {
     entries: discriminative,
+    objectEvidence,
     size: discriminative.length,
     builtAt: new Date().toISOString()
   };
@@ -225,7 +244,13 @@ export const matchSignalToSku = (
   }
 
   const bestBySku = new Map<string, { entry: SkuDictionaryEntry; score: number }>();
+  const objectEvidence = dictionary.objectEvidence ?? {};
   for (const entry of dictionary.entries) {
+    // 变体只有在「它所属的对象也被提到」时才算命中，避免颜色/规格词单独成 SKU。
+    if (entry.kind === "variant") {
+      const evidence = objectEvidence[`${entry.categoryName}|${entry.objectName}`] ?? [];
+      if (!evidence.some(item => textNorm.includes(item))) continue;
+    }
     const score = scoreEntry(entry, textNorm);
     if (score === null) continue;
     const current = bestBySku.get(entry.skuKey);

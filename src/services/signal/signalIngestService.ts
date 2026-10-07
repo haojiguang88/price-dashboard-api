@@ -97,8 +97,6 @@ export const ingestCollectedSignals = async (
       : (signal.sourcePrice ? "parsed" : price.priceStatus);
 
     const hasBody = Boolean(String(signal.content ?? "").trim());
-    const status = hasBody && signal.publishedAt ? "ingested" : "partial";
-    if (status === "partial") summary.partial += 1;
 
     const existingRaw = await db.get(
       "SELECT id, seen_count, content, published_at FROM raw_signal WHERE source_key = ? AND dedupe_key = ?",
@@ -108,18 +106,23 @@ export const ingestCollectedSignals = async (
     let rawId: number;
     if (existingRaw) {
       // 重复看到：只累加 seen_count 与 last_collected_at；若这次补到了正文/时间就补写。
-      const nextContent = hasBody && !String(existingRaw.content ?? "").trim() ? signal.content : existingRaw.content;
+      const nextContent = String(existingRaw.content ?? "").trim() || (hasBody ? signal.content : "");
       const nextPublished = signal.publishedAt || existingRaw.published_at || null;
+      // 状态按「合并后库里究竟有没有正文和时间」判定：本轮没补到详情不该把已完整的行降级。
+      const nextStatus = String(nextContent ?? "").trim() && nextPublished ? "ingested" : "partial";
+      if (nextStatus === "partial") summary.partial += 1;
       await db.run(
         `UPDATE raw_signal
             SET last_collected_at = ?, seen_count = seen_count + 1, status = ?,
                 content = ?, published_at = ?, raw_data = ?, updated_at = ?
           WHERE id = ?`,
-        [signal.collectedAt || now, hasBody ? "ingested" : "partial", nextContent, nextPublished, signal.rawData, now, existingRaw.id]
+        [signal.collectedAt || now, nextStatus, nextContent, nextPublished, signal.rawData, now, existingRaw.id]
       );
       rawId = Number(existingRaw.id);
       summary.rawUpdated += 1;
     } else {
+      const insertStatus = hasBody && signal.publishedAt ? "ingested" : "partial";
+      if (insertStatus === "partial") summary.partial += 1;
       const insert = await db.run(
         `INSERT INTO raw_signal
            (source_id, source_key, collector_source, origin_source, external_id, title, content, url,
@@ -142,7 +145,7 @@ export const ingestCollectedSignals = async (
           dedupe.contentHash,
           dedupe.normalizedHash,
           dedupe.sourceDedupeKey,
-          status,
+          insertStatus,
           now,
           now
         ]
@@ -152,10 +155,70 @@ export const ingestCollectedSignals = async (
     }
 
     const productPriceHash = productPriceHashOf(null, finalPrice, signal.publishedAt);
-    const existingNormalized = await db.get(
-      "SELECT id, source_count, collectors_json, observations_json, origin_source FROM normalized_signal WHERE dedupe_hash = ?",
+
+    // 归一事件解析：优先复用这条原始记录已经挂过的事件。
+    // 关键场景：第一轮没正文 → 合并键是 text:xxx；后面补到详情页拿到外链 → 合并键变成 deal:xxx。
+    // 如果只按合并键查，就会给同一条原始记录再建一个事件，旧事件变成孤儿（审核台重复出现、统计翻倍）。
+    const linkRow = await db.get("SELECT normalized_signal_id FROM raw_signal WHERE id = ?", [rawId]);
+    const linkedId = Number(linkRow?.normalized_signal_id) || null;
+    const byHash = await db.get(
+      "SELECT id FROM normalized_signal WHERE dedupe_hash = ?",
       [dedupe.crossSourceDedupeHash]
     );
+    let targetId = Number(byHash?.id) || linkedId;
+
+    // 合并键变了、而新键已被另一行占用 → 两行合并（吸收方保留更早的首次发现信息）
+    if (linkedId && byHash && Number(byHash.id) !== linkedId) {
+      const [keep, drop] = await Promise.all([
+        db.get("SELECT * FROM normalized_signal WHERE id = ?", [Number(byHash.id)]),
+        db.get("SELECT * FROM normalized_signal WHERE id = ?", [linkedId])
+      ]);
+      if (keep && drop) {
+        const keepCollectors = parseJsonArray<string>(keep.collectors_json, []);
+        const dropCollectors = parseJsonArray<string>(drop.collectors_json, []);
+        const mergedCollectors = [...new Set([...keepCollectors, ...dropCollectors])];
+        const mergedObservations = [
+          ...parseJsonArray<Observation>(keep.observations_json, []),
+          ...parseJsonArray<Observation>(drop.observations_json, [])
+        ].sort((a, b) => String(a.collected_at).localeCompare(String(b.collected_at)));
+
+        const keepFirstSeen = String(keep.first_seen_at || "");
+        const dropFirstSeen = String(drop.first_seen_at || "");
+        const dropIsEarlier = dropFirstSeen && (!keepFirstSeen || dropFirstSeen < keepFirstSeen);
+
+        await db.run(
+          `UPDATE normalized_signal
+              SET source_count = ?, collectors_json = ?, observations_json = ?,
+                  first_seen_at = ?, first_seen_source = ?,
+                  published_at = CASE WHEN published_at IS NULL OR ( ? IS NOT NULL AND ? < published_at ) THEN ? ELSE published_at END,
+                  content = CASE WHEN COALESCE(content, '') = '' THEN ? ELSE content END,
+                  url = COALESCE(url, ?), deal_url = COALESCE(deal_url, ?),
+                  updated_at = ?
+            WHERE id = ?`,
+          [
+            mergedCollectors.length,
+            JSON.stringify(mergedCollectors),
+            JSON.stringify(mergedObservations),
+            dropIsEarlier ? drop.first_seen_at : keep.first_seen_at,
+            dropIsEarlier ? drop.first_seen_source : keep.first_seen_source,
+            signal.publishedAt, signal.publishedAt, signal.publishedAt,
+            drop.content,
+            drop.url,
+            drop.deal_url ?? dedupe.dealUrl,
+            now,
+            keep.id
+          ]
+        );
+        // 把指向被合并行的原始记录全部改挂到保留行，然后删掉重复事件
+        await db.run("UPDATE raw_signal SET normalized_signal_id = ? WHERE normalized_signal_id = ?", [keep.id, drop.id]);
+        await db.run("DELETE FROM normalized_signal WHERE id = ?", [drop.id]);
+        targetId = Number(keep.id);
+      }
+    }
+
+    const existingNormalized = targetId
+      ? await db.get("SELECT * FROM normalized_signal WHERE id = ?", [targetId])
+      : null;
 
     if (!existingNormalized) {
       const observation: Observation = {
@@ -208,7 +271,7 @@ export const ingestCollectedSignals = async (
       continue;
     }
 
-    // 已知事件：可能是同一个采集器再次看到，也可能是另一个采集器也看到了它。
+    // 已知事件：可能还是同一个采集器再次看到，也可能是另一个采集器也看到了同一条车。
     const collectors = parseJsonArray<string>(existingNormalized.collectors_json, []);
     const observations = parseJsonArray<Observation>(existingNormalized.observations_json, []);
     const isNewCollector = !collectors.includes(signal.collectorSource);
@@ -226,11 +289,10 @@ export const ingestCollectedSignals = async (
       summary.crossSourceMatches += 1;
     }
 
-    // 首次发现者与最早发布时间：published_at 更早的采集器更能说明「这个信息最早出现在哪」。
     // first_seen_source / first_seen_at 只在插入时写定，合并时不动，保证它是真正的首次。
     await db.run(
       `UPDATE normalized_signal
-          SET source_count = ?, collectors_json = ?, observations_json = ?,
+          SET dedupe_hash = ?, source_count = ?, collectors_json = ?, observations_json = ?,
               last_seen_at = ?, updated_at = ?,
               content = CASE WHEN COALESCE(content, '') = '' THEN ? ELSE content END,
               url = COALESCE(url, ?), deal_url = COALESCE(deal_url, ?),
@@ -241,6 +303,7 @@ export const ingestCollectedSignals = async (
               product_price_hash = COALESCE(product_price_hash, ?)
         WHERE id = ?`,
       [
+        dedupe.crossSourceDedupeHash,
         collectors.length,
         JSON.stringify(collectors),
         JSON.stringify(observations),
