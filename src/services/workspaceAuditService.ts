@@ -3,6 +3,10 @@ import { appendWorkspaceCondition, inferAuditWorkspace, resolveDomainForWorkspac
 import { WorkspaceCenterError } from "./workspaceCenterErrors";
 
 const validActions = new Set(["create", "update", "delete", "execute", "status", "archive", "restore"]);
+const actionAliases: Record<string, string> = {
+  归档: "archive",
+  恢复: "restore"
+};
 const validStatuses = new Set(["success", "failed"]);
 
 export interface AuditLogInput {
@@ -36,7 +40,7 @@ const normalizeAuditLog = (body: AuditLogInput) => {
     id: String(body.id || makeAuditId()).trim(),
     timestamp: String(body.timestamp || new Date().toISOString()).trim(),
     module: String(body.module || "").trim(),
-    action: String(body.action || "").trim(),
+    action: actionAliases[String(body.action || "").trim()] || String(body.action || "").trim(),
     target: String(body.target || "").trim(),
     status: String(body.status || "").trim(),
     detail: body.detail === undefined ? null : String(body.detail),

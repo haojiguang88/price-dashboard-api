@@ -1,8 +1,13 @@
 import getDb from "../../config/database";
 import { productPriceHashOf } from "./signalText";
 import { extractSignalPrice } from "./signalPrice";
-import { buildSkuDictionary, matchSignalToSku, type SkuDictionary } from "./signalSkuMatcher";
 import { resolveRecyclePrice } from "./recyclePriceService";
+import {
+  SIGNAL_EXCLUDED_CATEGORIES,
+  buildSkuDictionary,
+  matchSignalToSku,
+  type SkuDictionary
+} from "./signalSkuMatcher";
 
 /**
  * 归一后分析：SKU 匹配 → 回收价 → 理论空间 → 可执行性。
@@ -202,17 +207,26 @@ const analyzeRow = async (
     };
   };
 
+  const clearRecycle = {
+    current_recycle_price: null,
+    recycle_price_updated_at: null,
+    recycle_source: null,
+    recycle_confidence: null,
+    gross_spread: null,
+    gross_margin_rate: null
+  };
+
   // Rule 1：没有可靠 SKU → 未匹配线报，不参与利润计算
   if (match.match_status === "unmatched") {
-    return finalize("UNMATCHED", {}, match.note);
+    return finalize("UNMATCHED", clearRecycle, match.note);
   }
   if (match.match_status === "ambiguous") {
-    return finalize("AMBIGUOUS", {}, match.note);
+    return finalize("AMBIGUOUS", clearRecycle, match.note);
   }
 
   // Rule 2：匹配到 SKU 但没有可用价格 → 待人工价格确认
   if (finalBuyPrice === null || !(finalBuyPrice > 0)) {
-    return finalize("PENDING_PRICE", {}, "已匹配 SKU 但没有可确定的入手价");
+    return finalize("PENDING_PRICE", clearRecycle, "已匹配 SKU 但没有可确定的入手价");
   }
 
   // Rule 3：有价格但没有回收价 → 待回收价确认
@@ -222,7 +236,7 @@ const analyzeRow = async (
     variant_name: match.variant_name
   });
   if (!recycle) {
-    return finalize("PENDING_RECYCLE", {}, "已匹配 SKU 且有价格，但没有可用的回收价来源");
+    return finalize("PENDING_RECYCLE", clearRecycle, "已匹配 SKU 且有价格，但没有可用的回收价来源");
   }
 
   const grossSpread = Number((recycle.price - finalBuyPrice).toFixed(2));
@@ -273,7 +287,11 @@ export const analyzeNormalizedSignals = async (
     params.push(...options.ids);
   }
   if (options.onlyPending) {
-    where.push("profit_status IN ('UNMATCHED', 'PENDING_PRICE', 'PENDING_RECYCLE')");
+    const excluded = SIGNAL_EXCLUDED_CATEGORIES.map(() => "?").join(", ");
+    where.push(
+      `(profit_status IN ('UNMATCHED', 'PENDING_PRICE', 'PENDING_RECYCLE') OR category_name IN (${excluded}))`
+    );
+    params.push(...SIGNAL_EXCLUDED_CATEGORIES);
   }
   const limit = Math.min(Math.max(Number(options.limit) || 500, 1), 5000);
 

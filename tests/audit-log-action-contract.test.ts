@@ -70,6 +70,11 @@ test("audit logs accept archive and restore actions and still reject unknown one
       assert.equal(stored?.action, action);
     }
 
+    const chinese = await postAuditLog(baseUrl, { id: "audit-plan-archive-cn-1", action: "归档" });
+    const chinesePayload = await chinese.json();
+    assert.equal(chinese.status, 200, `中文归档应归一成 archive：${JSON.stringify(chinesePayload)}`);
+    assert.equal(chinesePayload.data.action, "archive");
+
     const unknown = await postAuditLog(baseUrl, { id: "audit-plan-bogus-1", action: "bogus" });
     const unknownPayload = await unknown.json();
     assert.equal(unknown.status, 400);
@@ -78,8 +83,8 @@ test("audit logs accept archive and restore actions and still reject unknown one
     const listed = await fetch(`${baseUrl}/api/business/audit-logs?action=archive&workspace=business`);
     const listedPayload = await listed.json();
     assert.equal(listed.status, 200);
-    assert.equal(listedPayload.data.length, 1);
-    assert.equal(listedPayload.data[0].action, "archive");
+    assert.equal(listedPayload.data.length, 2);
+    assert.ok(listedPayload.data.every((row: { action: string }) => row.action === "archive"));
   } finally {
     await new Promise<void>(resolve => server.close(() => resolve()));
     await closeDatabase();

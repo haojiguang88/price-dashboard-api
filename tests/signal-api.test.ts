@@ -13,19 +13,18 @@ import { analyzeNormalizedSignals } from "../src/services/signal/signalAnalysisS
 
 const seed = async (db: any) => {
   // 历史迁移已经种过一部分目录，所以统一用 OR IGNORE 再回查，避免撞唯一约束。
-  await db.run("INSERT OR IGNORE INTO categories (name) VALUES ('泡泡玛特')");
-  const category = await db.get("SELECT id FROM categories WHERE name = '泡泡玛特'");
-  await db.run("INSERT OR IGNORE INTO objects (category_id, name) VALUES (?, 'Zsiga')", [category.id]);
-  const object = await db.get("SELECT id FROM objects WHERE category_id = ? AND name = 'Zsiga'", [category.id]);
-  await db.run("INSERT OR IGNORE INTO variants (object_id, name) VALUES (?, '向往之处')", [object.id]);
+  await db.run("INSERT OR IGNORE INTO categories (name) VALUES ('游戏机')");
+  const category = await db.get("SELECT id FROM categories WHERE name = '游戏机'");
+  await db.run("INSERT OR IGNORE INTO objects (category_id, name) VALUES (?, 'PS5国行数字slim')", [category.id]);
+  await db.run("INSERT OR IGNORE INTO categories (name) VALUES ('纪念币')");
+  const coinCategory = await db.get("SELECT id FROM categories WHERE name = '纪念币'");
+  await db.run("INSERT OR IGNORE INTO objects (category_id, name) VALUES (?, '龙银币')", [coinCategory.id]);
 
   await db.run(
     `INSERT INTO price_records (date, category, object_name, variant, price, source, created_at, updated_at)
-     VALUES ('2026-10-06', '泡泡玛特', 'Zsiga', '向往之处', 588, '千岛泡泡玛特', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
-  );
-  await db.run(
-    `INSERT INTO market_book_snapshots (category, object_name, variant, date, source_key, bid_price, price_kind, captured_at)
-     VALUES ('泡泡玛特', 'Zsiga', '向往之处', '2026-10-06', 'qiandao_popmart', 560, 'flash_min', '2026-10-06T10:00:00+08:00')`
+     VALUES
+       ('2026-10-06', '游戏机', 'PS5国行数字slim', '', 3100, '东旭游戏机档口', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+       ('2026-10-06', '纪念币', '龙银币', '', 520, '爱藏龙银币', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
   );
 };
 
@@ -74,8 +73,8 @@ test("线报监控 API：列表 / 详情 / 审核 / 结果 / 失效 / 统计 / �
     await runMigrations(filename);
     await seed(db);
 
-    const highValueId = await insertSignal(db, "Zsiga 向往之处 到手399元", 399);
-    const profitableId = await insertSignal(db, "Zsiga 向往之处 到手490元", 490);
+    const highValueId = await insertSignal(db, "PS5国行数字slim 到手2900元", 2900);
+    const profitableId = await insertSignal(db, "龙银币 封装 460元", 460);
     await insertSignal(db, "蒙牛纯牛奶 39.9元", 39.9);
     await analyzeNormalizedSignals({ db, ids: [highValueId, profitableId] });
 
@@ -89,7 +88,7 @@ test("线报监控 API：列表 / 详情 / 审核 / 结果 / 失效 / 统计 / �
 
     const filtered = await (await fetch(`${url}/api/signal/signals?profit_status=HIGH_VALUE_CANDIDATE`)).json();
     assert.equal(filtered.pagination.total, 1);
-    assert.equal(filtered.data[0].gross_spread, 161);
+    assert.equal(filtered.data[0].gross_spread, 200);
 
     const unmatchedList = await (await fetch(`${url}/api/signal/signals?match_status=unmatched&page_size=5`)).json();
     assert.equal(unmatchedList.pagination.total, 1);
@@ -98,9 +97,9 @@ test("线报监控 API：列表 / 详情 / 审核 / 结果 / 失效 / 统计 / �
     const detailResponse = await fetch(`${url}/api/signal/signals/${highValueId}`);
     const detail = await detailResponse.json();
     assert.equal(detailResponse.status, 200);
-    assert.equal(detail.data.sku, "泡泡玛特/Zsiga/向往之处");
-    assert.equal(detail.data.current_recycle_price, 560);
-    assert.equal(detail.data.recycle_source, "千岛收购价");
+    assert.equal(detail.data.sku, "游戏机/PS5国行数字slim");
+    assert.equal(detail.data.current_recycle_price, 3100);
+    assert.equal(detail.data.recycle_source, "东旭游戏机档口");
     // 首次发现已过观察窗口 + 只有单个采集器看到 + 有明确外链 → 标为私家车候选（只是提示，不是判断）
     assert.equal(detail.data.private_candidate, true);
     assert.deepEqual(detail.data.raw_signals, [], "这条还没挂原始记录");

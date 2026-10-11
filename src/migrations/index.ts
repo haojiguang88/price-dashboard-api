@@ -13642,6 +13642,197 @@ ${marker}：大网红本人亲自上阵、加价卖货。币圈一批大佬反�
         ('zuankeba', '赚客吧', 'html', 'https://www.zuankeba.cn', 1, 'zuankeba', 120, 20, 'A',
          '公开线报页 + 首页 JSON-LD ItemList；赚客吧推送服务本身是聚合，只作第三个时间观察点。');
     `
+  },
+  {
+    id: '20261010_001_seed_zsiga_gingerbread_a_position_case',
+    name: 'Seed Zsiga gingerbread missing A-position occupancy case without calling it a miss',
+    run: async (db: any) => {
+      const freezeDate = '2026-10-10';
+      const marker = `认知冻结日：${freezeDate}`;
+      const marketTitle = '2026 Zsiga姜饼人：没有A仓占位，现价不能写成踏空（进行中 V0.1）';
+      const behaviorTitle = '姜饼人：1000附近该占A仓没占，现价不是补课口';
+      const projectName = 'Zsiga姜饼人';
+
+      const findPatternId = async (name: string) => {
+        const row = await dbGet<{ id: number }>(
+          db,
+          `SELECT id FROM behavior_patterns
+           WHERE name = ? AND is_deleted = 0 AND status = 'active'
+           ORDER BY id LIMIT 1`,
+          [name]
+        );
+        if (!row) throw new Error(`Required behavior pattern is missing: ${name}`);
+        return row.id;
+      };
+
+      let marketReview: { id: number } | undefined;
+      if (await migrationTableExists(db, 'market_reviews')) {
+        marketReview = await dbGet<{ id: number }>(
+          db,
+          `SELECT id FROM market_reviews
+           WHERE is_deleted = 0 AND (title = ? OR project_name = ?)
+           ORDER BY id LIMIT 1`,
+          [marketTitle, projectName]
+        );
+        if (!marketReview) {
+          await dbRun(
+            db,
+            `INSERT INTO market_reviews
+              (title, track, project_name, review_date, market_type_preset,
+               market_type_custom, summary_conclusion, short_lesson, background,
+               market_start, market_evolution, key_turning_points, later_outcome,
+               exposed_problem, extracted_lesson, note, is_deleted, created_at, updated_at)
+             VALUES (?, '泡泡玛特', ?, ?, '自定义', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                     0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+            [
+              marketTitle,
+              projectName,
+              freezeDate,
+              '工艺复杂可观察 / 人为扫货 / 国内未补货 / 无A仓占位 / 进行中',
+              '姜饼人工艺复杂、有承接，年度计划里可以观察，但本人没有在1000附近拿一两只做A仓占位。2026-10-09千岛价1793，官方原价399。这波也是人为扫上去的；国内没有补货、国外有货，国内何时补不知道。不太相信泡泡玛特会一直不补。现价再涨或再砸，都不能把这次写成绝对踏空——中间随时可能补货。核心只记A仓占位的重要性。',
+              'A仓占位是观察盘的座位，不是去跟扫货。没有座位不能叫踏空，因为中间随时可能补货；现价更不能拿来补这个座位。',
+              '一、当时看见什么\n\n姜饼人挂在泡泡玛特 / Zsiga / 姜饼人。年度计划口子：泡泡玛特整体只观察，唯一授权执行的是向往之处小仓；姜饼人可以观察，因为工艺复杂、有承接。线上没有姜饼人仓位。向往之处有A仓8个、均价约512。\n\n价格只使用生意库千岛日价，不是本人成交。官方原价399记在线上原价表（2026-10-03）。',
+              '二、供给判断（冻结日仍成立）\n\n这波是人为扫上去的。国内没有补货，国外有货，国内什么时候补不知道。嘎子姐/向往之处经常补货，价上能看到：4月、7月少量补、8月周年庆补。姜饼人价格备注里没有国内补货，4月那次只有「人为拉盘 / 连续扫货拉升 / 开始砸了」。\n\n不太相信泡泡玛特会一直不补。Labubu已经证明：不是补不补，是有限补还能消化，还是变成系列级无限放。国内没补只说明后一条还没开枪，不证明永远不开枪。',
+              '三、本地价格（截止2026-10-09，冻结日2026-10-10）\n\n姜饼人千岛日价：2026-03-30约965；4/1低点820；4/13–4/14从1345拉到1600（备注人为拉盘、连续扫货），4/17砸回966，那次砸没有国内补货备注。6/6真正低点858。950–1100从3月底落到8月中，窗口很长。9/6周年庆附近1111，国庆后加速：10/1的1427到10/9的1793，穿过4月拉盘高点1600。\n\n同系列没有一起疯：向往之处10/9为579（原价399，溢价约45%）；遇见的惊喜523。',
+              '四、动作\n\n1000附近没有拿一两只做A仓占位。这是观察漏了座位，不是已经判断它不会涨。现价1793不去补这个座位，也不把空仓改写成踏空保护。',
+              '五、当前不能下的结论\n\nV0.1不写结局：\n\n1. 不确认1793之后一定继续涨，也不确认一定砸回来；\n2. 不把没有A仓写成绝对踏空——万一中间国内补货，这个价会先被供给打穿；\n3. 不把4月1600那次砸外推成这次也会三天砸完，那次是扫货离场，这次还没有出现同类砸盘备注；\n4. 不把现价拿来补A仓，那是接扫货盘，不是占位；\n5. 不把姜饼人自动写成嘎子姐二代，也不把向往之处的A仓规则套过来授权开仓。',
+              '观察盘没有A仓，后面无论涨还是补货砸，复盘都会拧巴：涨了像踏空，砸了又像躲过。A仓一两只的意义是座位和成本锚，不是去吃整段扫货。',
+              '有承接、能观察的品，A仓占位有时比看对方向更重要。座位要在赔率还舒服的时候占；扫货把价顶上去之后，再补课就不是A仓了。',
+              `版本：V0.1\n状态：进行中\n${marker}\n价格数据截止日：2026-10-09\n数据口径：本地/线上生意库千岛日价；官方原价399来自线上 original_price_records。国内未补、国外有货为本人判断，补货时间线未给姜饼人建过条目。\n本人立场：观察，未建姜饼人A仓。现价不追。后续国内补货、扫货离场或价格中枢变化只新增带日期记录，形成V0.2，不改写V0.1。`
+            ]
+          );
+          marketReview = await dbGet<{ id: number }>(
+            db,
+            `SELECT id FROM market_reviews WHERE title = ? AND is_deleted = 0 ORDER BY id LIMIT 1`,
+            [marketTitle]
+          );
+        }
+      }
+
+      if (!(await migrationTableExists(db, 'behavior_cases'))) return;
+      let behaviorCase = await dbGet<{ id: number }>(
+        db,
+        `SELECT id FROM behavior_cases
+         WHERE is_deleted = 0 AND (title = ? OR project_name = ?)
+         ORDER BY id LIMIT 1`,
+        [behaviorTitle, projectName]
+      );
+      if (!behaviorCase) {
+        await dbRun(
+          db,
+          `INSERT INTO behavior_cases
+            (title, origin_type, subject_alias, source_note, evidence_level, case_date,
+             track, project_name, background, visible_information, pressure_context,
+             action_taken, result, action_quality, outcome_type, evidence_role,
+             self_response, learn_to_keep, learn_to_avoid, applicability_boundary,
+             linked_rule_refs_json, source_type, source_id, source_snapshot_json,
+             pricing_analysis_json, note, is_deleted, created_at, updated_at)
+           VALUES (?, 'self', ?, ?, 'first_hand', ?,
+                   '泡泡玛特', ?, ?, ?, ?,
+                   ?, ?, 'mixed', 'ongoing', 'boundary',
+                   ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0,
+                   CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [
+            behaviorTitle,
+            '自己观察，未建姜饼人A仓',
+            '千岛日价截止2026-10-09。官方原价399来自线上原价表。国内未补、国外有货、这波人为扫货为本人判断。未核验国外库存量和国内补货日期。',
+            freezeDate,
+            projectName,
+            '姜饼人工艺复杂、有承接，计划里可以观察。1000附近窗口很长，没有拿一两只占A仓。向往之处同期有A仓。',
+            '4月人为拉盘到1600后砸回966，那次没有国内补货备注。6/6低点858，950–1100持续到8月中。10/9千岛1793，约4.5倍原价399。国内仍未见补货记录。',
+            '现价已经穿过4月拉盘高点，容易把空仓说成踏空。别人扫货赚钱时，最容易在1793补课。',
+            '1000附近没有拿一两只做A仓占位。现价1793不追，不把空仓改写成踏空保护。原因是座位该在1000占，不是判断它一定涨或一定跌。',
+            '截止2026-10-10，姜饼人仍在高位、国内仍未补。会不会掉不知道。这次失误是没有A仓占位，不是看错方向后的踏空账单。',
+            '有承接的观察盘，A仓占位有时很重要：一两只是座位和成本锚。没有座位，涨了像踏空，中间一补货又像躲过，复盘会拧。现价不是补座位的地方。',
+            '看懂「工艺复杂、国内薄、可能被扫」之后，在1000附近用一两只把座位占上。不追扫货盘。',
+            '避免把没有A仓写成绝对踏空；避免用1793去补1000的座位；避免因为不太信官方会补，就把国内供给当成永远空白。',
+            '适用于工艺复杂、国内供给薄、能观察但还不是主做的潮玩。不适用于通货补主力，也不把本案例写成现在可以开仓或必须追高。',
+            JSON.stringify([
+              '观察盘的A仓占位是座位，不是去跟扫货',
+              '没有A仓不能叫绝对踏空，中间随时可能补货',
+              '现价不是补A仓的地方'
+            ]),
+            marketReview ? 'market_review' : '',
+            marketReview ? String(marketReview.id) : '',
+            JSON.stringify({
+              capturedBy: 'migration-20261010_001',
+              sourceType: marketReview ? 'market_review' : '',
+              sourceId: marketReview ? String(marketReview.id) : '',
+              cognitionFrozenAt: freezeDate,
+              participated: false,
+              aPositionTaken: false,
+              inventedPostMove: false
+            }),
+            JSON.stringify({
+              basePriceLabel: '官方原价（线上 original_price_records，2026-10-03）',
+              basePrice: 399,
+              observedPriceLabel: '千岛日价（2026-06-06低点至2026-10-09）',
+              observedPriceLow: 858,
+              observedPriceHigh: 1793,
+              priceSignalType: 'market_reference',
+              conditionStack: [
+                '工艺复杂有承接',
+                '国内未补货',
+                '国外有货',
+                '人为扫货',
+                '1000附近无A仓',
+                '现价不追'
+              ],
+              buyerBreadth: 'concentrated',
+              keyBuyerDependency: 'high',
+              exitLiquidity: 'limited',
+              verificationNote: '1793/858/1600/966均为千岛日价，不是本人成交。4月砸盘备注为人为拉盘后离场，不是国内补货。国内补货日期未知，不把「尚未补货」写成「不会补货」。'
+            }),
+            `版本：V0.1\n${marker}\n本人立场：观察，未建姜饼人A仓。\n后续国内补货或扫货离场只追加记录，不改写「1000该占位、现价不补课」。`
+          ]
+        );
+        behaviorCase = await dbGet<{ id: number }>(
+          db,
+          `SELECT id FROM behavior_cases WHERE title = ? AND is_deleted = 0 ORDER BY id LIMIT 1`,
+          [behaviorTitle]
+        );
+      }
+
+      if (behaviorCase && await migrationTableExists(db, 'behavior_case_pattern_links')) {
+        const links: Array<{ name: string; role: 'primary' | 'secondary' }> = [
+          { name: '主动放弃与纪律优先', role: 'primary' },
+          { name: '资金拉盘', role: 'secondary' },
+          { name: '补货结构反转', role: 'secondary' },
+          { name: '追高', role: 'secondary' }
+        ];
+        for (const link of links) {
+          await dbRun(
+            db,
+            `INSERT OR IGNORE INTO behavior_case_pattern_links
+              (case_id, pattern_id, role, note, created_at, updated_at)
+             VALUES (?, ?, ?, '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+            [behaviorCase.id, await findPatternId(link.name), link.role]
+          );
+        }
+      }
+
+      if (behaviorCase && await migrationTableExists(db, 'audit_logs')) {
+        await dbRun(
+          db,
+          `INSERT OR IGNORE INTO audit_logs
+            (id, timestamp, module, action, target, status, detail, entity_id,
+             path, domain, workspace, created_at, updated_at)
+           VALUES (?, CURRENT_TIMESTAMP, '人因案例库', 'create', ?, 'success', ?, ?,
+                   '/review/human-cases', 'business', 'business', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [
+            'audit-human-case-zsiga-gingerbread-a-position-20261010',
+            behaviorTitle,
+            JSON.stringify({
+              version: 'V0.1',
+              participated: false,
+              aPositionTaken: false,
+              primaryPattern: '主动放弃与纪律优先'
+            }),
+            String(behaviorCase.id)
+          ]
+        );
+      }
+    }
   }
 ];
 

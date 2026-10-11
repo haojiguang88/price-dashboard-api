@@ -52,6 +52,57 @@ const toPositive = (value: unknown): number | null => {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 };
 
+const hitFromRow = (
+  row: { price?: unknown; date?: string | null; source?: string | null } | undefined,
+  sourceLabel: string,
+  precision: ProviderHit["precision"],
+  matchedVariant: string
+): ProviderHit | null => {
+  const price = toPositive(row?.price);
+  if (price === null) return null;
+  return {
+    price,
+    effective_date: row?.date || null,
+    source_label: row?.source || sourceLabel,
+    precision,
+    matched_variant: matchedVariant
+  };
+};
+
+/** 没有空变体报价时，用最近一日该对象各变体最低价当对象级。人工审核兜底，不因为没写颜色就丢掉。 */
+const objectLevelFromLatestVariants = async (
+  db: any,
+  target: Required<RecycleTarget>,
+  sourceLabels: string[],
+  sourceLabel: string
+): Promise<ProviderHit | null> => {
+  const placeholders = sourceLabels.map(() => "?").join(", ");
+  const latest = await db.get(
+    `SELECT date
+       FROM price_records
+      WHERE category = ? AND object_name = ?
+        AND source IN (${placeholders})
+        AND CAST(price AS REAL) > 0
+      ORDER BY date DESC, id DESC
+      LIMIT 1`,
+    [target.category_name, target.object_name, ...sourceLabels]
+  );
+  if (!latest?.date) return null;
+
+  const cheapest = await db.get(
+    `SELECT CAST(price AS REAL) AS price, date, source, COALESCE(variant, '') AS variant
+       FROM price_records
+      WHERE category = ? AND object_name = ?
+        AND source IN (${placeholders})
+        AND date = ?
+        AND CAST(price AS REAL) > 0
+      ORDER BY CAST(price AS REAL) ASC, id DESC
+      LIMIT 1`,
+    [target.category_name, target.object_name, ...sourceLabels, latest.date]
+  );
+  return hitFromRow(cheapest, sourceLabel, "object", "");
+};
+
 const priceRecordLookup = (
   sourceLabels: string[],
   sourceLabel: string
@@ -70,35 +121,15 @@ const priceRecordLookup = (
 
   if (target.variant_name) {
     const exact = await db.get(query, [target.category_name, target.object_name, target.variant_name, ...sourceLabels]);
-    if (exact) {
-      const price = toPositive(exact.price);
-      if (price !== null) {
-        return {
-          price,
-          effective_date: exact.date || null,
-          source_label: exact.source || sourceLabel,
-          precision: "variant",
-          matched_variant: target.variant_name
-        };
-      }
-    }
+    const hit = hitFromRow(exact, sourceLabel, "variant", target.variant_name);
+    if (hit) return hit;
   }
 
   const objectLevel = await db.get(query, [target.category_name, target.object_name, "", ...sourceLabels]);
-  if (objectLevel) {
-    const price = toPositive(objectLevel.price);
-    if (price !== null) {
-      return {
-        price,
-        effective_date: objectLevel.date || null,
-        source_label: objectLevel.source || sourceLabel,
-        precision: "object",
-        matched_variant: ""
-      };
-    }
-  }
+  const emptyVariant = hitFromRow(objectLevel, sourceLabel, "object", "");
+  if (emptyVariant) return emptyVariant;
 
-  return null;
+  return objectLevelFromLatestVariants(db, target, sourceLabels, sourceLabel);
 };
 
 const QIANDAO_BID: RecycleProvider = {
@@ -130,11 +161,36 @@ const QIANDAO_BID: RecycleProvider = {
       }
     }
     const objectLevel = await db.get(query, [target.category_name, target.object_name, ""]);
-    const price = toPositive(objectLevel?.bid_price);
+    const emptyPrice = toPositive(objectLevel?.bid_price);
+    if (emptyPrice !== null) {
+      return {
+        price: emptyPrice,
+        effective_date: objectLevel.date || null,
+        source_label: "千岛收购价",
+        precision: "object",
+        matched_variant: ""
+      };
+    }
+    const latest = await db.get(
+      `SELECT date FROM market_book_snapshots
+        WHERE category = ? AND object_name = ?
+          AND bid_price IS NOT NULL AND CAST(bid_price AS REAL) > 0
+        ORDER BY date DESC, id DESC LIMIT 1`,
+      [target.category_name, target.object_name]
+    );
+    if (!latest?.date) return null;
+    const cheapest = await db.get(
+      `SELECT bid_price, date FROM market_book_snapshots
+        WHERE category = ? AND object_name = ? AND date = ?
+          AND bid_price IS NOT NULL AND CAST(bid_price AS REAL) > 0
+        ORDER BY CAST(bid_price AS REAL) ASC, id DESC LIMIT 1`,
+      [target.category_name, target.object_name, latest.date]
+    );
+    const price = toPositive(cheapest?.bid_price);
     if (price === null) return null;
     return {
       price,
-      effective_date: objectLevel.date || null,
+      effective_date: cheapest.date || null,
       source_label: "千岛收购价",
       precision: "object",
       matched_variant: ""
@@ -247,12 +303,41 @@ const GENERIC_RECYCLE_PROVIDER: RecycleProvider = {
       }
     }
     const objectLevel = await db.get(query, [target.category_name, target.object_name, ""]);
-    const price = toPositive(objectLevel?.price);
+    const emptyPrice = toPositive(objectLevel?.price);
+    if (emptyPrice !== null) {
+      return {
+        price: emptyPrice,
+        effective_date: objectLevel.date || null,
+        source_label: objectLevel.source || "回收来源",
+        precision: "object",
+        matched_variant: ""
+      };
+    }
+    const latest = await db.get(
+      `SELECT date FROM price_records
+        WHERE category = ? AND object_name = ?
+          AND source LIKE '%回收%'
+          AND CAST(price AS REAL) > 0
+        ORDER BY date DESC, id DESC LIMIT 1`,
+      [target.category_name, target.object_name]
+    );
+    if (!latest?.date) return null;
+    const cheapest = await db.get(
+      `SELECT CAST(price AS REAL) AS price, date, source
+         FROM price_records
+        WHERE category = ? AND object_name = ?
+          AND source LIKE '%回收%'
+          AND date = ?
+          AND CAST(price AS REAL) > 0
+        ORDER BY CAST(price AS REAL) ASC, id DESC LIMIT 1`,
+      [target.category_name, target.object_name, latest.date]
+    );
+    const price = toPositive(cheapest?.price);
     if (price === null) return null;
     return {
       price,
-      effective_date: objectLevel.date || null,
-      source_label: objectLevel.source || "回收来源",
+      effective_date: cheapest.date || null,
+      source_label: cheapest.source || "回收来源",
       precision: "object",
       matched_variant: ""
     };

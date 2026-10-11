@@ -57,13 +57,13 @@ const seedCatalog = async (db: any) => {
     );
   }
 
-  // 采集侧别名
-  const zsiga = await db.get("SELECT id FROM objects WHERE name = 'Zsiga'");
-  const zsigaVariant = await db.get("SELECT id FROM variants WHERE object_id = ? AND name = '向往之处'", [zsiga.id]);
+  // 采集侧别名：线报不盯泡泡玛特，别名样本改用纪念币
+  const coin = await db.get("SELECT id FROM objects WHERE name = '龙银币'");
+  const coinVariant = await db.get("SELECT id FROM variants WHERE object_id = ? AND name = '2025年'", [coin.id]);
   await db.run(
     `INSERT INTO source_mappings (source_key, source_name, external_key, external_name, category_name, object_name, variant_name, variant_id, status)
-     VALUES ('qiandao_popmart', '千岛', 'spu-1', 'Zsiga 向往之处', '泡泡玛特', 'Zsiga', '向往之处', ?, 'enabled')`,
-    [zsigaVariant.id]
+     VALUES ('aizang', '爱藏', 'long-silver', '生肖龙银', '纪念币', '龙银币', '', ?, 'enabled')`,
+    [coinVariant.id]
   );
 };
 
@@ -90,14 +90,13 @@ test("SKU 匹配：变体优先于父对象，短中文名也能命中", async (
   await withDatabase(async db => {
     const dictionary = await buildSkuDictionary(db, { force: true });
 
-    const variant = matchSignalToSku("Zsiga 向往之处 到手399元", "", dictionary);
+    const variant = matchSignalToSku("马年银币 15g小马 610元", "", dictionary);
     assert.equal(variant.match_status, "matched");
-    assert.equal(variant.sku, "泡泡玛特/Zsiga/向往之处");
+    assert.equal(variant.sku, "纪念币/马年银币/15g小马");
 
-    // 只提到系列、没提到具体款 → 命中的是系列
-    const series = matchSignalToSku("泡泡玛特 Zsiga 上新了", "", dictionary);
-    assert.equal(series.match_status, "matched");
-    assert.equal(series.sku, "泡泡玛特/Zsiga");
+    const popmart = matchSignalToSku("Zsiga 向往之处 到手399元", "", dictionary);
+    assert.equal(popmart.match_status, "unmatched", "泡泡玛特不进线报撸货匹配");
+    assert.equal(popmart.sku, null);
 
     // 3 个汉字是很强的判别词，不能被长度门槛误杀
     const silver = matchSignalToSku("龙银币 封装 560元", "", dictionary);
@@ -162,9 +161,9 @@ test("颜色类变体名不能单独当 SKU（真实误配回归）", async () =
 test("SKU 匹配：外部别名能落到同一个 SKU", async () => {
   await withDatabase(async db => {
     const dictionary = await buildSkuDictionary(db, { force: true });
-    const result = matchSignalToSku("千岛同款 Zsiga 向往之处 特价", "", dictionary);
+    const result = matchSignalToSku("爱藏同款 生肖龙银 特价", "", dictionary);
     assert.equal(result.match_status, "matched");
-    assert.equal(result.sku, "泡泡玛特/Zsiga/向往之处");
+    assert.equal(result.sku, "纪念币/龙银币");
   });
 });
 
@@ -189,7 +188,7 @@ test("回收价 provider：千岛收购价 / 回收商报价 / 退到对象级 /
     assert.equal(dealer?.price, 3100);
     assert.equal(dealer?.provider, "dongxu_dealer");
 
-    // 变体没有专门报价 → 退到对象级，置信度打折
+    // 变体没有专门报价 → 退到对象空变体，置信度打折
     await db.run(
       `INSERT INTO price_records (date, category, object_name, variant, price, source, created_at, updated_at)
        VALUES ('2026-10-04', '纪念币', '龙银币', '', 520, '爱藏龙银币', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
@@ -198,6 +197,23 @@ test("回收价 provider：千岛收购价 / 回收商报价 / 退到对象级 /
     assert.equal(fallback?.price, 520);
     assert.equal(fallback?.precision, "object");
     assert.ok((fallback?.confidence ?? 1) < 0.7, "退回对象级要打折");
+
+    // 只有颜色变体报价、线报没写颜色 → 按最近一日各变体最低价当对象级
+    await db.run(
+      `INSERT INTO price_records (date, category, object_name, variant, price, source, created_at, updated_at)
+       VALUES
+         ('2026-10-09', '苹果手机', 'iPhone 17 256G', '黑色', 5560, '潮收汇苹果备用报价', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+         ('2026-10-09', '苹果手机', 'iPhone 17 256G', '白色', 5560, '潮收汇苹果备用报价', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+         ('2026-10-09', '苹果手机', 'iPhone 17 Pro 256G', '橙色', 7550, '潮收汇苹果备用报价', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+         ('2026-10-09', '苹果手机', 'iPhone 17 Pro 256G', '银色', 7810, '潮收汇苹果备用报价', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+    );
+    const apple = await resolveRecyclePrice(db, { category_name: "苹果手机", object_name: "iPhone 17 256G", variant_name: "" });
+    assert.equal(apple?.price, 5560);
+    assert.equal(apple?.precision, "object");
+    assert.equal(apple?.provider, "cshrich_apple_backup");
+
+    const pro = await resolveRecyclePrice(db, { category_name: "苹果手机", object_name: "iPhone 17 Pro 256G" });
+    assert.equal(pro?.price, 7550, "颜色价不一样时取最近一日最低，避免把空间算大");
 
     // 没有可用来源 → null（上层标待回收价确认，不拿卖价冒充）
     const none = await resolveRecyclePrice(db, { category_name: "泡泡玛特", object_name: "MOKOKO系列", variant_name: "大春花" });
@@ -255,18 +271,18 @@ const insertNormalized = async (db: any, input: {
 test("分析规则：未匹配 / 待价格 / 待回收价 / 无利润 / 有空间 / 高价值", async () => {
   await withDatabase(async db => {
     await db.run(
-      `INSERT INTO market_book_snapshots (category, object_name, variant, date, source_key, bid_price, price_kind, captured_at)
-       VALUES ('泡泡玛特', 'Zsiga', '向往之处', '2026-10-06', 'qiandao_popmart', 560, 'flash_min', '2026-10-06T10:00:00+08:00')`
+      `INSERT INTO price_records (date, category, object_name, variant, price, source, created_at, updated_at)
+       VALUES ('2026-10-06', '游戏机', 'PS5国行数字slim', '', 3100, '东旭游戏机档口', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
     );
 
     const unmatched = await insertNormalized(db, { title: "蒙牛纯牛奶 39.9元", finalBuyPrice: 39.9 });
-    const pendingPrice = await insertNormalized(db, { title: "Zsiga 向往之处 上新", finalBuyPrice: null, priceStatus: "manual_review" });
-    const noRecycle = await insertNormalized(db, { title: "MOKOKO系列 大春花 129元", finalBuyPrice: 129 });
-    const noProfit = await insertNormalized(db, { title: "Zsiga 向往之处 到手600元", finalBuyPrice: 600 });
+    const pendingPrice = await insertNormalized(db, { title: "PS5国行数字slim 上新", finalBuyPrice: null, priceStatus: "manual_review" });
+    const noRecycle = await insertNormalized(db, { title: "龙银币 封装 560元", finalBuyPrice: 560 });
+    const noProfit = await insertNormalized(db, { title: "PS5国行数字slim 到手3200元", finalBuyPrice: 3200 });
     // 低于阈值的空间（default minimum_profit = 100）
-    const profitable = await insertNormalized(db, { title: "Zsiga 向往之处 到手490元", finalBuyPrice: 490 });
+    const profitable = await insertNormalized(db, { title: "PS5国行数字slim 到手3040元", finalBuyPrice: 3040 });
     // 达到阈值
-    const highValue = await insertNormalized(db, { title: "Zsiga 向往之处 到手399元", finalBuyPrice: 399, dealUrl: "https://u.jd.com/abc" });
+    const highValue = await insertNormalized(db, { title: "PS5国行数字slim 到手2900元", finalBuyPrice: 2900, dealUrl: "https://u.jd.com/abc" });
 
     const result = await analyzeNormalizedSignals({ db, ids: [unmatched, pendingPrice, noRecycle, noProfit, profitable, highValue] });
     assert.equal(result.analyzed, 6);
@@ -279,15 +295,15 @@ test("分析规则：未匹配 / 待价格 / 待回收价 / 无利润 / 有空�
 
     const profitableRow = await statusOf(profitable);
     assert.equal(profitableRow.profit_status, "PROFITABLE_CANDIDATE");
-    assert.equal(profitableRow.gross_spread, 70);
-    assert.equal(profitableRow.sku, "泡泡玛特/Zsiga/向往之处");
-    assert.equal(profitableRow.current_recycle_price, 560);
-    assert.equal(profitableRow.recycle_source, "千岛收购价");
+    assert.equal(profitableRow.gross_spread, 60);
+    assert.equal(profitableRow.sku, "游戏机/PS5国行数字slim");
+    assert.equal(profitableRow.current_recycle_price, 3100);
+    assert.equal(profitableRow.recycle_source, "东旭游戏机档口");
 
     const highRow = await statusOf(highValue);
     assert.equal(highRow.profit_status, "HIGH_VALUE_CANDIDATE");
-    assert.equal(highRow.gross_spread, 161);
-    assert.ok(highRow.gross_margin_rate > 0.4);
+    assert.equal(highRow.gross_spread, 200);
+    assert.ok(highRow.gross_margin_rate > 0.06);
     assert.ok(highRow.product_price_hash, "算完利润必须回填商品+价格哈希");
   });
 });
@@ -295,32 +311,32 @@ test("分析规则：未匹配 / 待价格 / 待回收价 / 无利润 / 有空�
 test("私家车只是候选标记，且要满足时间与独占条件", async () => {
   await withDatabase(async db => {
     await db.run(
-      `INSERT INTO market_book_snapshots (category, object_name, variant, date, source_key, bid_price, price_kind, captured_at)
-       VALUES ('泡泡玛特', 'Zsiga', '向往之处', '2026-10-06', 'qiandao_popmart', 560, 'flash_min', '2026-10-06T10:00:00+08:00')`
+      `INSERT INTO price_records (date, category, object_name, variant, price, source, created_at, updated_at)
+       VALUES ('2026-10-06', '游戏机', 'PS5国行数字slim', '', 3100, '东旭游戏机档口', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
     );
 
     const fresh = await insertNormalized(db, {
-      title: "Zsiga 向往之处 到手399元",
-      finalBuyPrice: 399,
+      title: "PS5国行数字slim 到手2900元",
+      finalBuyPrice: 2900,
       dealUrl: "https://u.jd.com/abc",
       firstSeenAt: new Date().toISOString()
     });
     const old = await insertNormalized(db, {
-      title: "Zsiga 向往之处 到手399元",
-      finalBuyPrice: 399,
+      title: "PS5国行数字slim 到手2900元",
+      finalBuyPrice: 2900,
       dealUrl: "https://u.jd.com/abc",
       firstSeenAt: "2020-01-01T00:00:00+08:00"
     });
     const shared = await insertNormalized(db, {
-      title: "Zsiga 向往之处 到手399元",
-      finalBuyPrice: 399,
+      title: "PS5国行数字slim 到手2900元",
+      finalBuyPrice: 2900,
       dealUrl: "https://u.jd.com/abc",
       firstSeenAt: "2020-01-01T00:00:00+08:00",
       sourceCount: 3
     });
     const noDealUrl = await insertNormalized(db, {
-      title: "Zsiga 向往之处 到手399元",
-      finalBuyPrice: 399,
+      title: "PS5国行数字slim 到手2900元",
+      finalBuyPrice: 2900,
       firstSeenAt: "2020-01-01T00:00:00+08:00"
     });
 
@@ -337,10 +353,10 @@ test("私家车只是候选标记，且要满足时间与独占条件", async ()
 test("阈值来自 signal_settings，改了立刻生效", async () => {
   await withDatabase(async db => {
     await db.run(
-      `INSERT INTO market_book_snapshots (category, object_name, variant, date, source_key, bid_price, price_kind, captured_at)
-       VALUES ('泡泡玛特', 'Zsiga', '向往之处', '2026-10-06', 'qiandao_popmart', 560, 'flash_min', '2026-10-06T10:00:00+08:00')`
+      `INSERT INTO price_records (date, category, object_name, variant, price, source, created_at, updated_at)
+       VALUES ('2026-10-06', '纪念币', '龙银币', '', 520, '爱藏龙银币', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
     );
-    const id = await insertNormalized(db, { title: "Zsiga 向往之处 到手490元", finalBuyPrice: 490 });
+    const id = await insertNormalized(db, { title: "龙银币 封装 460元", finalBuyPrice: 460 });
 
     await analyzeNormalizedSignals({ db, ids: [id] });
     assert.equal((await db.get("SELECT profit_status FROM normalized_signal WHERE id = ?", [id]))?.profit_status, "PROFITABLE_CANDIDATE");

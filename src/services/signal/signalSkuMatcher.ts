@@ -86,6 +86,13 @@ const KIND_WEIGHT: Record<SkuDictionaryEntry["kind"], number> = {
   object: 1
 };
 
+/** 线报撸货不盯这些品类。泡泡玛特是二级行情生意，跟公开线报不是一套玩法。 */
+export const SIGNAL_EXCLUDED_CATEGORIES = ["泡泡玛特"];
+
+const isExcludedCategory = (categoryName: string) => (
+  SIGNAL_EXCLUDED_CATEGORIES.includes(String(categoryName || "").trim())
+);
+
 export const buildSkuKey = (categoryName: string, objectName: string, variantName: string): string => (
   [categoryName, objectName, variantName].filter(Boolean).join("/")
 );
@@ -152,6 +159,7 @@ export const buildSkuDictionary = async (db: any, options: { force?: boolean } =
     WHERE COALESCE(c.is_archived, 0) = 0
   `);
   for (const row of catalog as Array<{ category_name: string; object_name: string; variant_name: string }>) {
+    if (isExcludedCategory(row.category_name)) continue;
     addObjectEvidence(row.category_name, row.object_name, row.object_name);
     if (row.variant_name) push(row.variant_name, "variant", row.category_name, row.object_name, row.variant_name);
     push(row.object_name, "object", row.category_name, row.object_name, "");
@@ -165,6 +173,7 @@ export const buildSkuDictionary = async (db: any, options: { force?: boolean } =
   `);
   for (const row of mappings as Array<{ external_name: string; category_name: string; object_name: string; variant_name: string }>) {
     if (!row.category_name || !row.object_name) continue;
+    if (isExcludedCategory(row.category_name)) continue;
     // 只有对象级别名才能证明「对象被提到」；变体级别名不能反向证明对象
     if (!row.variant_name) addObjectEvidence(row.category_name, row.object_name, row.external_name);
     push(row.external_name, "alias", row.category_name, row.object_name, row.variant_name || "");
