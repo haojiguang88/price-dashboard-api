@@ -205,6 +205,20 @@ SOURCE_TARGETS = [
         "query": "MEGA ROYAL MOLLY 400% 漫缦花落-绒",
         "spu_id": "890886808303317137",
     },
+    {
+        "object": "手办",
+        "variant": "复古可口可乐火箭摆件",
+        "query": "MEGA SPACE MOLLY 复古可口可乐 火箭摆件",
+        "spu_id": "1046009656108966651",
+        "category": "泡泡玛特",
+    },
+    {
+        "object": "30周年庆典统计",
+        "variant": "30周年庆典统计",
+        "query": "30thC 30周年庆典",
+        "spu_id": "1042229597409662992",
+        "category": "宝可梦",
+    },
 ]
 
 
@@ -212,7 +226,11 @@ def load_source_targets(db_path):
     mappings, configured = load_enabled_source_mappings(db_path, SOURCE_KEY)
     if not configured:
         return [
-            {**target, "variant": str(target.get("variant") or "").strip()}
+            {
+                **target,
+                "variant": str(target.get("variant") or "").strip(),
+                "category": str(target.get("category") or CATEGORY_NAME).strip(),
+            }
             for target in SOURCE_TARGETS
         ]
 
@@ -221,11 +239,13 @@ def load_source_targets(db_path):
         meta = mapping.get("external_meta") or {}
         object_name = str(mapping.get("object_name") or "").strip()
         variant_name = str(mapping.get("variant_name") or "").strip()
+        category_name = str(mapping.get("category_name") or CATEGORY_NAME).strip()
         spu_id = str(meta.get("spu_id") or mapping.get("external_key") or "").strip()
         query = str(meta.get("query") or mapping.get("external_name") or object_name).strip()
         if not object_name or not spu_id or not query:
             continue
         targets.append({
+            "category": category_name,
             "object": object_name,
             "variant": variant_name,
             "query": query,
@@ -421,8 +441,7 @@ def load_enabled_master_data(db_path, category):
 
 def extract_records(
     source_items,
-    enabled_objects,
-    enabled_variants,
+    enabled_by_category,
     category,
     source_targets,
     source_name=SOURCE_NAME,
@@ -435,6 +454,8 @@ def extract_records(
     for item in source_items:
         object_name = item["object"]
         variant_name = str(item.get("variant") or "").strip()
+        item_category = str(item.get("category") or category).strip()
+        enabled_objects, enabled_variants = enabled_by_category.get(item_category, (set(), set()))
         if object_name not in enabled_objects:
             continue
         if variant_name and (object_name, variant_name) not in enabled_variants:
@@ -461,7 +482,7 @@ def extract_records(
             continue
 
         records.append({
-            "category": category,
+            "category": item_category,
             "object": object_name,
             "variant": variant_name,
             "price": display_price,
@@ -475,6 +496,9 @@ def extract_records(
             "book": book,
         })
 
+    enabled_objects = set()
+    for objects, _variants in enabled_by_category.values():
+        enabled_objects |= objects
     unmapped_enabled_objects = sorted(enabled_objects - mapped_objects)
     return records, unmapped_enabled_objects, missing_source_objects, missing_errors
 
@@ -676,8 +700,13 @@ def main():
     parser = build_parser()
     args = parser.parse_args()
     try:
-        enabled_objects, enabled_variants = load_enabled_master_data(args.db, args.category)
         source_targets = load_source_targets(args.db)
+        enabled_by_category = {}
+        for category_name in sorted({
+            str(target.get("category") or args.category).strip()
+            for target in source_targets
+        } | {args.category}):
+            enabled_by_category[category_name] = load_enabled_master_data(args.db, category_name)
         if not source_targets:
             payload = {
                 "success": True,
@@ -703,8 +732,7 @@ def main():
             mark_source_mappings_seen(args.db, SOURCE_KEY, [item["spu_id"] for item in source_items])
         records, unmapped_enabled_objects, missing_source_objects, missing_errors = extract_records(
             source_items,
-            enabled_objects,
-            enabled_variants,
+            enabled_by_category,
             args.category,
             source_targets,
             args.source_name,

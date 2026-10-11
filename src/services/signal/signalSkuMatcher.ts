@@ -87,11 +87,45 @@ const KIND_WEIGHT: Record<SkuDictionaryEntry["kind"], number> = {
 };
 
 /** 线报撸货不盯这些品类。泡泡玛特是二级行情生意，跟公开线报不是一套玩法。 */
-export const SIGNAL_EXCLUDED_CATEGORIES = ["泡泡玛特"];
+export const SIGNAL_EXCLUDED_CATEGORIES = ["泡泡玛特", "宝可梦"];
+
+/**
+ * 整机/主机品类。电脑包、鼠标、扩展坞这类周边会带 ThinkPad / iPhone 品牌词，
+ * 但不能落到整机 SKU 上拿整机回收价算空间。
+ */
+const HOST_DEVICE_CATEGORIES = new Set([
+  "电脑", "游戏机", "任天堂",
+  "苹果手机", "华为", "OPPO", "VIVO", "iQOO", "一加", "小米", "红米", "荣耀",
+  "佳能", "索尼", "索尼相机", "影石"
+]);
+
+/**
+ * 标题在卖周边，不是在卖整机。用在归一化后的文本上（无空格、小写）。
+ * 电脑硬件里的「罗技鼠标」本身就是配件 SKU，不在 HOST_DEVICE_CATEGORIES，不受这层影响。
+ */
+const ACCESSORY_PRODUCT = /电脑包|笔记本包|内胆包|双肩包|单肩包|手提包|电脑背包|书包|办公鼠标|有线鼠标|无线鼠标|鼠标|键盘|键鼠|扩展坞|拓展坞|分线器|保护壳|保护套|手机壳|钢化膜|贴膜|鼠标垫/;
+
+const SHORT_ASCII_MODEL = /^[a-z0-9]{3,8}$/;
 
 const isExcludedCategory = (categoryName: string) => (
   SIGNAL_EXCLUDED_CATEGORIES.includes(String(categoryName || "").trim())
 );
+
+const isAlphanumeric = (char: string) => /[a-z0-9]/i.test(char);
+
+/** 短型号必须整段出现。否则 R7000 会吃进 NR7000I 羽毛球拍。 */
+const isBoundedAlias = (textNorm: string, aliasNorm: string): boolean => {
+  let from = 0;
+  while (from <= textNorm.length - aliasNorm.length) {
+    const index = textNorm.indexOf(aliasNorm, from);
+    if (index < 0) return false;
+    const before = index === 0 ? "" : textNorm[index - 1];
+    const after = index + aliasNorm.length >= textNorm.length ? "" : textNorm[index + aliasNorm.length];
+    if (!isAlphanumeric(before) && !isAlphanumeric(after)) return true;
+    from = index + 1;
+  }
+  return false;
+};
 
 export const buildSkuKey = (categoryName: string, objectName: string, variantName: string): string => (
   [categoryName, objectName, variantName].filter(Boolean).join("/")
@@ -219,6 +253,9 @@ export const buildSkuDictionary = async (db: any, options: { force?: boolean } =
 
 const scoreEntry = (entry: SkuDictionaryEntry, textNorm: string): number | null => {
   if (!textNorm.includes(entry.aliasNorm)) return null;
+  if (SHORT_ASCII_MODEL.test(entry.aliasNorm) && !isBoundedAlias(textNorm, entry.aliasNorm)) {
+    return null;
+  }
 
   const categoryBonus = entry.categoryNorm && textNorm.includes(entry.categoryNorm) ? 3 : 0;
   const rawLength = entry.aliasNorm.length;
@@ -237,6 +274,7 @@ export const matchSignalToSku = (
   dictionary: SkuDictionary
 ): SkuMatchResult => {
   const textNorm = normalizeSignalText(`${String(title ?? "")}\n${String(content ?? "")}`);
+  const accessoryListing = ACCESSORY_PRODUCT.test(textNorm);
 
   if (!textNorm) {
     return {
@@ -255,6 +293,7 @@ export const matchSignalToSku = (
   const bestBySku = new Map<string, { entry: SkuDictionaryEntry; score: number }>();
   const objectEvidence = dictionary.objectEvidence ?? {};
   for (const entry of dictionary.entries) {
+    if (accessoryListing && HOST_DEVICE_CATEGORIES.has(entry.categoryName)) continue;
     // 变体只有在「它所属的对象也被提到」时才算命中，避免颜色/规格词单独成 SKU。
     if (entry.kind === "variant") {
       const evidence = objectEvidence[`${entry.categoryName}|${entry.objectName}`] ?? [];

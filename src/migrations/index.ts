@@ -13833,6 +13833,227 @@ ${marker}：大网红本人亲自上阵、加价卖货。币圈一批大佬反�
         );
       }
     }
+  },
+  {
+    id: '20261011_001_seed_pokemon_30th_and_popmart_coke_rocket',
+    name: 'Add 宝可梦/30周年庆典统计 and 泡泡玛特/手办/复古可口可乐火箭摆件 with 千岛 mappings',
+    run: async (db: any) => {
+      if (!(await migrationTableExists(db, 'categories'))) return;
+      if (!(await migrationTableExists(db, 'objects'))) return;
+      if (!(await migrationTableExists(db, 'variants'))) return;
+
+      const asOf = '2026-10-11';
+
+      const ensureCategory = async (name: string) => {
+        await dbRun(
+          db,
+          'INSERT OR IGNORE INTO categories (name, created_at, updated_at) VALUES (?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)',
+          [name]
+        );
+        const row = await dbGet<{ id: number; name: string }>(
+          db,
+          'SELECT id, name FROM categories WHERE name = ?',
+          [name]
+        );
+        if (!row) throw new Error(`Failed to ensure category ${name}`);
+        await dbRun(
+          db,
+          'UPDATE categories SET is_archived = 0, archived_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+          [row.id]
+        );
+        return row;
+      };
+
+      const ensureObject = async (categoryId: number, name: string) => {
+        await dbRun(
+          db,
+          'INSERT OR IGNORE INTO objects (category_id, name, created_at, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)',
+          [categoryId, name]
+        );
+        const row = await dbGet<{ id: number; name: string }>(
+          db,
+          'SELECT id, name FROM objects WHERE category_id = ? AND name = ?',
+          [categoryId, name]
+        );
+        if (!row) throw new Error(`Failed to ensure object ${name}`);
+        await dbRun(
+          db,
+          'UPDATE objects SET is_archived = 0, archived_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+          [row.id]
+        );
+        return row;
+      };
+
+      const ensureVariant = async (objectId: number, name: string) => {
+        await dbRun(
+          db,
+          'INSERT OR IGNORE INTO variants (object_id, name, created_at, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)',
+          [objectId, name]
+        );
+        const row = await dbGet<{ id: number; name: string }>(
+          db,
+          'SELECT id, name FROM variants WHERE object_id = ? AND name = ?',
+          [objectId, name]
+        );
+        if (!row) throw new Error(`Failed to ensure variant ${name}`);
+        await dbRun(
+          db,
+          'UPDATE variants SET is_archived = 0, archived_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+          [row.id]
+        );
+        return row;
+      };
+
+      const upsertMapping = async (input: {
+        category: { id: number; name: string };
+        object: { id: number; name: string };
+        variant: { id: number; name: string };
+        spuId: string;
+        query: string;
+        externalName: string;
+        note: string;
+      }) => {
+        if (!(await migrationTableExists(db, 'source_mappings'))) return;
+        const externalMeta = JSON.stringify({ query: input.query, spu_id: input.spuId });
+        await dbRun(
+          db,
+          `INSERT OR IGNORE INTO source_mappings
+             (source_key, source_name, external_key, external_name, external_meta_json,
+              category_id, object_id, variant_id, category_name, object_name, variant_name,
+              status, note)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            'qiandao_popmart',
+            '千岛泡泡玛特',
+            input.spuId,
+            input.externalName,
+            externalMeta,
+            input.category.id,
+            input.object.id,
+            input.variant.id,
+            input.category.name,
+            input.object.name,
+            input.variant.name,
+            'enabled',
+            input.note
+          ]
+        );
+        await dbRun(
+          db,
+          `UPDATE source_mappings
+           SET source_name = ?,
+               external_name = ?,
+               external_meta_json = ?,
+               category_id = ?,
+               object_id = ?,
+               variant_id = ?,
+               category_name = ?,
+               object_name = ?,
+               variant_name = ?,
+               status = CASE WHEN status = 'disabled' THEN status ELSE 'enabled' END,
+               note = CASE WHEN status = 'disabled' THEN note ELSE ? END,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE source_key = ? AND external_key = ?`,
+          [
+            '千岛泡泡玛特',
+            input.externalName,
+            externalMeta,
+            input.category.id,
+            input.object.id,
+            input.variant.id,
+            input.category.name,
+            input.object.name,
+            input.variant.name,
+            input.note,
+            'qiandao_popmart',
+            input.spuId
+          ]
+        );
+      };
+
+      const seedOralPrice = async (input: {
+        categoryName: string;
+        objectName: string;
+        variantName: string;
+        price: number;
+        note: string;
+      }) => {
+        if (!(await migrationTableExists(db, 'price_records'))) return;
+        await dbRun(
+          db,
+          `INSERT INTO price_records
+             (date, category, object_name, variant, price, source, note, price_kind, created_at, updated_at)
+           SELECT ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+           WHERE NOT EXISTS (
+             SELECT 1
+             FROM price_records
+             WHERE date = ?
+               AND category = ?
+               AND object_name = ?
+               AND COALESCE(variant, '') = ?
+           )`,
+          [
+            asOf,
+            input.categoryName,
+            input.objectName,
+            input.variantName,
+            input.price,
+            '用户口述',
+            input.note,
+            'market_reference',
+            asOf,
+            input.categoryName,
+            input.objectName,
+            input.variantName
+          ]
+        );
+      };
+
+      const pokemon = await ensureCategory('宝可梦');
+      const anniversary = await ensureObject(pokemon.id, '30周年庆典统计');
+      const anniversaryVariant = await ensureVariant(anniversary.id, '30周年庆典统计');
+      await upsertMapping({
+        category: pokemon,
+        object: anniversary,
+        variant: anniversaryVariant,
+        spuId: '1042229597409662992',
+        query: '30thC 30周年庆典',
+        externalName: '30thC 30周年庆典',
+        note: '千岛 30thC 30周年庆典（宝可梦TCG）。不要误接冰箱贴、卡组、绘梦点睛、补充包和硬币套装。用户口述约390，对应千岛闪购附近。不改写 2026-09-24 观察案例。'
+      });
+      await seedOralPrice({
+        categoryName: pokemon.name,
+        objectName: anniversary.name,
+        variantName: anniversaryVariant.name,
+        price: 390,
+        note: '2026-10-11 用户口述大约390。千岛对照 30thC 30周年庆典，当日闪购约398，不把闪购写成口述价。'
+      });
+
+      const popmart = await dbGet<{ id: number; name: string }>(
+        db,
+        'SELECT id, name FROM categories WHERE name = ?',
+        ['泡泡玛特']
+      );
+      if (!popmart) throw new Error('Missing category 泡泡玛特');
+      const figure = await ensureObject(popmart.id, '手办');
+      const rocket = await ensureVariant(figure.id, '复古可口可乐火箭摆件');
+      await upsertMapping({
+        category: popmart,
+        object: figure,
+        variant: rocket,
+        spuId: '1046009656108966651',
+        query: 'MEGA SPACE MOLLY 复古可口可乐 火箭摆件',
+        externalName: 'MEGA SPACE MOLLY 复古可口可乐 火箭摆件',
+        note: '千岛 MEGA SPACE MOLLY 复古可口可乐 火箭摆件。不要误接 400%、1000%、装饰灯牌和搪胶脸可乐系列。用户口述约3655。'
+      });
+      await seedOralPrice({
+        categoryName: popmart.name,
+        objectName: figure.name,
+        variantName: rocket.name,
+        price: 3655,
+        note: '2026-10-11 用户口述大约3655。千岛对照火箭摆件当日成交均价约3656，闪购更高，不把闪购写成口述价。'
+      });
+    }
   }
 ];
 

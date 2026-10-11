@@ -289,7 +289,11 @@ export const analyzeNormalizedSignals = async (
   if (options.onlyPending) {
     const excluded = SIGNAL_EXCLUDED_CATEGORIES.map(() => "?").join(", ");
     where.push(
-      `(profit_status IN ('UNMATCHED', 'PENDING_PRICE', 'PENDING_RECYCLE') OR category_name IN (${excluded}))`
+      `(profit_status IN ('UNMATCHED', 'PENDING_PRICE', 'PENDING_RECYCLE')
+        OR category_name IN (${excluded})
+        OR (review_status = 'pending'
+            AND match_status = 'matched'
+            AND profit_status IN ('PROFITABLE_CANDIDATE', 'HIGH_VALUE_CANDIDATE')))`
     );
     params.push(...SIGNAL_EXCLUDED_CATEGORIES);
   }

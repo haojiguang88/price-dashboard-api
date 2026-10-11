@@ -36,6 +36,9 @@ const seedCatalog = async (db: any) => {
   await ensure("纪念币", "农行卡", []);
   await ensure("iQOO", "触控笔 2s", ["象牙白"]);
   await ensure("影石", "影石360街拍配件套装", ["星辉银"]);
+  await ensure("电脑", "ThinkPad", ["X1 Carbon Gen 13"]);
+  await ensure("电脑", "R7000", ["R7 H255 16+512 5060 黑"]);
+  await ensure("电脑硬件", "罗技鼠标 二代", ["ProX SUPERLIGHT2 SE 红色"]);
 
   // 让这些 SKU 变成「正在采价的目标 SKU」
   const priceRows: Array<[string, string, string, number]> = [
@@ -47,7 +50,10 @@ const seedCatalog = async (db: any) => {
     ["纪念币", "马年银币", "15g小马", 610],
     ["纪念币", "农行卡", "", 900],
     ["iQOO", "触控笔 2s", "象牙白", 199],
-    ["影石", "影石360街拍配件套装", "星辉银", 299]
+    ["影石", "影石360街拍配件套装", "星辉银", 299],
+    ["电脑", "ThinkPad", "X1 Carbon Gen 13", 12000],
+    ["电脑", "R7000", "R7 H255 16+512 5060 黑", 9900],
+    ["电脑硬件", "罗技鼠标 二代", "ProX SUPERLIGHT2 SE 红色", 890]
   ];
   for (const [category, object, variant, price] of priceRows) {
     await db.run(
@@ -97,6 +103,10 @@ test("SKU 匹配：变体优先于父对象，短中文名也能命中", async (
     const popmart = matchSignalToSku("Zsiga 向往之处 到手399元", "", dictionary);
     assert.equal(popmart.match_status, "unmatched", "泡泡玛特不进线报撸货匹配");
     assert.equal(popmart.sku, null);
+
+    const pokemon = matchSignalToSku("宝可梦 30周年庆典统计 390元", "", dictionary);
+    assert.equal(pokemon.match_status, "unmatched", "宝可梦不进线报撸货匹配");
+    assert.equal(pokemon.sku, null);
 
     // 3 个汉字是很强的判别词，不能被长度门槛误杀
     const silver = matchSignalToSku("龙银币 封装 560元", "", dictionary);
@@ -155,6 +165,55 @@ test("颜色类变体名不能单独当 SKU（真实误配回归）", async () =
     const realMatch = matchSignalToSku("iQOO 触控笔 2s 象牙白 199元", "", dictionary);
     assert.equal(realMatch.match_status, "matched");
     assert.equal(realMatch.sku, "iQOO/触控笔 2s/象牙白");
+  });
+});
+
+test("电脑包和配件不能落到整机 SKU，短型号也不能吃进球拍", async () => {
+  await withDatabase(async db => {
+    const dictionary = await buildSkuDictionary(db, { force: true });
+
+    const bag = matchSignalToSku(
+      "ThinkPad 联想ThinkPad 14英寸/15.6英寸笔记本电脑皮质手提电脑包 单肩背包T300 179元",
+      "",
+      dictionary
+    );
+    assert.equal(bag.match_status, "unmatched", `电脑包不该匹配整机：${bag.sku}`);
+
+    const backpack = matchSignalToSku("联想 ThinkPad 思考本 15.6y英寸双肩电脑包 Q3 23L 黑色 48元", "", dictionary);
+    assert.equal(backpack.match_status, "unmatched", `双肩包不该匹配整机：${backpack.sku}`);
+
+    const mouse = matchSignalToSku(
+      "ThinkPad 联想thinkplus 有声中大手有线USB-A接口办公鼠标 升级6按键 33.9元",
+      "",
+      dictionary
+    );
+    assert.equal(mouse.match_status, "unmatched", `鼠标不该匹配整机：${mouse.sku}`);
+
+    const dock = matchSignalToSku(
+      "ThinkPad 联想 thinkplus USB Type-c多功能扩展坞5口分线器C150 104元",
+      "",
+      dictionary
+    );
+    assert.equal(dock.match_status, "unmatched", `扩展坞不该匹配整机：${dock.sku}`);
+
+    const racket = matchSignalToSku("尤尼克斯 NR7000I白藏青 2U 超轻碳纤维羽毛球拍 104.98元", "", dictionary);
+    assert.equal(racket.match_status, "unmatched", `球拍不该匹配 R7000：${racket.sku}`);
+
+    const laptop = matchSignalToSku(
+      "ThinkPad 联想ThinkPad E13 笔记本电脑 Ultra 5-226V/16G/512G 6926.65元",
+      "",
+      dictionary
+    );
+    assert.equal(laptop.match_status, "matched");
+    assert.equal(laptop.object_name, "ThinkPad");
+
+    const r7000 = matchSignalToSku("联想 拯救者 R7000 游戏本 R7 H255 16+512 5060 5999元", "", dictionary);
+    assert.equal(r7000.match_status, "matched");
+    assert.equal(r7000.object_name, "R7000");
+
+    const trackedMouse = matchSignalToSku("罗技鼠标 二代 ProX SUPERLIGHT2 SE 红色 890元", "", dictionary);
+    assert.equal(trackedMouse.match_status, "matched");
+    assert.equal(trackedMouse.sku, "电脑硬件/罗技鼠标 二代/ProX SUPERLIGHT2 SE 红色");
   });
 });
 
