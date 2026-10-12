@@ -213,6 +213,13 @@ SOURCE_TARGETS = [
         "category": "泡泡玛特",
     },
     {
+        "object": "福袋专属",
+        "variant": "星夜许愿树毛绒公仔挂件",
+        "query": "星夜许愿树毛绒公仔挂件",
+        "spu_id": "802529831630726794",
+        "category": "泡泡玛特",
+    },
+    {
         "object": "30周年庆典统计",
         "variant": "30周年庆典统计",
         "query": "30thC 30周年庆典",

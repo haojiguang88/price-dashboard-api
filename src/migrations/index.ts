@@ -14054,6 +14054,160 @@ ${marker}：大网红本人亲自上阵、加价卖货。币圈一批大佬反�
         note: '2026-10-11 用户口述大约3655。千岛对照火箭摆件当日成交均价约3656，闪购更高，不把闪购写成口述价。'
       });
     }
+  },
+  {
+    id: '20261012_001_seed_popmart_starry_night_wish_tree',
+    name: 'Add 泡泡玛特/福袋专属/星夜许愿树毛绒公仔挂件 with 千岛 mapping and oral price 2168',
+    run: async (db: any) => {
+      if (!(await migrationTableExists(db, 'categories'))) return;
+      if (!(await migrationTableExists(db, 'objects'))) return;
+      if (!(await migrationTableExists(db, 'variants'))) return;
+
+      const asOf = '2026-10-12';
+      const categoryName = '泡泡玛特';
+      const objectName = '福袋专属';
+      const variantName = '星夜许愿树毛绒公仔挂件';
+      const spuId = '802529831630726794';
+      const query = '星夜许愿树毛绒公仔挂件';
+      const externalName = '星夜许愿树毛绒公仔挂件';
+      const mappingNote = '千岛 SKULLPANDA 星夜许愿树毛绒公仔挂件。不要误接不眠剧场「星夜之眸」、暗场、雾中人、光织园和其它毛绒挂件。用户口述约2168，对应当日成交均价。';
+      const priceNote = '2026-10-12 用户口述大约2168。千岛对照星夜许愿树毛绒公仔挂件当日成交均价约2168.25。搜索列表另有2239，不把列表价写成口述价。';
+
+      const category = await dbGet<{ id: number; name: string }>(
+        db,
+        'SELECT id, name FROM categories WHERE name = ?',
+        [categoryName]
+      );
+      if (!category) throw new Error('Missing category 泡泡玛特');
+      await dbRun(
+        db,
+        'UPDATE categories SET is_archived = 0, archived_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+        [category.id]
+      );
+
+      await dbRun(
+        db,
+        'INSERT OR IGNORE INTO objects (category_id, name, created_at, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)',
+        [category.id, objectName]
+      );
+      const object = await dbGet<{ id: number; name: string }>(
+        db,
+        'SELECT id, name FROM objects WHERE category_id = ? AND name = ?',
+        [category.id, objectName]
+      );
+      if (!object) throw new Error('Failed to ensure object 福袋专属');
+      await dbRun(
+        db,
+        'UPDATE objects SET is_archived = 0, archived_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+        [object.id]
+      );
+
+      await dbRun(
+        db,
+        'INSERT OR IGNORE INTO variants (object_id, name, created_at, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)',
+        [object.id, variantName]
+      );
+      const variant = await dbGet<{ id: number; name: string }>(
+        db,
+        'SELECT id, name FROM variants WHERE object_id = ? AND name = ?',
+        [object.id, variantName]
+      );
+      if (!variant) throw new Error('Failed to ensure variant 星夜许愿树毛绒公仔挂件');
+      await dbRun(
+        db,
+        'UPDATE variants SET is_archived = 0, archived_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+        [variant.id]
+      );
+
+      if (await migrationTableExists(db, 'source_mappings')) {
+        const externalMeta = JSON.stringify({ query, spu_id: spuId });
+        await dbRun(
+          db,
+          `INSERT OR IGNORE INTO source_mappings
+             (source_key, source_name, external_key, external_name, external_meta_json,
+              category_id, object_id, variant_id, category_name, object_name, variant_name,
+              status, note)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            'qiandao_popmart',
+            '千岛泡泡玛特',
+            spuId,
+            externalName,
+            externalMeta,
+            category.id,
+            object.id,
+            variant.id,
+            category.name,
+            object.name,
+            variant.name,
+            'enabled',
+            mappingNote
+          ]
+        );
+        await dbRun(
+          db,
+          `UPDATE source_mappings
+           SET source_name = ?,
+               external_name = ?,
+               external_meta_json = ?,
+               category_id = ?,
+               object_id = ?,
+               variant_id = ?,
+               category_name = ?,
+               object_name = ?,
+               variant_name = ?,
+               status = CASE WHEN status = 'disabled' THEN status ELSE 'enabled' END,
+               note = CASE WHEN status = 'disabled' THEN note ELSE ? END,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE source_key = ? AND external_key = ?`,
+          [
+            '千岛泡泡玛特',
+            externalName,
+            externalMeta,
+            category.id,
+            object.id,
+            variant.id,
+            category.name,
+            object.name,
+            variant.name,
+            mappingNote,
+            'qiandao_popmart',
+            spuId
+          ]
+        );
+      }
+
+      if (await migrationTableExists(db, 'price_records')) {
+        await dbRun(
+          db,
+          `INSERT INTO price_records
+             (date, category, object_name, variant, price, source, note, price_kind, created_at, updated_at)
+           SELECT ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+           WHERE NOT EXISTS (
+             SELECT 1
+             FROM price_records
+             WHERE date = ?
+               AND category = ?
+               AND object_name = ?
+               AND COALESCE(variant, '') = ?
+           )`,
+          [
+            asOf,
+            categoryName,
+            objectName,
+            variantName,
+            2168,
+            '用户口述',
+            priceNote,
+            'market_reference',
+            asOf,
+            categoryName,
+            objectName,
+            variantName
+          ]
+        );
+      }
+    }
   }
 ];
 
