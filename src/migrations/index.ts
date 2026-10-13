@@ -14208,6 +14208,61 @@ ${marker}：大网红本人亲自上阵、加价卖货。币圈一批大佬反�
         );
       }
     }
+  },
+  {
+    id: '20261013_001_seed_jianbao_price_task',
+    name: 'Seed Jianbao daily price update task',
+    run: async (db: any) => {
+      if (!(await migrationTableExists(db, 'task_center_tasks'))) return;
+
+      const configJson = JSON.stringify({});
+      await dbRun(
+        db,
+        `INSERT OR IGNORE INTO task_center_tasks
+           (task_key, name, domain, workspace, task_type, enabled, schedule_time, schedule_days, priority, config_json, last_status, last_message)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          'jianbao_price_update',
+          '见宝价格更新',
+          'price',
+          'business',
+          'jianbao_price_update',
+          1,
+          '16:20',
+          'every_day',
+          35,
+          configJson,
+          'pending',
+          '每天下午抓取见宝商城成立以来日价格和公开窗成交，写入纪念钞/见宝'
+        ]
+      );
+      await dbRun(
+        db,
+        `UPDATE task_center_tasks
+         SET name = ?,
+             task_type = ?,
+             domain = ?,
+             workspace = ?,
+             enabled = 1,
+             schedule_time = CASE WHEN schedule_time IS NULL OR schedule_time = '' THEN ? ELSE schedule_time END,
+             schedule_days = ?,
+             priority = ?,
+             last_message = ?,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE task_key = ?`,
+        [
+          '见宝价格更新',
+          'jianbao_price_update',
+          'price',
+          'business',
+          '16:20',
+          'every_day',
+          35,
+          '每天下午抓取见宝商城成立以来日价格和公开窗成交，写入纪念钞/见宝',
+          'jianbao_price_update'
+        ]
+      );
+    }
   }
 ];
 

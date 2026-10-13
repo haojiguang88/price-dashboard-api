@@ -1403,7 +1403,8 @@ router.get("/price-records/trades", async (req, res) => {
       variant: String(req.query.variant || ""),
       date,
       page: Number.parseInt(String(req.query.page || "1"), 10),
-      pageSize: Number.parseInt(String(req.query.pageSize || "50"), 10)
+      pageSize: Number.parseInt(String(req.query.pageSize || "50"), 10),
+      sourceKey: String(req.query.sourceKey || "")
     });
     return res.json({ status: "success", ...result });
   } catch (error) {

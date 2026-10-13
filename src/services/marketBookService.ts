@@ -5,6 +5,7 @@ export type MarketBookLevel = {
 };
 
 export type MarketBookSummary = {
+  source_key: string;
   flash_min_price: number | null;
   flash_selling_qty: number | null;
   ask_qty: number | null;
@@ -48,10 +49,18 @@ export const marketBookTableExists = async (db: any) => {
   return Boolean(row);
 };
 
+const bookTargetKey = (category: string, objectName: string, variant: string, date: string) => (
+  [category, objectName, variant, date].join("|")
+);
+
+const preferredBookSource = (recordSource: string) => (
+  recordSource.includes("见宝") ? "jianbao_market" : "qiandao_popmart"
+);
+
 export const attachMarketBooks = async (
   db: any,
-  records: Array<{ category?: string; object_name?: string; variant?: string; date?: string; price_kind?: string | null }>,
-  sourceKey = "qiandao_popmart"
+  records: Array<{ category?: string; object_name?: string; variant?: string; date?: string; price_kind?: string | null; source?: string | null }>,
+  sourceKey?: string
 ) => {
   if (!records.length || !(await marketBookTableExists(db))) {
     return records.map((record) => ({ ...record, book: null }));
@@ -69,26 +78,27 @@ export const attachMarketBooks = async (
   }
 
   const snapshotParams = [
-    sourceKey,
+    ...(sourceKey ? [sourceKey] : []),
     ...keys.flatMap((item) => [item.category, item.object_name, item.variant, item.date])
   ];
   const snapshots = await db.all(
     `SELECT *
      FROM market_book_snapshots
-     WHERE source_key = ?
-       AND (${keys.map(() => "(category = ? AND object_name = ? AND COALESCE(variant, '') = ? AND date = ?)").join(" OR ")})`,
+     WHERE ${sourceKey ? "source_key = ? AND " : ""}(${keys.map(() => "(category = ? AND object_name = ? AND COALESCE(variant, '') = ? AND date = ?)").join(" OR ")})`,
     snapshotParams
   );
 
-  const snapshotByKey = new Map<string, any>();
+  const snapshotsByKey = new Map<string, any[]>();
   for (const snapshot of snapshots || []) {
-    const key = [
+    const key = bookTargetKey(
       String(snapshot.category || "").trim(),
       String(snapshot.object_name || "").trim(),
       String(snapshot.variant || "").trim(),
       String(snapshot.date || "").slice(0, 10)
-    ].join("|");
-    snapshotByKey.set(key, snapshot);
+    );
+    const list = snapshotsByKey.get(key) || [];
+    list.push(snapshot);
+    snapshotsByKey.set(key, list);
   }
 
   const snapshotIds = (snapshots || []).map((row: any) => Number(row.id)).filter((id: number) => Number.isFinite(id) && id > 0);
@@ -115,39 +125,45 @@ export const attachMarketBooks = async (
   }
 
   const tradeCounts = await db.all(
-    `SELECT category, object_name, COALESCE(variant, '') AS variant, trade_date, COUNT(*) AS trade_count
+    `SELECT source_key, category, object_name, COALESCE(variant, '') AS variant, trade_date, COUNT(*) AS trade_count
      FROM market_trades
-     WHERE source_key = ?
-       AND (${keys.map(() => "(category = ? AND object_name = ? AND COALESCE(variant, '') = ? AND trade_date = ?)").join(" OR ")})
-     GROUP BY category, object_name, COALESCE(variant, ''), trade_date`,
-    [sourceKey, ...keys.flatMap((item) => [item.category, item.object_name, item.variant, item.date])]
+     WHERE ${sourceKey ? "source_key = ? AND " : ""}(${keys.map(() => "(category = ? AND object_name = ? AND COALESCE(variant, '') = ? AND trade_date = ?)").join(" OR ")})
+     GROUP BY source_key, category, object_name, COALESCE(variant, ''), trade_date`,
+    snapshotParams
   );
   const tradeCountByKey = new Map<string, number>();
   for (const row of tradeCounts || []) {
     tradeCountByKey.set(
       [
-        String(row.category || "").trim(),
-        String(row.object_name || "").trim(),
-        String(row.variant || "").trim(),
-        String(row.trade_date || "").slice(0, 10)
+        String(row.source_key || "").trim(),
+        bookTargetKey(
+          String(row.category || "").trim(),
+          String(row.object_name || "").trim(),
+          String(row.variant || "").trim(),
+          String(row.trade_date || "").slice(0, 10)
+        )
       ].join("|"),
       Number(row.trade_count || 0)
     );
   }
 
   return records.map((record) => {
-    const key = [
+    const key = bookTargetKey(
       String(record.category || "").trim(),
       String(record.object_name || "").trim(),
       String(record.variant || "").trim(),
       String(record.date || "").slice(0, 10)
-    ].join("|");
-    const snapshot = snapshotByKey.get(key);
+    );
+    const candidates = snapshotsByKey.get(key) || [];
+    const wantedSource = preferredBookSource(String(record.source || ""));
+    const snapshot = candidates.find((item) => String(item.source_key || "") === wantedSource) || candidates[0];
     if (!snapshot) {
       return { ...record, book: null };
     }
     const levels = levelsBySnapshot.get(Number(snapshot.id)) || [];
+    const snapshotSource = String(snapshot.source_key || "");
     const book: MarketBookSummary = {
+      source_key: snapshotSource,
       flash_min_price: toNumberOrNull(snapshot.flash_min_price),
       flash_selling_qty: toIntOrNull(snapshot.flash_selling_qty),
       ask_qty: toIntOrNull(snapshot.ask_qty),
@@ -157,7 +173,7 @@ export const attachMarketBooks = async (
       price_kind: String(snapshot.price_kind || record.price_kind || "avg_deal"),
       avg_deal_price: toNumberOrNull(snapshot.avg_deal_price),
       sweep_hint: Number(snapshot.sweep_hint || 0) === 1,
-      trade_count: tradeCountByKey.get(key) || 0,
+      trade_count: tradeCountByKey.get(`${snapshotSource}|${key}`) || 0,
       ask_levels: levels.filter((level) => level.side === "ask"),
       bid_levels: levels.filter((level) => level.side === "bid")
     };
@@ -183,6 +199,19 @@ export const listMarketTrades = async (
   const pageSize = Math.min(100, Math.max(10, Number(params.pageSize || 50) || 50));
   const requestedPage = Math.max(1, Number(params.page || 1) || 1);
   const variant = String(params.variant || "").trim();
+  let sourceKey = String(params.sourceKey || "").trim();
+  if (!sourceKey) {
+    const sourceRows = await db.all(
+      `SELECT source_key, COUNT(*) AS total
+       FROM market_trades
+       WHERE category = ? AND object_name = ? AND COALESCE(variant, '') = ? AND trade_date = ?
+       GROUP BY source_key
+       ORDER BY total DESC, source_key ASC`,
+      [params.category, params.object_name, variant, params.date]
+    );
+    const keys = (sourceRows || []).map((row: any) => String(row.source_key || "")).filter(Boolean);
+    sourceKey = keys.find((key: string) => key === "qiandao_popmart") || keys[0] || "qiandao_popmart";
+  }
   const where = [
     "source_key = ?",
     "category = ?",
@@ -191,7 +220,7 @@ export const listMarketTrades = async (
     "trade_date = ?"
   ];
   const values = [
-    params.sourceKey || "qiandao_popmart",
+    sourceKey,
     params.category,
     params.object_name,
     variant,
