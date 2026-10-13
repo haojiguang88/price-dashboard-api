@@ -14263,6 +14263,75 @@ ${marker}：大网红本人亲自上阵、加价卖货。币圈一批大佬反�
         ]
       );
     }
+  },
+  {
+    id: '20261013_002_note_mid_high_open_hard_stop',
+    name: 'Record commemorative mid-and-high open as an unconditional hard stop',
+    run: async (db: any) => {
+      const appendOnce = (current: unknown, marker: string, addition: string) => {
+        const text = String(current || '').trim();
+        if (text.includes(marker)) return text;
+        return [text, addition].filter(Boolean).join('\n\n');
+      };
+      const marker = '2026-10 市场结构';
+      const marketNote = `${marker}：纪念钞、纪念币现在参与的人里大学生居多。大学生抛货不计成本，能把盘砸死。币商因此很谨慎，人一多就不好控盘。低开可以看。中开、高开一律摁死。不讲题材，不讲前作，不讲有没有人接，不讲币商会不会护。`;
+
+      if (await migrationTableExists(db, 'category_profiles')) {
+        const profile = await dbGet<{ id: number; decision_notes: string }>(
+          db,
+          `SELECT id, decision_notes
+           FROM category_profiles
+           WHERE category_name = '纪念钞'
+             AND COALESCE(object_name, '') = ''
+             AND COALESCE(is_deleted, 0) = 0
+           ORDER BY id ASC
+           LIMIT 1`
+        );
+        if (profile) {
+          await dbRun(
+            db,
+            `UPDATE category_profiles
+             SET decision_notes = ?, updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?`,
+            [appendOnce(profile.decision_notes, marker, marketNote), profile.id]
+          );
+        }
+      }
+
+      if (await migrationTableExists(db, 'rule_experiences')) {
+        const rule = await dbGet<{ id: number; note: string }>(
+          db,
+          `SELECT id, note
+           FROM rule_experiences
+           WHERE title = '低开可以看，中高开直接过'
+             AND COALESCE(is_deleted, 0) = 0
+           LIMIT 1`
+        );
+        if (rule) {
+          await dbRun(
+            db,
+            `UPDATE rule_experiences
+             SET title = ?,
+                 core_content = ?,
+                 summary_conclusion = ?,
+                 note = ?,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?`,
+            [
+              '低开可以看，中高开一律摁死',
+              '纪念钞、纪念币现在参与的人里大学生居多。大学生抛货不计成本，能把盘砸死。币商因此很谨慎，人一多就不好控盘。低开可以看，条件合适时用A仓先拿参与权。中开、高开一律摁死。不讲题材，不讲前作，不讲有没有人接，不讲币商会不会护，不讲有没有兜底。拿到货以后仍按短差价处理，不恋战。',
+              '低开可以看。中开、高开一律摁死，不再找理由。',
+              appendOnce(
+                rule.note,
+                marker,
+                `${marker}：用户确认纪念钞、纪念币的中开不再观察，和中高开一起摁死。总铁律里的「中开先观察」仍只留给其它品类。`
+              ),
+              rule.id
+            ]
+          );
+        }
+      }
+    }
   }
 ];
 
