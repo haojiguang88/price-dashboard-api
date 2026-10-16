@@ -704,6 +704,18 @@ async function runLongyinbiPriceUpdate(config: any, timeoutMs: number, taskName:
   };
 }
 
+async function runXiaogePhonePriceUpdate(config: any, timeoutMs: number, taskName: string): Promise<BusinessTaskRunResult> {
+  const args = ['--db', getDatabasePath()];
+  if (config.dry_run) args.push('--dry-run');
+  if (config.prefer_xiaoge) args.push('--prefer');
+  const parsed = await runPythonJsonScript(config, 'xiaoge.py', args, '小鸽手机回收价格更新失败', timeoutMs, taskName);
+  return {
+    message: parsed.message || '小鸽手机回收价格更新完成',
+    data: parsed,
+    status: getTaskCompletionStatus(parsed)
+  };
+}
+
 async function runJianbaoPriceUpdate(config: any, timeoutMs: number, taskName: string): Promise<BusinessTaskRunResult> {
   const args = ['--db', getDatabasePath()];
   if (config.dry_run) args.push('--dry-run');
@@ -794,6 +806,9 @@ async function runBusinessTask(task: TaskRow, config: any, timeoutMs: number): P
   }
   if (task.task_type === 'jianbao_price_update' || task.task_key === 'jianbao_price_update') {
     return runJianbaoPriceUpdate(config, timeoutMs, taskName);
+  }
+  if (task.task_type === 'xiaoge_phone_price_update' || task.task_key === 'xiaoge_phone_price_update') {
+    return runXiaogePhonePriceUpdate(config, timeoutMs, taskName);
   }
   if (task.task_type === 'cshrich_electronics_price_update' || task.task_key === 'cshrich_electronics_price_update') {
     return runCshrichElectronicsUpdate(config, timeoutMs, taskName, 'sync');

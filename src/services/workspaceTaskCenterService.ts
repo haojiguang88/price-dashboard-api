@@ -216,7 +216,8 @@ const TASK_SOURCE_MAPPINGS: Record<string, { source_key: string; source_name: st
   popmart_price_update: { source_key: "qiandao_popmart", source_name: "千岛泡泡玛特" },
   longyinbi_price_update: { source_key: "airmb_longyinbi_presale", source_name: "爱藏龙银币" },
   longchao_price_update: { source_key: "airmb_longchao_presale", source_name: "爱藏龙钞" },
-  jianbao_price_update: { source_key: "jianbao_market", source_name: "见宝商城" }
+  jianbao_price_update: { source_key: "jianbao_market", source_name: "见宝商城" },
+  xiaoge_phone_price_update: { source_key: "xiaoge_phone", source_name: "小鸽手机回收" }
 };
 
 const tableExists = async (db: any, tableName: string) => {

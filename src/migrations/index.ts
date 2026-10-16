@@ -14332,6 +14332,67 @@ ${marker}：大网红本人亲自上阵、加价卖货。币圈一批大佬反�
         }
       }
     }
+  },
+  {
+    id: '20261016_001_seed_xiaoge_phone_task',
+    name: 'Seed Xiaoge phone recycle price task',
+    run: async (db: any) => {
+      if (!(await migrationTableExists(db, 'task_center_tasks'))) return;
+
+      const configJson = JSON.stringify({ prefer_xiaoge: false });
+      const message = '每天拉取小鸽报价。优先用二手成色价；成色接口没有数据时，用销售报价板补当天还没有价格的已有型号。不新建对象，不覆盖当天已有的其它来源。苹果手机只匹配已启用的型号和颜色。';
+      await dbRun(
+        db,
+        `INSERT OR IGNORE INTO task_center_tasks
+           (task_key, name, domain, workspace, task_type, enabled, schedule_time, schedule_days, priority, config_json, last_status, last_message)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          'xiaoge_phone_price_update',
+          '小鸽手机回收价格更新',
+          'price',
+          'business',
+          'xiaoge_phone_price_update',
+          1,
+          '18:10',
+          'every_day',
+          36,
+          configJson,
+          'pending',
+          message
+        ]
+      );
+      await dbRun(
+        db,
+        `UPDATE task_center_tasks
+         SET name = ?,
+             task_type = ?,
+             domain = ?,
+             workspace = ?,
+             enabled = 1,
+             schedule_time = CASE WHEN schedule_time IS NULL OR schedule_time = '' THEN ? ELSE schedule_time END,
+             schedule_days = ?,
+             priority = ?,
+             config_json = CASE
+               WHEN config_json IS NULL OR config_json = '' OR config_json = '{}' THEN ?
+               ELSE config_json
+             END,
+             last_message = ?,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE task_key = ?`,
+        [
+          '小鸽手机回收价格更新',
+          'xiaoge_phone_price_update',
+          'price',
+          'business',
+          '18:10',
+          'every_day',
+          36,
+          configJson,
+          message,
+          'xiaoge_phone_price_update'
+        ]
+      );
+    }
   }
 ];
 
