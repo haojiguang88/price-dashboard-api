@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 """小鸽手机回收报价。
 
-二手成色价走 /usedGood/getPriceList（AES-128-CBC，响应是 Base64）。
-该接口目前解密后是空串。销售报价板 /sale/getPriceDetail 用同一套密钥，
-返回型号 + 颜色 + 价格，用来补当天还没有其它来源的型号。
+只写入回收报价板 /purchase/getRecoveryList。请求 brand 与响应都用微信用户密钥
+（wx.getUserCryptoManager().getLatestUserKey() 下发的 encryptKey/iv）做 AES-CBC，
+密钥按 UTF-8 原文当 key/iv 用（key 是 24 字节 -> AES-192），响应是 Base64。
+密钥有时效（约几十分钟），由 Mac 上挂着小程序的抓取器写入 key 文件，
+本脚本只读文件不自己取钥匙。没有解析出回收价时任务直接失败。
 
-不调用 /purchase/getRecoveryList，那条用的是微信用户密钥，离线复现不了。
+旧接口 /usedGood/getPriceList 服务端已关闭（恒定返回空密文），不再调用。
+不调用 /sale/getPriceDetail。
 """
 import argparse
+import base64
 import json
 import os
 import re
@@ -22,11 +26,13 @@ from Cryptodome.Util.Padding import pad, unpad
 SOURCE_KEY = "xiaoge_phone"
 SOURCE_NAME = "小鸽手机回收"
 BASE_URL = "https://wechat.sanmicun.com"
-AES_KEY = b"1HA1ar(154idvo!@"
-AES_IV = b"!@vo(1arA154GHid"
 DEFAULT_DB_PATH = (
     os.environ.get("BUSINESS_DB_PATH")
     or str(Path(__file__).resolve().parents[2] / "data" / "price_dashboard_business.db")
+)
+USERKEY_FILE = (
+    os.environ.get("XIAOGE_USERKEY_FILE")
+    or str(Path(__file__).resolve().parents[2] / "secrets" / "xiaoge_userkey.json")
 )
 CURATED_CATEGORIES = set()
 ACCESSORY_KEYWORDS = (
@@ -58,17 +64,30 @@ HEADERS = {
 }
 
 
-def encrypt_hex(text):
-    cipher = AES.new(AES_KEY, AES.MODE_CBC, AES_IV)
+def load_userkey(path):
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise RuntimeError(f"小鸽 userKey 文件不存在：{path}（需要 Mac 上的小程序抓取器先写入）")
+    key = str(data.get("key") or "").encode("utf-8")
+    iv = str(data.get("iv") or "").encode("utf-8")
+    openid = str(data.get("openid") or "").strip()
+    if len(key) not in (16, 24, 32) or len(iv) != 16 or not openid:
+        raise RuntimeError(f"小鸽 userKey 文件内容不完整：{path}")
+    return key, iv, openid, int(data.get("expireTime") or 0)
+
+
+def userkey_encrypt_hex(text, key, iv):
+    cipher = AES.new(key, AES.MODE_CBC, iv)
     return cipher.encrypt(pad(str(text).encode("utf-8"), 16)).hex()
 
 
-def decrypt_base64(text):
+def userkey_decrypt_base64(text, key, iv):
     raw = text.strip().strip('"')
     if not raw:
         return ""
-    cipher = AES.new(AES_KEY, AES.MODE_CBC, AES_IV)
-    return unpad(cipher.decrypt(__import__("base64").b64decode(raw)), 16).decode("utf-8")
+    cipher = AES.new(key, AES.MODE_CBC, iv)
+    return unpad(cipher.decrypt(base64.b64decode(raw)), 16).decode("utf-8")
 
 
 def post_json(path, payload):
@@ -156,6 +175,19 @@ def lookup_target(catalog, category, model_name):
     return None
 
 
+# 小鸽销售板用的颜色名。库里已经有规范名时并进去，避免再开一个变体把销售价当成当前价。
+APPLE_COLOR_ALIASES = {
+    "星宇橙色": "橙色",
+}
+
+
+def canonical_variant_name(variant_name, existing_names):
+    alias = APPLE_COLOR_ALIASES.get(str(variant_name or "").strip())
+    if alias and alias in existing_names:
+        return alias
+    return str(variant_name or "").strip()
+
+
 def normalize_price(raw_price):
     text = str(raw_price).replace(",", "").replace("￥", "").strip()
     if not text or text in {"暂无", "null", "None"}:
@@ -222,116 +254,63 @@ def load_catalog(db_path):
     return categories, objects
 
 
-def fetch_used_price_lists():
-    notice = post_json("/user/getNotice", {"typeName": "topBrandList"})
+def fetch_recovery_price_lists():
+    key, iv, openid, expire_ms = load_userkey(USERKEY_FILE)
+    notice = post_json("/user/getNotice", {"typeName": "topBrandListNew"})
     brands = [item.strip() for item in notice.split(",") if item.strip()]
     plaintext_by_brand = {}
     quotes = []
     for brand in brands:
-        body = post_json("/usedGood/getPriceList", {"brand": encrypt_hex(brand)})
-        plain = decrypt_base64(body)
+        body = post_json("/purchase/getRecoveryList", {
+            "brand": userkey_encrypt_hex(brand, key, iv),
+            "openid": openid,
+            "agentId": 10,
+        })
+        plain = ""
+        if body and body != "null":
+            try:
+                plain = userkey_decrypt_base64(body, key, iv)
+            except (ValueError, KeyError):
+                plain = ""
         plaintext_by_brand[brand] = plain
         if not plain:
             continue
-        payload = json.loads(plain)
-        quotes.extend(quotes_from_used(payload, brand))
-    return brands, plaintext_by_brand, quotes
+        quotes.extend(quotes_from_recovery(json.loads(plain), brand))
+    return brands, plaintext_by_brand, quotes, expire_ms
 
 
-def quotes_from_used(node, brand, inherited=None):
-    inherited = inherited or {}
+def quotes_from_recovery(payload, brand):
     found = []
-    if isinstance(node, list):
-        for item in node:
-            found.extend(quotes_from_used(item, brand, inherited))
+    if not isinstance(payload, list):
         return found
-    if not isinstance(node, dict):
-        return found
-
-    context = dict(inherited)
-    for key in ("goodName", "name", "model", "typeName", "prodName"):
-        if node.get(key):
-            context["model_name"] = node.get(key)
-    if node.get("capacity"):
-        context["capacity"] = node.get("capacity")
-    if node.get("level"):
-        context["level"] = node.get("level")
-    if node.get("warranty"):
-        context["warranty"] = node.get("warranty")
-    price = node.get("recoveryPrice")
-    if price in (None, ""):
-        price = node.get("price") if node.get("goodsId") or node.get("level") or node.get("capacity") else None
-    if price not in (None, ""):
-        model_name = clean_model_name(context.get("model_name") or "")
-        capacity = str(context.get("capacity") or "").strip()
-        if capacity and capacity not in model_name:
-            model_name = f"{model_name} {capacity}".strip()
-        level = str(context.get("level") or "").strip()
-        warranty = str(context.get("warranty") or "").strip()
-        variant = " ".join(part for part in (warranty, level) if part).strip()
-        found.append({
-            "brand": brand,
-            "model_name": model_name,
-            "variant": variant,
-            "price": price,
-            "goods_id": str(node.get("goodsId") or node.get("usedGoodId") or ""),
-            "channel": "used",
-        })
-    for value in node.values():
-        if isinstance(value, (list, dict)):
-            found.extend(quotes_from_used(value, brand, context))
-    return found
-
-
-def fetch_sale_quotes():
-    notice = post_json("/user/getNotice", {"typeName": "saleBrandList"})
-    brands = [item.strip() for item in notice.split(",") if item.strip()]
-    searches = [(brand, brand) for brand in brands]
-    if "苹果" in brands:
-        searches.append(("苹果", "iPhone"))
-    quotes = []
-    seen = set()
-    for brand, keyword in searches:
-        body = post_json("/sale/getPriceDetail", {"search": encrypt_hex(keyword)})
-        if not body:
+    for series in payload:
+        if not isinstance(series, dict):
             continue
-        rows = json.loads(body)
-        if not isinstance(rows, list):
-            continue
-        for row in rows:
-            row_brand = str(row.get("brandName") or brand).strip()
-            model_name = clean_model_name(row.get("typeName") or "")
-            for item in row.get("priceList") or []:
-                goods_id = str(item.get("goodsId") or "").strip()
-                color = str(item.get("color") or "").strip()
-                dedupe = goods_id or f"{row_brand}|{model_name}|{color}"
-                if dedupe in seen:
+        for model in series.get("values") or []:
+            if not isinstance(model, dict):
+                continue
+            model_name = clean_model_name(model.get("name"))
+            if not model_name:
+                model_name = " ".join(
+                    part for part in (model.get("typeClass"), model.get("type")) if part
+                ).strip()
+            if not model_name:
+                continue
+            for sku in model.get("values") or []:
+                if not isinstance(sku, dict):
                     continue
-                seen.add(dedupe)
-                quotes.append({
-                    "brand": row_brand,
+                price = sku.get("price")
+                if price in (None, ""):
+                    continue
+                found.append({
+                    "brand": sku.get("brandName") or brand,
                     "model_name": model_name,
-                    "variant": color,
-                    "price": item.get("price"),
-                    "goods_id": goods_id,
-                    "channel": "sale",
+                    "variant": str(sku.get("color") or "").strip(),
+                    "price": price,
+                    "goods_id": str(sku.get("goodsId") or ""),
+                    "channel": "used",
                 })
-    return quotes
-
-
-def fetch_model_price():
-    probes = [
-        {"brand": "iPhone", "model": "iPhone 15"},
-        {"brand": "苹果", "model": "iPhone 17"},
-        {"brand": "苹果", "model": "苹果 iPhone 14"},
-    ]
-    results = []
-    for payload in probes:
-        body = post_json("/usedGood/getModelPrice", payload)
-        results.append({"request": payload, "body": body})
-        if body:
-            return results
-    return results
+    return found
 
 
 def register_target(catalog, category, model_name, bucket):
@@ -450,7 +429,9 @@ def upsert_mapping(conn, quote, target, variant_name, now):
 
 
 def write_price(conn, target, variant_name, price, price_date, channel, prefer, now, dry_run):
-    note = "小鸽二手成色价" if channel == "used" else "小鸽销售报价板。近两天已有其它来源时不覆盖"
+    if channel != "used":
+        raise RuntimeError(f"小鸽只写入回收价，拒绝渠道 {channel}")
+    note = "小鸽回收报价"
     fresh_since = (datetime.strptime(price_date, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
     existing = conn.execute(
         """
@@ -547,6 +528,7 @@ def collect_records(catalog, categories, quotes, conn, prefer, price_date, dry_r
                 continue
         if created_object:
             counts["created_objects"] += 1
+        variant_name = canonical_variant_name(variant_name, target["variants"])
         had_variant = variant_name in target["variants"] or not variant_name
         if dry_run:
             resolved_variant = variant_name
@@ -661,11 +643,17 @@ def archive_unpriced(conn):
 
 def run(db_path, dry_run, prefer):
     categories, catalog = load_catalog(db_path)
-    brands, used_plain, used_quotes = fetch_used_price_lists()
-    sale_quotes = fetch_sale_quotes()
-    model_price = fetch_model_price()
+    brands, used_plain, used_quotes, expire_ms = fetch_recovery_price_lists()
+    if not used_quotes:
+        nonempty = sum(1 for text in used_plain.values() if str(text or "").strip())
+        detail = f"有正文 {nonempty} 个，但没有解析出回收价" if nonempty else "全部为空或解不开"
+        expire_text = datetime.fromtimestamp(expire_ms / 1000).strftime("%m-%d %H:%M") if expire_ms else "未知"
+        raise RuntimeError(
+            f"小鸽没有回收价：回收报价接口 {len(brands)} 个品牌{detail}"
+            f"（userKey 过期时间 {expire_text}，过期需先让 Mac 抓取器刷新）。已停止，不使用销售报价。"
+        )
     price_date = datetime.now().strftime("%Y-%m-%d")
-    quotes = used_quotes + sale_quotes
+    quotes = used_quotes
     conn = sqlite3.connect(db_path)
     try:
         counts, preview = collect_records(
@@ -686,8 +674,7 @@ def run(db_path, dry_run, prefer):
         f"新建对象 {counts.get('created_objects', 0)}，新建变体 {counts.get('created_variants', 0)}，"
         f"跳过配件 {counts.get('skipped_accessory', 0)}，归档长期无价 {archived_count}，"
         f"未匹配 {counts.get('unmatched', 0)}。"
-        f"二手成色接口 {len(brands)} 个品牌解密后"
-        + (f"有数据 {len(used_nonempty)} 个" if used_nonempty else "全部为空，价格来自销售报价板")
+        f"回收价 {len(used_quotes)} 条，回收报价接口 {len(brands)} 个品牌解密后有数据 {len(used_nonempty)} 个。"
     )
     print(json.dumps({
         "success": True,
@@ -700,9 +687,7 @@ def run(db_path, dry_run, prefer):
         "source_count": len(quotes),
         "used_brand_count": len(brands),
         "used_quote_count": len(used_quotes),
-        "sale_quote_count": len(sale_quotes),
         "used_price_plaintext": used_nonempty or {brand: "" for brand in brands[:3]},
-        "model_price": model_price,
         "created_object_count": counts.get("created_objects", 0),
         "created_variant_count": counts.get("created_variants", 0),
         "archived_count": archived_count,
@@ -728,4 +713,3 @@ if __name__ == "__main__":
         main()
     except Exception as exc:
         print(json.dumps({"success": False, "message": str(exc)}, ensure_ascii=False))
-        raise
