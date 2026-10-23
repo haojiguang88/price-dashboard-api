@@ -9,6 +9,10 @@
 
 旧接口 /usedGood/getPriceList 服务端已关闭（恒定返回空密文），不再调用。
 不调用 /sale/getPriceDetail。
+
+回填：/purchase/getHisPrice 返回单个 goodsId 近 7 天的回收价历史（响应明文 JSON，
+不需要用户密钥），goodsId 用 App 内置静态 aesKey 做 AES-128-CBC 加密。
+--backfill YYYY-MM-DD 按 source_mappings 里已匹配的 goodsId 逐条取历史价补写。
 """
 import argparse
 import base64
@@ -16,6 +20,7 @@ import json
 import os
 import re
 import sqlite3
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -62,6 +67,10 @@ HEADERS = {
     "Referer": "https://servicewechat.com/wx0a7ae5458d961b2a/0/page-frame.html",
     "secretKey": "PcnMh+UXAmk/iNlqFFahKu",
 }
+STATIC_AES_KEY = b"1HA1ar(154idvo!@"
+STATIC_AES_IV = b"!@vo(1arA154GHid"
+DEFAULT_OPENID = "o65BF5YPe4XO_EXLSB3yrwSXcL78"
+BACKFILL_SLEEP_SECONDS = 0.1
 
 
 def load_userkey(path):
@@ -100,6 +109,21 @@ def post_json(path, payload):
     response.raise_for_status()
     response.encoding = "utf-8"
     return response.text.strip()
+
+
+def fetch_history_price(goods_id, openid=DEFAULT_OPENID):
+    body = post_json("/purchase/getHisPrice", {
+        "goodsId": userkey_encrypt_hex(goods_id, STATIC_AES_KEY, STATIC_AES_IV),
+        "openid": openid,
+        "agentId": 10,
+    })
+    if not body or body == "null":
+        return []
+    try:
+        data = json.loads(body)
+    except ValueError:
+        return []
+    return data if isinstance(data, list) else []
 
 
 def normalize_key(value):
@@ -696,16 +720,146 @@ def run(db_path, dry_run, prefer):
     }, ensure_ascii=False))
 
 
+def write_price_backfill(conn, mapping, price, price_date, prefer, now, dry_run):
+    existing = conn.execute(
+        """
+        SELECT id, price, source
+        FROM price_records
+        WHERE category = ?
+          AND object_name = ?
+          AND COALESCE(variant, '') = ?
+          AND date = ?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (mapping["category_name"], mapping["object_name"], mapping["variant_name"] or "", price_date),
+    ).fetchone()
+    if existing is None:
+        if dry_run:
+            return "insert"
+        conn.execute(
+            """
+            INSERT INTO price_records
+              (date, category, object_name, variant, price, source, note, price_kind, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'market_reference', ?, ?)
+            """,
+            (
+                price_date,
+                mapping["category_name"],
+                mapping["object_name"],
+                mapping["variant_name"] or None,
+                price,
+                SOURCE_NAME,
+                "小鸽回收报价（历史回填）",
+                now,
+                now,
+            ),
+        )
+        return "insert"
+    record_id, old_price, old_source = existing
+    if old_source != SOURCE_NAME and not prefer:
+        return "kept_other_source"
+    if float(old_price) == float(price) and old_source == SOURCE_NAME:
+        return "skip"
+    if dry_run:
+        return "update"
+    conn.execute(
+        """
+        UPDATE price_records
+        SET price = ?, source = ?, note = ?, price_kind = 'market_reference', updated_at = ?
+        WHERE id = ?
+        """,
+        (price, SOURCE_NAME, "小鸽回收报价（历史回填）", now, record_id),
+    )
+    return "update"
+
+
+def run_backfill(db_path, backfill_date, dry_run, prefer):
+    try:
+        target_mmdd = datetime.strptime(backfill_date, "%Y-%m-%d").strftime("%m-%d")
+    except ValueError:
+        raise RuntimeError(f"--backfill 日期格式应为 YYYY-MM-DD：{backfill_date}")
+    conn = sqlite3.connect(db_path)
+    try:
+        mappings = [
+            {"external_key": row[0], "category_name": row[1], "object_name": row[2], "variant_name": row[3]}
+            for row in conn.execute(
+                """
+                SELECT external_key, category_name, object_name, COALESCE(variant_name, '')
+                FROM source_mappings
+                WHERE source_key = ? AND status = 'enabled' AND external_key != ''
+                """,
+                (SOURCE_KEY,),
+            )
+        ]
+        if not mappings:
+            raise RuntimeError("source_mappings 里没有小鸽映射，先跑一次正常采集")
+        now = datetime.now().isoformat(timespec="seconds")
+        counts = {"insert": 0, "update": 0, "skip": 0, "kept_other_source": 0, "no_history": 0, "bad_price": 0}
+        preview = []
+        for mapping in mappings:
+            history = fetch_history_price(mapping["external_key"])
+            entry = next((h for h in history if h.get("priceDate") == target_mmdd), None)
+            if entry is None:
+                counts["no_history"] += 1
+                continue
+            try:
+                price = normalize_price(entry.get("recoveryPrice"))
+            except (TypeError, ValueError):
+                counts["bad_price"] += 1
+                continue
+            action = write_price_backfill(conn, mapping, price, backfill_date, prefer, now, dry_run)
+            counts[action] = counts.get(action, 0) + 1
+            if len(preview) < 12:
+                preview.append({
+                    "action": action,
+                    "category": mapping["category_name"],
+                    "object": mapping["object_name"],
+                    "variant": mapping["variant_name"],
+                    "price": price,
+                    "goods_id": mapping["external_key"],
+                })
+            time.sleep(BACKFILL_SLEEP_SECONDS)
+        if dry_run:
+            conn.rollback()
+        else:
+            conn.commit()
+    finally:
+        conn.close()
+    print(json.dumps({
+        "success": True,
+        "source_key": SOURCE_KEY,
+        "message": (
+            f"小鸽历史回填 {backfill_date} 完成：新增 {counts.get('insert', 0)}，"
+            f"更新 {counts.get('update', 0)}，跳过 {counts.get('skip', 0)}，"
+            f"保留其它来源 {counts.get('kept_other_source', 0)}，"
+            f"无当日历史 {counts.get('no_history', 0)}，价格异常 {counts.get('bad_price', 0)}，"
+            f"映射 {len(mappings)} 条。"
+        ),
+        "backfill_date": backfill_date,
+        "inserted_count": counts.get("insert", 0),
+        "updated_count": counts.get("update", 0),
+        "skipped_count": counts.get("skip", 0) + counts.get("kept_other_source", 0),
+        "no_history_count": counts.get("no_history", 0),
+        "mapping_count": len(mappings),
+        "records": preview,
+    }, ensure_ascii=False))
+
+
 def main():
     parser = argparse.ArgumentParser(description="拉取小鸽手机回收报价并写入已有品类")
     parser.add_argument("--db", default=DEFAULT_DB_PATH)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--prefer", action="store_true", help="同一天已有其它来源时改写为小鸽价格")
+    parser.add_argument("--backfill", metavar="YYYY-MM-DD", help="按历史曲线回填指定日期（近 7 天内）")
     args = parser.parse_args()
     db_path = Path(args.db)
     if not db_path.exists():
         raise RuntimeError(f"数据库不存在：{db_path}")
-    run(str(db_path), args.dry_run, args.prefer)
+    if args.backfill:
+        run_backfill(str(db_path), args.backfill, args.dry_run, args.prefer)
+    else:
+        run(str(db_path), args.dry_run, args.prefer)
 
 
 if __name__ == "__main__":
