@@ -688,6 +688,23 @@ async function runPopMartPriceUpdate(config: any, timeoutMs: number, taskName: s
   };
 }
 
+
+async function runBjhqCheckin(config: any, timeoutMs: number, taskName: string): Promise<BusinessTaskRunResult> {
+  const parsed = await runPythonJsonScript(
+    config,
+    'bjhq_checkin.py',
+    [],
+    '北京环球签到失败',
+    timeoutMs,
+    taskName
+  );
+  return {
+    message: parsed.message || '北京环球签到完成',
+    data: parsed,
+    status: getTaskCompletionStatus(parsed)
+  };
+}
+
 async function runLongyinbiPriceUpdate(config: any, timeoutMs: number, taskName: string): Promise<BusinessTaskRunResult> {
   const args = [
     '--db',
@@ -797,6 +814,9 @@ async function runBusinessTask(task: TaskRow, config: any, timeoutMs: number): P
   }
   if (task.task_type === 'popmart_price_update' || task.task_key === 'popmart_price_update') {
     return runPopMartPriceUpdate(config, timeoutMs, taskName);
+  }
+  if (task.task_type === 'bjhq_daily_checkin' || task.task_key === 'bjhq_daily_checkin') {
+    return runBjhqCheckin(config, timeoutMs, taskName);
   }
   if (task.task_type === 'longyinbi_price_update' || task.task_key === 'longyinbi_price_update') {
     return runLongyinbiPriceUpdate(config, timeoutMs, taskName);

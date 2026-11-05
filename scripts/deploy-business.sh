@@ -77,12 +77,41 @@ append_env_file_entries() {
   fi
 }
 
+merge_https_cors_origins_from_old_env() {
+  local old_env="$1"
+  [ -f "$old_env" ] || return 0
+
+  local old_value new_value merged origin
+  old_value="$(grep -E '^CORS_ORIGINS=' "$old_env" | tail -n 1 | cut -d= -f2- || true)"
+  new_value="$(grep -E '^CORS_ORIGINS=' "$API/.env" | tail -n 1 | cut -d= -f2- || true)"
+  merged="$new_value"
+
+  local IFS=','
+  for origin in $old_value; do
+    origin="$(printf '%s' "$origin" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    case "$origin" in
+      https://*)
+        case ",$merged," in
+          *",$origin,"*) ;;
+          *) merged="${merged:+$merged,}$origin" ;;
+        esac
+        ;;
+    esac
+  done
+
+  if [ -n "$merged" ] && [ "$merged" != "$new_value" ]; then
+    sed -i.bak "s|^CORS_ORIGINS=.*|CORS_ORIGINS=$merged|" "$API/.env"
+    rm -f "$API/.env.bak"
+    log_info "已保留旧环境里的 HTTPS CORS 来源"
+  fi
+}
+
 append_known_secrets_from_old_env() {
   local old_env="$1"
   [ -f "$old_env" ] || return 0
 
   local key line
-  for key in TWELVE_DATA_API_KEY TUSHARE_TOKEN AIRMB_USER_ID AIRMB_ACCESS_TOKEN AIRMB_OUT_SOURCE AIRMB_COOKIE AUTH_USERNAME AUTH_PASSWORD_HASH AUTH_SESSION_SECRET AUTH_SESSION_TTL_HOURS; do
+  for key in TWELVE_DATA_API_KEY TUSHARE_TOKEN AIRMB_USER_ID AIRMB_ACCESS_TOKEN AIRMB_OUT_SOURCE AIRMB_COOKIE BJHQ_TOKEN BJHQ_USER_ID AUTH_USERNAME AUTH_PASSWORD_HASH AUTH_SESSION_SECRET AUTH_SESSION_TTL_HOURS; do
     line="$(grep -E "^${key}=" "$old_env" | tail -n 1 || true)"
     if [ -n "$line" ] && ! grep -qE "^${key}=" "$API/.env"; then
       printf '%s\n' "$line" >> "$API/.env"
@@ -222,6 +251,7 @@ EOF
 
 append_env_file_entries "$SECRETS_FILE"
 if [ -n "$OLD_ENV_BACKUP" ]; then
+  merge_https_cors_origins_from_old_env "$OLD_ENV_BACKUP"
   append_known_secrets_from_old_env "$OLD_ENV_BACKUP"
 fi
 if [ "$SERVER_AUTH_MODE" = "session" ]; then
@@ -243,8 +273,18 @@ fi
 if ! grep -q '^TUSHARE_TOKEN=' "$API/.env"; then
   echo "提醒：TUSHARE_TOKEN 未配置，贵金属白银大盘任务会失败。"
 fi
+if ! grep -qE '^BJHQ_TOKEN=.+' "$API/.env" || ! grep -qE '^BJHQ_USER_ID=.+' "$API/.env"; then
+  echo "提醒：BJHQ_TOKEN / BJHQ_USER_ID 未配置，北京环球签到任务会失败。"
+fi
 
 log_section "重启后端"
+# pm2 --update-env 会用当前 shell 覆盖 .env。部署参数里的 CORS 往往只有主域名，
+# 合并后的名单在文件里，重启前以文件为准。
+CORS_ORIGINS="$(grep -E '^CORS_ORIGINS=' "$API/.env" | tail -n 1 | cut -d= -f2-)"
+PUBLIC_BASE_URL="$(grep -E '^PUBLIC_BASE_URL=' "$API/.env" | tail -n 1 | cut -d= -f2-)"
+SERVER_AUTH_MODE="$(grep -E '^SERVER_AUTH_MODE=' "$API/.env" | tail -n 1 | cut -d= -f2-)"
+export CORS_ORIGINS PUBLIC_BASE_URL SERVER_AUTH_MODE
+log_info "重启使用的 CORS：$CORS_ORIGINS"
 pm2 restart price-dashboard-api --update-env || pm2 start dist/index.js --name price-dashboard-api --update-env
 pm2 save
 

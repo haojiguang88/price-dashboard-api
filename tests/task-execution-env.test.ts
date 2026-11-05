@@ -40,6 +40,8 @@ test("task child env keeps allowlisted keys and drops secrets outside the list",
     PATH: "/usr/bin",
     BUSINESS_DB_PATH: "/tmp/business.db",
     AIRMB_COOKIE: "cookie-value",
+    BJHQ_TOKEN: "Bearer token-value",
+    BJHQ_USER_ID: "179383763469027594",
     AUTH_SESSION_SECRET: "should-not-pass",
     AWS_SECRET_ACCESS_KEY: "should-not-pass",
     RANDOM_SECRET: "should-not-pass"
@@ -48,6 +50,8 @@ test("task child env keeps allowlisted keys and drops secrets outside the list",
   assert.equal(env.PATH, "/usr/bin");
   assert.equal(env.BUSINESS_DB_PATH, "/tmp/business.db");
   assert.equal(env.AIRMB_COOKIE, "cookie-value");
+  assert.equal(env.BJHQ_TOKEN, "Bearer token-value");
+  assert.equal(env.BJHQ_USER_ID, "179383763469027594");
   assert.equal(env.AUTH_SESSION_SECRET, undefined);
   assert.equal(env.AWS_SECRET_ACCESS_KEY, undefined);
   assert.equal(env.RANDOM_SECRET, undefined);

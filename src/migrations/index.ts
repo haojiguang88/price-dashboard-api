@@ -14393,6 +14393,41 @@ ${marker}：大网红本人亲自上阵、加价卖货。币圈一批大佬反�
         ]
       );
     }
+  },
+  {
+    id: '20261105_001_bjhq_daily_checkin',
+    name: 'Add Beijing Universal Resort daily check-in task',
+    sql: `
+      INSERT OR IGNORE INTO task_center_tasks
+        (task_key, name, domain, task_type, enabled, schedule_time, schedule_days, priority, config_json, last_status, last_message)
+      VALUES
+        (
+          'bjhq_daily_checkin',
+          '北京环球签到',
+          'business',
+          'bjhq_daily_checkin',
+          1,
+          '09:15',
+          'every_day',
+          40,
+          '{}',
+          'pending',
+          '每天自动完成北京环球度假区互动福利站签到；凭证读服务器环境变量'
+        );
+
+      UPDATE task_center_tasks
+      SET task_type = 'bjhq_daily_checkin',
+          domain = 'business',
+          schedule_time = CASE WHEN schedule_time IS NULL OR schedule_time = '' THEN '09:15' ELSE schedule_time END,
+          schedule_days = 'every_day',
+          config_json = CASE
+            WHEN config_json IS NULL OR config_json = '' THEN '{}'
+            ELSE config_json
+          END,
+          last_message = '每天自动完成北京环球度假区互动福利站签到；凭证读服务器环境变量',
+          updated_at = CURRENT_TIMESTAMP
+      WHERE task_key = 'bjhq_daily_checkin';
+    `
   }
 ];
 
