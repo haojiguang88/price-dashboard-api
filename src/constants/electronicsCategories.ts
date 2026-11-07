@@ -1,5 +1,5 @@
 export const CSHRICH_ELECTRONICS_SOURCE_KEY = "cshrich_electronics";
-export const CSHRICH_ELECTRONICS_SOURCE_NAME = "潮收汇电子产品报价";
+export const CSHRICH_ELECTRONICS_SOURCE_NAME = "长盛鸿电子产品报价";
 
 export const CSHRICH_SEEDED_TOP_CATEGORIES = [
   { externalId: "1", externalName: "苹果", systemCategoryName: "苹果手机", tracked: false, skipReason: "已由苹果手机日更任务采集，不重复建品类" },

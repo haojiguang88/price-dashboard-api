@@ -9,6 +9,7 @@ deploy_artifacts
 .env.local
 .env.development
 .env.production
+scripts/business/qiandao/account.local.json
 .DS_Store
 **/.DS_Store
 __pycache__/

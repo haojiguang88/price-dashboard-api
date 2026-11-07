@@ -16,7 +16,7 @@ from iphone_backup import (
 )
 
 SOURCE_KEY = "cshrich_electronics"
-SOURCE_NAME = "潮收汇电子产品报价"
+SOURCE_NAME = "长盛鸿电子产品报价"
 SKIP_SERIES_NAMES = {"任天堂"}
 DEFAULT_DB_PATH = (
     os.environ.get("BUSINESS_DB_PATH")
@@ -370,7 +370,7 @@ def run(db_path, mode, catalog_path, dry_run):
             "source_key": SOURCE_KEY,
             "mode": mode,
             "message": (
-                f"潮收汇电子产品{('巡检' if mode == 'discover' else '同步')}完成："
+                f"长盛鸿电子产品{('巡检' if mode == 'discover' else '同步')}完成："
                 f"新品类 {len(created_categories)}，写入价格 {inserted}，更新 {updated}，跳过 {skipped}"
             ),
             "inserted_count": len(created_categories) if mode == "discover" else inserted,

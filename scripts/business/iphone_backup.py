@@ -30,8 +30,8 @@ IPHONE_CATEGORY_NAME = "苹果手机"
 GAME_CATEGORY_NAME = "游戏机"
 IPHONE_SOURCE_KEY = "cshrich_iphone_backup"
 GAME_SOURCE_KEY = "cshrich_game_console_backup"
-IPHONE_SOURCE_NAME = "潮收汇苹果备用报价"
-GAME_SOURCE_NAME = "潮收汇游戏机备用报价"
+IPHONE_SOURCE_NAME = "长盛鸿苹果备用报价"
+GAME_SOURCE_NAME = "长盛鸿游戏机备用报价"
 DEFAULT_DB_PATH = (
     os.environ.get("BUSINESS_DB_PATH")
     or str(Path(__file__).resolve().parents[2] / "data" / "price_dashboard_business.db")

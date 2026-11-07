@@ -3,7 +3,7 @@ import getDb from '../config/database';
 
 const router = express.Router();
 
-const DUAL_SCORE_MODEL_VERSION = 'dual-score-v5';
+const DUAL_SCORE_MODEL_VERSION = 'dual-score-v6';
 const ABSOLUTE_ELASTICITY_REFERENCE_RATE = 30;
 
 const CATEGORY_ELASTICITY_REFERENCE_RATE: Record<string, number> = {
@@ -51,6 +51,11 @@ const CATEGORY_MINIMUM_TRADABLE_RANGE_RATE: Record<string, number> = {
   '贵金属': 3
 };
 
+// 卖出才扣。泡泡玛特按成交价扣 3% 综合费用，买入口径不变。
+const CATEGORY_SELL_FEE_RATE: Record<string, number> = {
+  '泡泡玛特': 0.03
+};
+
 const clampScore = (value: number) => Math.max(0, Math.min(100, value));
 
 const getCategoryElasticityReferenceRate = (categoryName: string) => (
@@ -72,6 +77,16 @@ const getMinimumTradableRangeAmount = (categoryName: string) => (
 const getMinimumTradableRangeRate = (categoryName: string) => (
   CATEGORY_MINIMUM_TRADABLE_RANGE_RATE[categoryName] ?? 5
 );
+
+const getSellFeeRate = (categoryName: string) => (
+  CATEGORY_SELL_FEE_RATE[categoryName] ?? 0
+);
+
+const netSellRoundTrip = (buyPrice: number, sellPrice: number, feeRate: number) => {
+  const amount = sellPrice * (1 - feeRate) - buyPrice;
+  const rate = buyPrice > 0 ? (amount / buyPrice) * 100 : 0;
+  return { amount, rate };
+};
 
 const scoreRateByCategory = (rate: number, categoryName: string) => {
   const categoryReference = getCategoryElasticityReferenceRate(categoryName);
@@ -239,11 +254,12 @@ const calculatePriceChanges = (prices: number[]) => {
   return changes;
 };
 
-const calculateSwingMetrics = (prices: number[], categoryName: string) => {
+export const calculateSwingMetrics = (prices: number[], categoryName: string) => {
   const meaningfulThresholdRate = getMeaningfulSwingThresholdRate(categoryName);
   const effectiveSwingTargetRate = getEffectiveSwingTargetRate(categoryName);
   const minimumTradableRangeAmount = getMinimumTradableRangeAmount(categoryName);
   const minimumTradableRangeRate = getMinimumTradableRangeRate(categoryName);
+  const sellFeeRate = getSellFeeRate(categoryName);
   const emptyResult = {
     swing_run_count: 0,
     completed_swing_count: 0,
@@ -257,6 +273,9 @@ const calculateSwingMetrics = (prices: number[], categoryName: string) => {
     effective_swing_target_rate: effectiveSwingTargetRate,
     minimum_tradable_range_amount: minimumTradableRangeAmount,
     minimum_tradable_range_rate: minimumTradableRangeRate,
+    sell_fee_rate: sellFeeRate,
+    net_range_amount: 0,
+    net_range_rate: 0,
     tradable_space_passed: false,
     tradable_space_hint: '暂无完整跌后反弹，不能形成可做空间。',
     elasticity_pattern: '无有效跌后反弹'
@@ -335,11 +354,16 @@ const calculateSwingMetrics = (prices: number[], categoryName: string) => {
     const start = pivots[index - 1];
     const end = pivots[index];
     const direction: Direction = end.price > start.price ? 'up' : 'down';
-    const amount = Math.abs(end.price - start.price);
-    const rate = direction === 'up'
-      ? (end.price - start.price) / start.price * 100
-      : (start.price - end.price) / start.price * 100;
-    legs.push({ direction, amount, rate });
+    const grossAmount = Math.abs(end.price - start.price);
+    const grossRate = start.price > 0 ? (grossAmount / start.price) * 100 : 0;
+    const netRebound = direction === 'up'
+      ? netSellRoundTrip(start.price, end.price, sellFeeRate)
+      : null;
+    legs.push({
+      direction,
+      amount: netRebound ? netRebound.amount : grossAmount,
+      rate: netRebound ? netRebound.rate : grossRate
+    });
   }
 
   const cycles: Array<{
@@ -349,10 +373,15 @@ const calculateSwingMetrics = (prices: number[], categoryName: string) => {
     effectiveRate: number;
     balanceRate: number;
   }> = [];
+  let feeBlockedRebounds = 0;
   for (let index = 0; index < legs.length - 1; index++) {
     const dropLeg = legs[index];
     const reboundLeg = legs[index + 1];
     if (dropLeg.direction !== 'down' || reboundLeg.direction !== 'up') continue;
+    if (reboundLeg.amount <= 0 || reboundLeg.rate <= 0) {
+      feeBlockedRebounds += 1;
+      continue;
+    }
 
     const effectiveAmount = Math.min(dropLeg.amount, reboundLeg.amount);
     const effectiveRate = Math.min(dropLeg.rate, reboundLeg.rate);
@@ -373,19 +402,25 @@ const calculateSwingMetrics = (prices: number[], categoryName: string) => {
   const effectiveSwingRate = median(cycles.map(cycle => cycle.effectiveRate));
   const highestPrice = Math.max(...prices);
   const lowestPrice = Math.min(...prices);
-  const observedRangeAmount = highestPrice - lowestPrice;
-  const observedRangeRate = lowestPrice > 0 ? observedRangeAmount / lowestPrice * 100 : 0;
+  const netRange = netSellRoundTrip(lowestPrice, highestPrice, sellFeeRate);
+  const observedRangeAmount = netRange.amount;
+  const observedRangeRate = netRange.rate;
   const tradableSpacePassed = completedSwingCount > 0
     && observedRangeAmount >= minimumTradableRangeAmount
     && observedRangeRate >= minimumTradableRangeRate;
   const rangeThresholdText = minimumTradableRangeAmount > 0
     ? `金额 ¥${minimumTradableRangeAmount.toFixed(2)}、比例 ${minimumTradableRangeRate.toFixed(2)}%`
     : `金额不限、比例 ${minimumTradableRangeRate.toFixed(2)}%`;
+  const feeNote = sellFeeRate > 0
+    ? `扣掉卖出综合费用 ${(sellFeeRate * 100).toFixed(0)}% 后`
+    : '';
   const tradableSpaceHint = completedSwingCount === 0
-    ? '暂无完整跌后反弹，不能形成可做空间。'
+    ? (feeBlockedRebounds > 0
+      ? `跌后有反弹，但${feeNote}没有剩下利润，不能形成可做空间。`
+      : '暂无完整跌后反弹，不能形成可做空间。')
     : tradableSpacePassed
-      ? `观察窗口上下限 ¥${observedRangeAmount.toFixed(2)} / ${observedRangeRate.toFixed(2)}%，已达到${categoryName}门槛：${rangeThresholdText}。`
-      : `有往返但上下限空间不足：当前 ¥${observedRangeAmount.toFixed(2)} / ${observedRangeRate.toFixed(2)}%，未同时达到${categoryName}门槛：${rangeThresholdText}。`;
+      ? `观察窗口${feeNote}上下限 ¥${observedRangeAmount.toFixed(2)} / ${observedRangeRate.toFixed(2)}%，已达到${categoryName}门槛：${rangeThresholdText}。`
+      : `有往返但${feeNote}上下限空间不足：当前 ¥${observedRangeAmount.toFixed(2)} / ${observedRangeRate.toFixed(2)}%，未同时达到${categoryName}门槛：${rangeThresholdText}。`;
   return {
     swing_run_count: legs.length,
     completed_swing_count: completedSwingCount,
@@ -399,6 +434,9 @@ const calculateSwingMetrics = (prices: number[], categoryName: string) => {
     effective_swing_target_rate: effectiveSwingTargetRate,
     minimum_tradable_range_amount: minimumTradableRangeAmount,
     minimum_tradable_range_rate: minimumTradableRangeRate,
+    sell_fee_rate: sellFeeRate,
+    net_range_amount: observedRangeAmount,
+    net_range_rate: observedRangeRate,
     tradable_space_passed: tradableSpacePassed,
     tradable_space_hint: tradableSpaceHint,
     elasticity_pattern: completedSwingCount === 0
@@ -1296,8 +1334,12 @@ router.get('/', async (req, res) => {
       const dualScores = calculateDualScores({
         categoryName: target.category_name,
         recordCount: elasticityWindowRecords.length,
-        elasticityRate: elasticity.elasticity_rate,
-        elasticityAmount: elasticity.elasticity_amount,
+        elasticityRate: swingMetrics.sell_fee_rate > 0
+          ? Math.max(0, swingMetrics.net_range_rate)
+          : elasticity.elasticity_rate,
+        elasticityAmount: swingMetrics.sell_fee_rate > 0
+          ? Math.max(0, swingMetrics.net_range_amount)
+          : elasticity.elasticity_amount,
         effectiveSwingRate: swingMetrics.effective_swing_rate,
         completedSwingCount: swingMetrics.completed_swing_count,
         tradableSpacePassed: swingMetrics.tradable_space_passed,
@@ -1346,7 +1388,7 @@ router.get('/', async (req, res) => {
       } else if (sideways.sideways_position !== '阈值过大' && sideways.sideways_position === '低位' && sideways.sideways_count >= Number(min_sideways_count) && positionRate < 40) {
         analysisTag = '低位横盘型';
         actionHint = '低位横盘起不来，暂时缺少弹性，先观察。';
-      } else if (elasticity.elasticity_rate >= 30 && postPeakDrawdownRate >= 20) {
+      } else if ((swingMetrics.sell_fee_rate > 0 ? swingMetrics.net_range_rate : elasticity.elasticity_rate) >= 30 && postPeakDrawdownRate >= 20) {
         analysisTag = '尖峰脉冲型';
         actionHint = '出现过明显尖峰，但高点回落较大，不能把尖峰价当常态，不适合追高。';
       } else if (highHoldRate >= 97 && postPeakDrawdownRate <= 3 && positionRate >= 70) {
@@ -1358,10 +1400,10 @@ router.get('/', async (req, res) => {
       } else if (repairRate >= 80 && positionRate >= 70) {
         analysisTag = '强修复偏硬型';
         actionHint = '下跌后修复能力较强，当前处于高位区间，可重点观察。';
-      } else if (elasticity.elasticity_rate >= 20 && positionRate >= 40 && !(highLowTrends.low_trend === '低点下移' && highLowTrends.high_trend === '高点下移')) {
+      } else if ((swingMetrics.sell_fee_rate > 0 ? swingMetrics.net_range_rate : elasticity.elasticity_rate) >= 20 && positionRate >= 40 && !(highLowTrends.low_trend === '低点下移' && highLowTrends.high_trend === '高点下移')) {
         analysisTag = '高弹性波段型';
         actionHint = '区间弹性较大，有波段空间，适合低吸高抛，不追高。';
-      } else if (elasticity.elasticity_rate < 5) {
+      } else if ((swingMetrics.sell_fee_rate > 0 ? swingMetrics.net_range_rate : elasticity.elasticity_rate) < 5) {
         analysisTag = '窄幅震荡型';
         actionHint = '价格波动空间较小，弹性不足，暂不适合作为波段重点。';
       }
@@ -1474,6 +1516,9 @@ router.get('/', async (req, res) => {
         effective_swing_target_rate: swingMetrics.effective_swing_target_rate,
         minimum_tradable_range_amount: swingMetrics.minimum_tradable_range_amount,
         minimum_tradable_range_rate: swingMetrics.minimum_tradable_range_rate,
+        sell_fee_rate: swingMetrics.sell_fee_rate,
+        net_range_amount: parseFloat(swingMetrics.net_range_amount.toFixed(2)),
+        net_range_rate: parseFloat(swingMetrics.net_range_rate.toFixed(2)),
         tradable_space_passed: swingMetrics.tradable_space_passed,
         tradable_space_hint: swingMetrics.tradable_space_hint,
         elasticity_pattern: swingMetrics.elasticity_pattern,
@@ -1531,7 +1576,7 @@ router.get('/', async (req, res) => {
       meta: {
         score_model_version: DUAL_SCORE_MODEL_VERSION,
         strength_judges: '周期内高位停留、冲高后回撤抵抗、高低点结构和稳定性；样本量只决定可信度，不参与加分。',
-        elasticity_judges: '先识别跌下来后又弹上去的完整波段，再按品类同时核对观察窗口上下限金额和比例；可做空间不足时弹性分封顶 39。零次不能算高弹性，一次最多中弹性。',
+        elasticity_judges: '先识别跌下来后又弹上去的完整波段，再按品类同时核对观察窗口上下限金额和比例；可做空间不足时弹性分封顶 39。零次不能算高弹性，一次最多中弹性。泡泡玛特卖出先扣 3% 综合费用，扣完仍要同时达到金额和比例门槛。',
         position_affects_action: '低位用于拿货观察，中位等待，高位兑现或不追。',
         elasticity_scoring_window_days: elasticityScoringWindowDays,
         elasticity_scoring_start_date: elasticityScoringStartDate || null,

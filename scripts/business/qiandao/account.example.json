@@ -1,0 +1,6 @@
+{
+  "account_label": "",
+  "token": "",
+  "device_id": "7c2a9e14-6b58-4f31-9d0e-2a6f8b1c4e77",
+  "note": "换号后把 DevTools 里的 authorization 填进 token，复制为 account.local.json。约 3 天过期。这个例子不要写入真实 token。"
+}

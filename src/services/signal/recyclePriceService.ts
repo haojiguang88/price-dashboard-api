@@ -6,8 +6,8 @@
  *
  * 通道语义（都是现有系统里真实存在的来源，confidence 是对「这是不是回收价」的置信度）：
  *   千岛收购价        market_book_snapshots.bid_price（泡泡玛特等收藏品的买盘，最接近回收价）
- *   潮收汇电子产品报价 电子产品回收商日更报价
- *   潮收汇苹果备用报价 苹果手机回收商备用线路
+ *   长盛鸿电子产品报价 电子产品回收商日更报价
+ *   长盛鸿苹果备用报价 苹果手机回收商备用线路
  *   德璜小程序档口报价 档口收货价
  *   东旭游戏机档口    游戏机档口收货价
  *   爱藏龙银币/龙钞   钱币商收货价
@@ -207,17 +207,17 @@ const PROVIDERS: RecycleProvider[] = [
   QIANDAO_BID,
   {
     id: "cshrich_electronics",
-    label: "潮收汇电子产品报价",
+    label: "长盛鸿电子产品报价",
     confidence: 0.8,
     categories: ELECTRONICS_CATEGORIES,
-    lookup: priceRecordLookup(["潮收汇电子产品报价"], "潮收汇电子产品报价")
+    lookup: priceRecordLookup(["长盛鸿电子产品报价"], "长盛鸿电子产品报价")
   },
   {
     id: "cshrich_apple_backup",
-    label: "潮收汇苹果备用报价",
+    label: "长盛鸿苹果备用报价",
     confidence: 0.8,
     categories: ["苹果手机"],
-    lookup: priceRecordLookup(["潮收汇苹果备用报价"], "潮收汇苹果备用报价")
+    lookup: priceRecordLookup(["长盛鸿苹果备用报价"], "长盛鸿苹果备用报价")
   },
   {
     id: "dehuang_dealer",

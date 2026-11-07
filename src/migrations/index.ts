@@ -14428,6 +14428,890 @@ ${marker}：大网红本人亲自上阵、加价卖货。币圈一批大佬反�
           updated_at = CURRENT_TIMESTAMP
       WHERE task_key = 'bjhq_daily_checkin';
     `
+  },
+{
+    id: '20261011_002_record_qiandao_flash_buy_limit_change',
+    name: 'Record Qiandao flash per-account buy-limit change from ~1% to 30, observed on 遇见的惊喜',
+    run: async (db: any) => {
+      const asOf = '2026-10-11';
+      const marker = `2026-10-11补充：千岛闪购单号限购改为30`;
+      const ruleTitle = '千岛闪购单号限购从约1%改为固定30只';
+      const categoryName = '泡泡玛特';
+      const seriesName = 'Zsiga';
+      const variantName = '遇见的惊喜';
+      const archiveName = `${seriesName} / ${variantName}`;
+
+      const appendOnce = (current: unknown, key: string, addition: string) => {
+        const text = String(current || '').trim();
+        if (text.includes(key)) return text;
+        return [text, addition].filter(Boolean).join('\n\n');
+      };
+
+      if (await migrationTableExists(db, 'rule_experiences')) {
+        const existingRule = await dbGet<{ id: number }>(
+          db,
+          'SELECT id FROM rule_experiences WHERE title = ? AND COALESCE(is_deleted, 0) = 0 LIMIT 1',
+          [ruleTitle]
+        );
+        if (!existingRule) {
+          await dbRun(
+            db,
+            `INSERT INTO rule_experiences
+              (title, type, track, source_case, core_content, summary_conclusion, note,
+               source_type, source_id, is_deleted, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+            [
+              ruleTitle,
+              '盘口微观结构',
+              '泡泡玛特 / 千岛闪购',
+              `${asOf} 用户口述。遇见的惊喜有人一号扫了30只，价格瞬间被拉上。`,
+              '旧规则：千岛买娃按挂牌量约1%限购。出售500只以内，一个号最多买5只；出售600只最多买6只；出售700只最多买7只。新规则（用户2026-10-11观察）：不管出售多少只，一个号可以买30只。炒作侧少备号就能一次吃更深；拉盘更好拉，砸盘也更好砸，有利有弊。这是平台限购变更，不是供给或承接结论，也不构成买入许可。',
+              '单号可扫深度从约1%挂牌量抬到固定30只。盘口瞬时冲击变大，备号成本下降。拉砸都更容易，不作方向判断。',
+              '系统此前没有这条规则。扫货检测原先按5只一手数次估，单笔30会漏。价格跳升幅度未报，不补造。'
+            ]
+          );
+        }
+      }
+
+      if (await migrationTableExists(db, 'category_profiles')) {
+        const variantProfile = await dbGet<{
+          id: number;
+          experience_notes: string;
+          extra_json: string;
+          note: string;
+        }>(
+          db,
+          `SELECT id, experience_notes, extra_json, note
+           FROM category_profiles
+           WHERE category_name = ?
+             AND COALESCE(object_name, '') = ?
+             AND COALESCE(variant_name, '') = ?
+             AND COALESCE(is_deleted, 0) = 0
+           LIMIT 1`,
+          [categoryName, seriesName, variantName]
+        );
+        if (variantProfile) {
+          let extra: Record<string, unknown> = {};
+          try {
+            extra = JSON.parse(String(variantProfile.extra_json || '{}')) || {};
+          } catch {
+            extra = {};
+          }
+          extra.qiandao_flash_buy_limit = {
+            as_of: asOf,
+            source: 'user_oral',
+            old_rule: 'about 1% of listed qty (500->5, 600->6, 700->7)',
+            new_rule: 'one account can buy 30 regardless of listed qty',
+            observed_on: variantName,
+            observed_event: 'one account swept 30, price jumped immediately',
+            invented_price: false
+          };
+          await dbRun(
+            db,
+            `UPDATE category_profiles
+             SET experience_notes = ?, extra_json = ?, note = ?, updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?`,
+            [
+              appendOnce(
+                variantProfile.experience_notes,
+                marker,
+                `${marker}。千岛闪购单号限购改为固定30只，不再跟挂牌量约1%走。有人刚才一号扫了30只遇见的惊喜，价格瞬间被拉上。拉盘更好拉，砸盘也更好砸。只记盘口规则，不改「只盯不买」，不补造跳升后的价格。`
+              ),
+              JSON.stringify(extra),
+              appendOnce(variantProfile.note, marker, `${marker}。用户口述平台限购变更；不改写2026-09-26冻结结论。`),
+              variantProfile.id
+            ]
+          );
+        }
+
+        const parent = await dbGet<{ id: number; experience_notes: string; decision_notes: string }>(
+          db,
+          `SELECT id, experience_notes, decision_notes
+           FROM category_profiles
+           WHERE category_name = ?
+             AND COALESCE(object_name, '') = ''
+             AND COALESCE(variant_name, '') = ''
+             AND COALESCE(is_deleted, 0) = 0
+           ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END, id
+           LIMIT 1`,
+          [categoryName]
+        );
+        if (parent) {
+          await dbRun(
+            db,
+            `UPDATE category_profiles
+             SET experience_notes = ?, decision_notes = ?, updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?`,
+            [
+              appendOnce(
+                parent.experience_notes,
+                marker,
+                `${marker}。千岛买娃旧限购约等于挂牌量1%（500/5、600/6、700/7）；现在不论出售多少，一个号可买30只。备号需求下降，单号瞬时冲击变大。`
+              ),
+              appendOnce(
+                parent.decision_notes,
+                '千岛单号30只',
+                '看千岛拉砸时先问单号还能吃多深。2026-10-11起按一号30只计，不再按旧的1%挂牌量。规则变更不等于可以追扫货盘。'
+              ),
+              parent.id
+            ]
+          );
+        }
+      }
+
+      if (await migrationTableExists(db, 'product_archives')) {
+        const archive = await dbGet<{ id: number; experience_note: string }>(
+          db,
+          `SELECT id, experience_note
+           FROM product_archives
+           WHERE archive_name = ? AND COALESCE(is_deleted, 0) = 0
+           LIMIT 1`,
+          [archiveName]
+        );
+        if (archive) {
+          await dbRun(
+            db,
+            `UPDATE product_archives
+             SET experience_note = ?, updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?`,
+            [
+              appendOnce(
+                archive.experience_note,
+                marker,
+                `${marker}。平台闪购限购放宽后，有人一号扫了30只，价格瞬间被拉上。这是盘口冲击，不把扫货写成承接变硬，也不改只盯不买。跳升后的精确价未报，不补造。`
+              ),
+              archive.id
+            ]
+          );
+
+          if (await migrationTableExists(db, 'product_archive_stages')) {
+            const stageName = '千岛单号限购放宽后的扫货';
+            const existingStage = await dbGet<{ id: number }>(
+              db,
+              `SELECT id FROM product_archive_stages
+               WHERE archive_id = ? AND stage_name = ? AND COALESCE(is_deleted, 0) = 0
+               LIMIT 1`,
+              [archive.id, stageName]
+            );
+            if (!existingStage) {
+              await dbRun(
+                db,
+                `INSERT INTO product_archive_stages
+                  (archive_id, stage_name, time_text, stage_type, stage_summary, action_rule,
+                   evidence_note, confidence, sort_order, note, is_deleted, created_at, updated_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, 'rough', ?, ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+                [
+                  archive.id,
+                  stageName,
+                  asOf,
+                  '盘口规则 / 人为扫货',
+                  '千岛闪购单号限购改为固定30只。有人刚才一号扫了30只遇见的惊喜，价格瞬间被拉上。拉盘更好拉，砸盘也更好砸。',
+                  '只记录限购变更和这次扫货冲击。不把30只扫货写成买入许可，也不改品种档案的只盯不买。',
+                  '2026-10-11用户口述。未报扫后精确价，不向日线补写。',
+                  3,
+                  '平台规则变更，适用于千岛闪购买娃，不单属于这一款。'
+                ]
+              );
+            }
+          }
+        }
+      }
+
+      const rule = await dbGet<{ id: number }>(
+        db,
+        'SELECT id FROM rule_experiences WHERE title = ? AND COALESCE(is_deleted, 0) = 0 LIMIT 1',
+        [ruleTitle]
+      );
+      if (rule && (await migrationTableExists(db, 'audit_logs'))) {
+        await dbRun(
+          db,
+          `INSERT OR IGNORE INTO audit_logs
+            (id, timestamp, module, action, target, status, detail, entity_id,
+             path, domain, workspace, created_at, updated_at)
+           VALUES (?, CURRENT_TIMESTAMP, '规则经验', 'create', ?, 'success', ?, ?,
+                   '/review/rule-experiences', 'business', 'business', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [
+            'audit-rule-qiandao-flash-buy-limit-20261011',
+            ruleTitle,
+            JSON.stringify({
+              asOf,
+              oldRule: 'about 1% of listed qty',
+              newRule: '30 per account',
+              observedOn: variantName,
+              inventedPrice: false
+            }),
+            String(rule.id)
+          ]
+        );
+      }
+    }
+  },
+{
+    id: '20261019_001_seed_yidun_slider_debug_case',
+    name: 'Record the Yidun slider close-out as a validated technical case',
+    run: async (db: any) => {
+      if (!(await migrationTableExists(db, 'opinion_records'))) return;
+      if (!(await migrationTableExists(db, 'behavior_cases'))) return;
+
+      const title = '易盾滑块：缺口对不上是六个独立的坑';
+      const opinionDate = '2026-10-19';
+      const summary = '缺口对不上不是一句代码不行。六个坑各自都能让结果永远对不上，分开测完，两个匹配器意见一致的图一次通过。';
+      const originalOpinion = '当年缺口总是对不上，看起来像匹配代码不行。';
+      const judgmentBasis = [
+        '1. 灰度匹配找缺口会被背景带偏。高亮背景把匹配拉偏，换成边缘匹配才对得上。',
+        '2. 滑块有一段固定死区。标定下来，拼图位移等于鼠标位移减去这段死区，全程恒定。',
+        '3. 微调必须用鼠标增量。用绝对坐标会来回振荡，差一截时纹丝不动。',
+        '4. 失败后鼠标停在验证条上，再悬停不会弹出验证。要先移开，再悬停。',
+        '5. 自动化浏览器会自报 webdriver。距离和轨迹都对，环境不像人，照样不过。',
+        '6. 杂乱背景下单个匹配器会飘。边缘和灰度一起投票，分歧大就刷新换一张；两个意见统一再动手。刷新不花钱。'
+      ].join('\n');
+      const interpretation = '价值不在过了这一次验证，而在排障顺序：先分开问距离对不对、轨迹真不真、环境像不像人，再动手。不在六个坑没拆开的时候调参。';
+      const validationResult = '2026-10-19 结案。双投票没有分歧的图，指令 150px，实测落点 149.5px，一次通过。';
+      const validationNote = '六个坑都是当天分开测出来的，不是事后把成功倒推成一个原因。留档在本机 captcha-lab，案例只记结论和卡点。';
+
+      let opinion = await dbGet<{ id: number }>(
+        db,
+        `SELECT id FROM opinion_records WHERE title = ? AND track = '技术' AND is_deleted = 0 ORDER BY id LIMIT 1`,
+        [title]
+      );
+      if (!opinion) {
+        await dbRun(
+          db,
+          `INSERT INTO opinion_records
+            (title, track, person_name, source_platform, opinion_date, validation_status,
+             summary_result, original_opinion, judgment_basis, my_interpretation,
+             validation_result, validation_note, validation_date, person_observation, note,
+             is_deleted, created_at, updated_at)
+           VALUES (?, '技术', '继光', '本地实测', ?, 'validated',
+                   ?, ?, ?, ?,
+                   ?, ?, ?, ?, ?,
+                   0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [
+            title,
+            opinionDate,
+            summary,
+            originalOpinion,
+            judgmentBasis,
+            interpretation,
+            validationResult,
+            validationNote,
+            opinionDate,
+            '目标是易盾滑块。做法是边缘匹配、轨迹模拟、抹掉自动化指纹。卡了多年，今天按变量拆开后翻篇。',
+            '技术类结案。这是案例库里第一条技术排障记录，用来证明先分离变量、再动手。'
+          ]
+        );
+        opinion = await dbGet<{ id: number }>(
+          db,
+          `SELECT id FROM opinion_records WHERE title = ? AND track = '技术' AND is_deleted = 0 ORDER BY id LIMIT 1`,
+          [title]
+        );
+      }
+      if (!opinion) return;
+
+      const existingCase = await dbGet<{ id: number }>(
+        db,
+        `SELECT id FROM behavior_cases WHERE title = ? AND is_deleted = 0 ORDER BY id LIMIT 1`,
+        [title]
+      );
+      if (existingCase) return;
+
+      const sourceSnapshot = {
+        sourceType: 'opinion_record',
+        sourceId: String(opinion.id),
+        moduleLabel: '观点记录',
+        title,
+        track: '技术',
+        validationStatus: 'validated',
+        readiness: 'ready',
+        capturedAt: opinionDate
+      };
+      await dbRun(
+        db,
+        `INSERT INTO behavior_cases
+          (title, origin_type, subject_alias, source_note, evidence_level, case_date,
+           track, project_name, background, visible_information, pressure_context,
+           action_taken, result, action_quality, outcome_type, evidence_role,
+           self_response, learn_to_keep, learn_to_avoid, applicability_boundary,
+           linked_rule_refs_json, source_type, source_id, source_snapshot_json,
+           note, is_deleted, created_at, updated_at)
+         VALUES (?, 'self', '继光', ?, 'first_hand', ?,
+                 '技术', '易盾滑块', ?, ?, ?,
+                 ?, ?, 'good', 'unknown', 'positive',
+                 ?, ?, ?, ?,
+                 ?, 'opinion_record', ?, ?,
+                 ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+        [
+          title,
+          '来源：观点记录 · 继光 · 本地实测。验证状态：validated。2026-10-19 事后验证通过。',
+          opinionDate,
+          '缺口总是对不上，拖了多年。表面像匹配写错了，实际上任意一个独立的坑都能让整段永远对不上。',
+          judgmentBasis,
+          '失败时最容易把六个原因揉成一次调参。距离、轨迹、环境没分开，调哪一个都像没生效。',
+          '先分开测：距离用实测位移核对，轨迹用对位结果核对，环境用指纹核对。边缘和灰度两个匹配器一起投票，分歧大就换一张图，意见统一再滑。',
+          validationResult,
+          interpretation,
+          '先分离变量，再动手。刷新换图不花钱，等两个匹配器一致比在一张分歧图上硬调便宜。',
+          '避免在没确认是距离、轨迹还是环境之前连续调参；避免把一次对不上写成代码不行。',
+          '适用于任何「结果对不上、原因有好几个」的闭环排障。不把这一条写成可以拿去接未授权的验证绕过。',
+          JSON.stringify([
+            '六个坑要分开证，不能揉成一次调参',
+            '两个独立判断不一致时，先换样本，再动手',
+            '距离、轨迹、环境一次只问一个'
+          ]),
+          String(opinion.id),
+          JSON.stringify(sourceSnapshot),
+          '版本：V0.1\n观点已验证后提炼。验证日 2026-10-19。本地留档 captcha-lab。'
+        ]
+      );
+
+      const behaviorCase = await dbGet<{ id: number }>(
+        db,
+        `SELECT id FROM behavior_cases WHERE title = ? AND is_deleted = 0 ORDER BY id LIMIT 1`,
+        [title]
+      );
+      if (behaviorCase && await migrationTableExists(db, 'audit_logs')) {
+        await dbRun(
+          db,
+          `INSERT OR IGNORE INTO audit_logs
+            (id, timestamp, module, action, target, status, detail, entity_id,
+             path, domain, workspace, created_at, updated_at)
+           VALUES (?, CURRENT_TIMESTAMP, '人因案例库', 'create', ?, 'success', ?, ?,
+                   '/review/human-cases', 'business', 'business', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [
+            'audit-human-case-yidun-slider-20261019',
+            title,
+            JSON.stringify({ version: 'V0.1', track: '技术', source: 'opinion_record' }),
+            String(behaviorCase.id)
+          ]
+        );
+      }
+    }
+  },
+{
+    id: '20261019_002_seed_cmcc_h5_iphone_restock_case',
+    name: 'Record the China Mobile H5 iPhone restock monitor as a validated technical case',
+    run: async (db: any) => {
+      if (!(await migrationTableExists(db, 'opinion_records'))) return;
+      if (!(await migrationTableExists(db, 'behavior_cases'))) return;
+
+      const title = '移动 H5 苹果补货：全加密链路打通，监控待命';
+      const opinionDate = '2026-10-19';
+      const summary = '移动 H5 苹果补货接口全程加密。顺着前端拦截器找到算法和密钥，请求和响应都能还原成明文。当前没有活动，监控已接上，放货或登录失效都会报警。';
+      const originalOpinion = '接口抓出来全是密文，看着像拿不到补货状态。';
+      const judgmentBasis = [
+        '抓包看见请求和响应都是密文，明文不在页面上。',
+        '顺着前端脚本找到发出请求前的拦截器，密钥写在前端里。',
+        '算法是 AES-256-CBC，请求和响应都能还原成明文。',
+        '这是加密参数定位的标准路径：先找拦截器，再还原明文，不是对着密文猜。'
+      ].join('\n');
+      const interpretation = '含金量在定位，不在某一次刚好解出来。全加密先问密钥和算法藏在前端哪一层，找到再还原。还原之后才能谈监控。';
+      const validationResult = '2026-10-19 全链路通了：解析刚抓到的请求，发出去，解密响应。当前 data 为空，表示没有活动。监控进入待命。';
+      const validationNote = '待命规则：data 从空变成非空就是放货，立刻提醒；连续失败 3 次，多半是登录态过期，也提醒。密钥和请求原文不写进案例。登录态过期后换一条新抓的请求即可，监控代码不用改。';
+
+      let opinion = await dbGet<{ id: number }>(
+        db,
+        `SELECT id FROM opinion_records WHERE title = ? AND track = '技术' AND is_deleted = 0 ORDER BY id LIMIT 1`,
+        [title]
+      );
+      if (!opinion) {
+        await dbRun(
+          db,
+          `INSERT INTO opinion_records
+            (title, track, person_name, source_platform, opinion_date, validation_status,
+             summary_result, original_opinion, judgment_basis, my_interpretation,
+             validation_result, validation_note, validation_date, person_observation, note,
+             is_deleted, created_at, updated_at)
+           VALUES (?, '技术', '继光', '本地实测', ?, 'validated',
+                   ?, ?, ?, ?,
+                   ?, ?, ?, ?, ?,
+                   0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [
+            title,
+            opinionDate,
+            summary,
+            originalOpinion,
+            judgmentBasis,
+            interpretation,
+            validationResult,
+            validationNote,
+            opinionDate,
+            '目标是移动 H5 的苹果手机补货。链路是抓包、前端脚本、拦截器、还原双向明文。今天在真实接口上做通了。',
+            '技术类第二条。接在易盾滑块那条排障记录后面，这条记的是加密参数定位。'
+          ]
+        );
+        opinion = await dbGet<{ id: number }>(
+          db,
+          `SELECT id FROM opinion_records WHERE title = ? AND track = '技术' AND is_deleted = 0 ORDER BY id LIMIT 1`,
+          [title]
+        );
+      }
+      if (!opinion) return;
+
+      const existingCase = await dbGet<{ id: number }>(
+        db,
+        `SELECT id FROM behavior_cases WHERE title = ? AND is_deleted = 0 ORDER BY id LIMIT 1`,
+        [title]
+      );
+      if (existingCase) return;
+
+      const sourceSnapshot = {
+        sourceType: 'opinion_record',
+        sourceId: String(opinion.id),
+        moduleLabel: '观点记录',
+        title,
+        track: '技术',
+        validationStatus: 'validated',
+        readiness: 'ready',
+        capturedAt: opinionDate
+      };
+      await dbRun(
+        db,
+        `INSERT INTO behavior_cases
+          (title, origin_type, subject_alias, source_note, evidence_level, case_date,
+           track, project_name, background, visible_information, pressure_context,
+           action_taken, result, action_quality, outcome_type, evidence_role,
+           self_response, learn_to_keep, learn_to_avoid, applicability_boundary,
+           linked_rule_refs_json, source_type, source_id, source_snapshot_json,
+           note, is_deleted, created_at, updated_at)
+         VALUES (?, 'self', '继光', ?, 'first_hand', ?,
+                 '技术', '移动 H5 苹果补货', ?, ?, ?,
+                 ?, ?, 'good', 'unknown', 'positive',
+                 ?, ?, ?, ?,
+                 ?, 'opinion_record', ?, ?,
+                 ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+        [
+          title,
+          '来源：观点记录 · 继光 · 本地实测。验证状态：validated。2026-10-19 事后验证通过。',
+          opinionDate,
+          '移动 H5 苹果补货接口全程加密。页面上看不到库存，抓包也只有密文，容易停在「解不开」。',
+          judgmentBasis,
+          '密文摆在面前时，最容易对着报文猜，或者把整段加密当成解不了。登录态还会过期，监控如果没有失败报警，会静静停掉。',
+          '先定位前端拦截器里的算法和密钥，把请求和响应都还原成明文。确认当前没有活动之后，接上轮询：放货提醒，连续失败也提醒。',
+          validationResult,
+          interpretation,
+          '全加密先找前端拦截器，确认算法和密钥，再还原明文。监控要同时盯「有货」和「登录态失效」。',
+          '避免对着密文猜；避免只在放货时报警、登录态过期了却不响。',
+          '适用于接口全加密、明文逻辑藏在前端拦截器里的定位。案例不记录密钥和请求原文。',
+          JSON.stringify([
+            '全加密先找前端拦截器，不对着密文猜',
+            '请求和响应都还原成明文，才算链路打通',
+            '监控同时盯放货和登录态失效'
+          ]),
+          String(opinion.id),
+          JSON.stringify(sourceSnapshot),
+          '版本：V0.1\n观点已验证后提炼。验证日 2026-10-19。当前无活动，监控待命。'
+        ]
+      );
+
+      const behaviorCase = await dbGet<{ id: number }>(
+        db,
+        `SELECT id FROM behavior_cases WHERE title = ? AND is_deleted = 0 ORDER BY id LIMIT 1`,
+        [title]
+      );
+      if (behaviorCase && await migrationTableExists(db, 'audit_logs')) {
+        await dbRun(
+          db,
+          `INSERT OR IGNORE INTO audit_logs
+            (id, timestamp, module, action, target, status, detail, entity_id,
+             path, domain, workspace, created_at, updated_at)
+           VALUES (?, CURRENT_TIMESTAMP, '人因案例库', 'create', ?, 'success', ?, ?,
+                   '/review/human-cases', 'business', 'business', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [
+            'audit-human-case-cmcc-h5-iphone-20261019',
+            title,
+            JSON.stringify({ version: 'V0.1', track: '技术', source: 'opinion_record' }),
+            String(behaviorCase.id)
+          ]
+        );
+      }
+    }
+  },
+{
+    id: '20261023_001_xiaoge_t1_backfill',
+    name: 'Switch Xiaoge daily task to history backfill',
+    run: async (db: any) => {
+      if (!(await migrationTableExists(db, 'task_center_tasks'))) return;
+      const row = await dbGet<any>(
+        db,
+        `SELECT config_json FROM task_center_tasks WHERE task_key = ?`,
+        ['xiaoge_phone_price_update']
+      );
+      if (!row) return;
+      let config: Record<string, unknown> = {};
+      try {
+        const parsed = JSON.parse(String(row.config_json || '{}'));
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) config = parsed;
+      } catch {
+        config = {};
+      }
+      config.prefer_xiaoge = false;
+      config.backfill_days = 3;
+      await dbRun(
+        db,
+        `UPDATE task_center_tasks
+         SET config_json = ?, updated_at = CURRENT_TIMESTAMP
+         WHERE task_key = ?`,
+        [JSON.stringify(config), 'xiaoge_phone_price_update']
+      );
+    }
+  },
+{
+    id: '20261024_001_seed_foxconn_leverage_swing_tail_case',
+    name: 'Record the Foxconn leverage swing as a short-tail discipline failure',
+    run: async (db: any) => {
+      if (!(await migrationTableExists(db, 'behavior_cases'))) return;
+      if (!(await migrationTableExists(db, 'behavior_patterns'))) return;
+      if (!(await migrationTableExists(db, 'behavior_case_pattern_links'))) return;
+
+      const title = '工业富联杠杆波段：高胜率策略的尾部死亡';
+      const caseDate = '2026-10-15';
+      let behaviorCase = await dbGet<{ id: number }>(
+        db,
+        `SELECT id
+         FROM behavior_cases
+         WHERE title = ? AND is_deleted = 0
+         ORDER BY id
+         LIMIT 1`,
+        [title]
+      );
+
+      if (!behaviorCase) {
+        await dbRun(
+          db,
+          `INSERT INTO behavior_cases
+            (title, origin_type, subject_alias, source_note, evidence_level, case_date,
+             track, project_name, background, visible_information, pressure_context,
+             action_taken, result, action_quality, outcome_type, evidence_role,
+             self_response, learn_to_keep, learn_to_avoid, applicability_boundary,
+             linked_rule_refs_json, source_type, source_id, source_snapshot_json,
+             pricing_analysis_json, note, is_deleted, created_at, updated_at)
+           VALUES (?, 'other', ?, ?, 'second_hand', ?,
+                   '股票', '工业富联（601138）', ?, ?, ?,
+                   ?, ?, 'bad', 'loss', 'negative',
+                   ?, ?, ?, ?, ?, 'trading_manual_todo', '675', ?,
+                   '{}', ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [
+            title,
+            '狗头',
+            '人物在观点记录里，称呼狗头，价值投资向博主。价格用公开行情：2026-06-03 高点 81.05，2026-10-15 低点 46.9。仓位、融资倍数和成交单据没有，按用户观察记录。交易侧手册待办 #675 只留规则和指针。',
+            caseDate,
+            '打法是价值滤镜选大票：流动性好、价格不离谱，然后重仓猛干，有时加融资，赚一两个点就收，看错了立马跑。历史胜率很高。交易侧把这套打法记成实验区价投体系的原型来源，并且已经改造过。本案例记的是改造前那套打法，在一段趋势里怎么死掉。',
+            '工业富联 601138。2026-06-03 见顶 81.05，2026-10-15 最低 46.9，从高点回撤 42.1%。10-08 到 10-15 这一周加速 15.8%，和交易系统大盘 DEEP_CRASH / L1 同一周。此前几段波段是吃到的。没有账户级成交记录。',
+            '连续下跌里，每天的跌幅都小到还能扛，「是不是错了」一直模糊。等亏大了，认错的成本已经下不去手。退出触发器是信心，信心是滞后的情绪，卖出落在接近坑底的位置。外面没有环境层：板块整体下沉时，前几段赚的是波动，最后一次还的是趋势。',
+            '价值滤镜进场，重仓，有时融资。赚一两个点即收手。本轮连续下跌中，「看错立马跑」没有按天执行，纪律逐日松动。信心崩溃后，在接近坑底的位置割肉离场。',
+            '小目标上的高胜率被一次大亏吃掉。卖点在低位区域。融资加重仓，把一次本来还能恢复的错误放大成下不了手的亏损。',
+            '如果是我，退出线在进场前写死，到线就走，不交给当天的信心。高胜率只说明目标小，不说明亏损端安全。环境层不过，单票波段不做重仓，也不加融资。',
+            '赚一两个点就收、看错就跑，这两条作为事前规则仍然留着。留的前提是规则在冷静时写死，并且单票外面还有环境层。',
+            '避免用历史胜率证明体系安全。避免在阴跌里用「还能扛」把退出日往后拖。避免用信心当卖出触发器。避免在整体下沉的环境里，用融资加重仓去做没有环境层的波段。',
+            '这是杠杆纪律事故，不是工业富联的质地结论，也不改交易侧下杀和错杀的鉴别。价格是公开行情；人的仓位、融资和成交是用户观察，没有账户单据。不把本案例写成可以去抄这轮的底。',
+            JSON.stringify([
+              '退出规则事前写死、机械执行，不能交给临场信心',
+              '高胜率不等于安全，要看亏损端',
+              '杠杆、短尾、无环境层三样凑齐就是定时炸弹',
+              '交易手册待办 #675 存活规则，本案例是活体论证'
+            ]),
+            JSON.stringify({
+              capturedBy: 'migration-20261024_001',
+              sourceType: 'trading_manual_todo',
+              sourceId: '675',
+              moduleLabel: '交易手册待办',
+              subjectAlias: '狗头',
+              opinionRecordPerson: '狗头',
+              capturedAt: '2026-10-24',
+              verificationStatus: 'second_hand',
+              documentedClaims: [
+                '601138 于 2026-06-03 见顶 81.05',
+                '2026-10-15 最低 46.9，较高点 -42.1%',
+                '2026-10-08 至 2026-10-15 一周 -15.8%，与 DEEP_CRASH / L1 同一周'
+              ],
+              unverifiedClaims: [
+                '具体仓位、融资倍数和割肉成交价'
+              ],
+              pointer: '交易侧 #675 只留规则和指针，完整叙事在本案例'
+            }),
+            '版本：V0.1\n2026-10-24 落账。交易手册待办 #675 同日写入存活规则论证，并指回本案例。不新开菜单。'
+          ]
+        );
+        behaviorCase = await dbGet<{ id: number }>(
+          db,
+          `SELECT id
+           FROM behavior_cases
+           WHERE title = ? AND is_deleted = 0
+           ORDER BY id
+           LIMIT 1`,
+          [title]
+        );
+      }
+
+      if (!behaviorCase) {
+        throw new Error('Foxconn leverage swing tail case could not be created');
+      }
+
+      const patternLinks = [
+        { name: '没有退出机制', role: 'primary' },
+        { name: '连续盈利后的自信膨胀', role: 'secondary' },
+        { name: '沉没成本绑架决策', role: 'secondary' }
+      ];
+      for (const link of patternLinks) {
+        const pattern = await dbGet<{ id: number }>(
+          db,
+          `SELECT id
+           FROM behavior_patterns
+           WHERE name = ? AND is_deleted = 0 AND status = 'active'
+           ORDER BY id
+           LIMIT 1`,
+          [link.name]
+        );
+        if (!pattern) {
+          throw new Error(`Required behavior pattern is missing: ${link.name}`);
+        }
+        await dbRun(
+          db,
+          `INSERT OR IGNORE INTO behavior_case_pattern_links
+            (case_id, pattern_id, role, note, created_at, updated_at)
+           VALUES (?, ?, ?, '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [behaviorCase.id, pattern.id, link.role]
+        );
+      }
+
+      if (await migrationTableExists(db, 'audit_logs')) {
+        await dbRun(
+          db,
+          `INSERT OR IGNORE INTO audit_logs
+            (id, timestamp, module, action, target, status, detail, entity_id,
+             path, domain, workspace, created_at, updated_at)
+           VALUES ('audit-human-case-foxconn-leverage-swing-20261024', CURRENT_TIMESTAMP,
+                   '人因案例库', 'create', ?, 'success', ?, ?, '/review/human-cases',
+                   'business', 'business', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [
+            title,
+            JSON.stringify({
+              version: 'V0.1',
+              originType: 'other',
+              evidenceLevel: 'second_hand',
+              actionQuality: 'bad',
+              outcomeType: 'loss',
+              primaryPattern: '没有退出机制',
+              tradingManualTodo: '675'
+            }),
+            String(behaviorCase.id)
+          ]
+        );
+      }
+    }
+  },
+{
+    id: '20261031_001_seed_chuang_etf_cost_exit_boundary_case',
+    name: 'Record dual-innovation ETF cost-advantage vs terminal exit boundary case',
+    run: async (db: any) => {
+      if (!(await migrationTableExists(db, 'behavior_cases'))) return;
+      if (!(await migrationTableExists(db, 'behavior_patterns'))) return;
+      if (!(await migrationTableExists(db, 'behavior_case_pattern_links'))) return;
+
+      await dbRun(
+        db,
+        `INSERT OR IGNORE INTO behavior_patterns
+          (name, axis, category, summary, trigger_phrases_json, observable_actions_json,
+           mechanism, risk_chain, counter_question, protective_action, positive_counterpart,
+           maturity, status, sort_order, note, is_deleted, created_at, updated_at)
+         VALUES ('成本优势放松退出纪律', 'human', 'execution_error', ?, ?, ?, ?, ?, ?, ?, ?,
+                 'candidate', 'active', 180, ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+        [
+          '因为入场成本低、当前仍盈利，就放松高点附近的退出或利润保护规则，把成本优势当成可以无限回吐浮盈的许可证。',
+          JSON.stringify([
+            '成本够低还能扛',
+            '现在还是赚的',
+            '低成本不怕回撤',
+            '一直拿着就行'
+          ]),
+          JSON.stringify([
+            '浮盈明显回吐仍不执行既定退出',
+            '用成本优势解释持有',
+            '把仍盈利当成动作正确',
+            '下跌中继续按新低补仓且不设失效边界'
+          ]),
+          '低成本提高容错率，但不改变风险管理要求。用“现在仍然盈利”覆盖“从高点回撤很多”，会把利润保护从规则改成事后安慰。',
+          '低位埋伏 → 年内大浮盈 → 末端加速或趋势转弱 → 因成本低不退出 → 浮盈大幅回吐 → 用仍盈利证明持有合理',
+          '如果今天空仓，我还会按同一套退出规则处理这次末端加速吗？还是只因为成本低才允许利润继续回吐？',
+          '末端加速达到既定触发条件时，按事前规则分批退出或利润保护；接受卖飞。成本价不能修改触发线，也不能取消重新入场评估。',
+          '低频持有 + 末端利润保护',
+          '观察案例模式，不自动沉淀为交易规则。只讨论低成本长期持有与末端退出纪律的边界，不判具体博主对错。'
+        ]
+      );
+
+      const title = '双创ETF长期埋伏后的利润回撤：成本优势不能代替末端退出纪律';
+      const caseDate = '2026-10-31';
+      let behaviorCase = await dbGet<{ id: number }>(
+        db,
+        `SELECT id
+         FROM behavior_cases
+         WHERE title = ? AND is_deleted = 0
+         ORDER BY id
+         LIMIT 1`,
+        [title]
+      );
+
+      if (!behaviorCase) {
+        await dbRun(
+          db,
+          `INSERT INTO behavior_cases
+            (title, origin_type, subject_alias, source_note, evidence_level, case_date,
+             track, project_name, background, visible_information, pressure_context,
+             action_taken, result, action_quality, outcome_type, evidence_role,
+             self_response, learn_to_keep, learn_to_avoid, applicability_boundary,
+             linked_rule_refs_json, source_type, source_id, source_snapshot_json,
+             pricing_analysis_json, note, is_deleted, created_at, updated_at)
+           VALUES (?, 'other', ?, ?, 'second_hand', ?,
+                   'ETF', '双创ETF（代码待补）', ?, ?, ?,
+                   ?, ?, 'unknown', 'unknown', 'boundary',
+                   ?, ?, ?, ?, ?, '', '', ?, '{}', ?, 0,
+                   CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [
+            title,
+            '外部双创ETF博主',
+            '来源类型：外部博主观察。证据等级：二手观察，部分数据待补。只根据公开展示操作和用户观察整理，不主动追问成本、收益或交易明细。当前裁决：观察案例，不判博主对错，不自动沉淀为交易规则。',
+            caseDate,
+            '一位博主约两年前开始布局双创ETF，持有成本相对较低。2026年市场先上涨后下跌，博主在整个过程中一直持有，没有明显操作。截至观察日，虽然净值已从年内高点出现较大回撤，但该双创ETF持仓仍然保持盈利。缺少ETF代码、实际成本、最大浮盈、当前收益率和最大回撤等精确数据，因此不评价具体收益高低，也不判断其操作是否最优。',
+            '1. 博主入场较早，拥有明显的成本优势。\n2. 年内曾经出现较大浮盈，随后市场转弱，浮盈明显回吐。\n3. 当前仍然盈利，只能说明成本较低，不能证明从高点一直持有就是最佳路径。\n4. 当前结果尚未终结，后续可能修复，也可能继续回撤。\n5. 据用户观察，其打法偏左侧：双创ETF较早埋伏、长期持有，并接受较大浮盈回撤；在恒生科技指数持续走弱、不断创阶段新低时仍持续补仓。',
+            '核心张力不是“还赚不赚钱”，而是低成本长期持有与末端利润保护之间的边界。左侧打法依赖长期闲置资金、较强回撤承受力、对标的长期逻辑的信念，以及持续补仓不影响生活与判断的资金条件；这并不等同于我们的系统打法，也不能因为当前仍盈利就证明适合所有人。',
+            '长期持有双创ETF，过程中没有明显兑现操作；浮盈从年内高点明显回吐后继续持有。公开信息不足以确认高点附近是否出现过可核验的末端加速四枪，也不足以复算具体收益。',
+            '观察日时持仓仍盈利，但年内浮盈已明显回吐。结果未终结。本案例不把“仍盈利”解释为永久持有正确，也不把“年内回撤”解释为系统必然应全部清仓。',
+            '如果是我们的系统：1）低位布局获得成本优势，但低成本只提高容错率；2）上涨过程中不预测顶部，继续观察趋势、扩散、拥挤和上涨质量；3）末端加速达到既定触发条件时，执行分批退出或利润保护，接受卖飞，不因“现在仍然盈利”取消信号；4）未触发则不因普通波动频繁买卖；5）退出后重新评估风险释放与结构修复，不因价格更低就立即买回。不因跌得多就自动补仓，左侧机会也需要明确资金预算和失效边界。',
+            '吸收其能在低位提前埋伏、用长期资金换取成本优势的能力；也吸收“不同打法适合不同人”的对照意识。评价重点是资金期限、仓位、性格、风险承受力，以及最难时能否按同一套方式执行，而不是某一次谁赚得多。',
+            '避免用成本优势放松退出规则；避免只看“现在仍然盈利”而忽略“从高点回撤很多”；避免把新低本身当成便宜而无限补仓；避免事后用结果倒推当时是否该退出；也避免因为一次回撤或一次成功就随意切换打法。',
+            '本案例用于讨论“低成本长期持有”与“末端利润保护”的边界。适用于有成本优势的长期仓位是否执行既定退出纪律的复核。不产生买卖建议，不自动修改现有持有、退出或再入场规则。缺少精确价格、最大浮盈和末端加速信号记录时，不做收益复算，不评价具体操作对错。',
+            JSON.stringify([
+              '成本价不能修改末端退出触发线',
+              '仍盈利与高点回撤可以同时成立',
+              '末端加速触发后分批退出，接受卖飞',
+              '下跌后重新评估再入场，不因更低就接'
+            ]),
+            JSON.stringify({
+              capturedBy: 'migration-20261031_001',
+              sourceType: 'external_blogger_observation',
+              sourceEvidence: 'user_observation_of_public_operations',
+              capturedAt: '2026-10-31',
+              verificationStatus: 'second_hand_partial',
+              decisionModes: ['利润保护', '退出纪律', '持有与末端加速的边界'],
+              currentVerdict: 'observation_only',
+              pendingEvidence: [
+                'ETF代码及当时使用的观察口径',
+                '大致布局日期和成本',
+                '年内最高浮盈、当前收益率和最大回撤',
+                '高点附近末端加速四枪的实际触发情况',
+                '如果按系统退出，后续是否出现合格的再入场机会'
+              ],
+              styleContrast: {
+                blogger: '左侧长期布局，接受浮盈回撤，弱市可继续补仓',
+                system: '低频、资格、失效和存活；末端加速按规则保护利润；没机会可不参与'
+              }
+            }),
+            '版本：V0.1\n2026-10-31 落账。观察案例，不判博主对错，不自动沉淀为交易规则。真正需要复核的是：末端加速信号当时是否出现、规则是否应当执行、执行后避免了多少回撤，以及重新入场成本是多少。'
+          ]
+        );
+        behaviorCase = await dbGet<{ id: number }>(
+          db,
+          `SELECT id
+           FROM behavior_cases
+           WHERE title = ? AND is_deleted = 0
+           ORDER BY id
+           LIMIT 1`,
+          [title]
+        );
+      }
+
+      if (!behaviorCase) {
+        throw new Error('Dual-innovation ETF cost-exit boundary case could not be created');
+      }
+
+      const patternLinks = [
+        { name: '成本优势放松退出纪律', role: 'primary' },
+        { name: '没有退出机制', role: 'secondary' },
+        { name: '贪婪与不兑现', role: 'secondary' }
+      ];
+      for (const link of patternLinks) {
+        const pattern = await dbGet<{ id: number }>(
+          db,
+          `SELECT id
+           FROM behavior_patterns
+           WHERE name = ? AND is_deleted = 0 AND status = 'active'
+           ORDER BY id
+           LIMIT 1`,
+          [link.name]
+        );
+        if (!pattern) {
+          throw new Error(`Required behavior pattern is missing: ${link.name}`);
+        }
+        await dbRun(
+          db,
+          `INSERT OR IGNORE INTO behavior_case_pattern_links
+            (case_id, pattern_id, role, note, created_at, updated_at)
+           VALUES (?, ?, ?, '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [behaviorCase.id, pattern.id, link.role]
+        );
+      }
+
+      if (await migrationTableExists(db, 'audit_logs')) {
+        await dbRun(
+          db,
+          `INSERT OR IGNORE INTO audit_logs
+            (id, timestamp, module, action, target, status, detail, entity_id,
+             path, domain, workspace, created_at, updated_at)
+           VALUES ('audit-human-case-chuang-etf-cost-exit-20261031', CURRENT_TIMESTAMP,
+                   '人因案例库', 'create', ?, 'success', ?, ?, '/review/human-cases',
+                   'business', 'business', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [
+            title,
+            JSON.stringify({
+              version: 'V0.1',
+              originType: 'other',
+              evidenceLevel: 'second_hand',
+              actionQuality: 'unknown',
+              outcomeType: 'unknown',
+              evidenceRole: 'boundary',
+              primaryPattern: '成本优势放松退出纪律',
+              currentVerdict: 'observation_only'
+            }),
+            String(behaviorCase.id)
+          ]
+        );
+      }
+    }
+  },
+{
+    id: '20261102_001_rename_cshrich_labels_to_changshenghong',
+    name: 'Rename 潮收汇 source labels to 长盛鸿',
+    run: async (db: any) => {
+      const targets = [
+        ['price_records', 'source'],
+        ['task_center_tasks', 'name'],
+        ['task_center_tasks', 'last_message'],
+        ['task_center_runs', 'message'],
+        ['task_center_runs', 'result_json'],
+        ['market_reviews', 'background'],
+        ['market_reviews', 'market_evolution'],
+        ['market_reviews', 'note'],
+        ['audit_logs', 'detail'],
+        ['category_profiles', 'price_pattern'],
+        ['category_profiles', 'data_caliber'],
+        ['behavior_cases', 'note'],
+        ['manual_todos', 'note'],
+        ['normalized_signal', 'recycle_source']
+      ];
+      for (const [table, column] of targets) {
+        if (!(await migrationTableExists(db, table))) continue;
+        const columns = await dbAll<any>(db, `PRAGMA table_info(${quoteMigrationIdentifier(table)})`);
+        if (!columns.some((item: any) => String(item.name) === column)) continue;
+        const tableName = quoteMigrationIdentifier(table);
+        const columnName = quoteMigrationIdentifier(column);
+        await dbRun(
+          db,
+          `UPDATE ${tableName}
+           SET ${columnName} = REPLACE(${columnName}, '潮收汇', '长盛鸿')
+           WHERE ${columnName} LIKE '%潮收汇%'`
+        );
+      }
+    }
   }
 ];
 

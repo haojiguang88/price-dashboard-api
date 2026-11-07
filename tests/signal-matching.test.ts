@@ -261,10 +261,10 @@ test("回收价 provider：千岛收购价 / 回收商报价 / 退到对象级 /
     await db.run(
       `INSERT INTO price_records (date, category, object_name, variant, price, source, created_at, updated_at)
        VALUES
-         ('2026-10-09', '苹果手机', 'iPhone 17 256G', '黑色', 5560, '潮收汇苹果备用报价', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
-         ('2026-10-09', '苹果手机', 'iPhone 17 256G', '白色', 5560, '潮收汇苹果备用报价', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
-         ('2026-10-09', '苹果手机', 'iPhone 17 Pro 256G', '橙色', 7550, '潮收汇苹果备用报价', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
-         ('2026-10-09', '苹果手机', 'iPhone 17 Pro 256G', '银色', 7810, '潮收汇苹果备用报价', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+         ('2026-10-09', '苹果手机', 'iPhone 17 256G', '黑色', 5560, '长盛鸿苹果备用报价', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+         ('2026-10-09', '苹果手机', 'iPhone 17 256G', '白色', 5560, '长盛鸿苹果备用报价', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+         ('2026-10-09', '苹果手机', 'iPhone 17 Pro 256G', '橙色', 7550, '长盛鸿苹果备用报价', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+         ('2026-10-09', '苹果手机', 'iPhone 17 Pro 256G', '银色', 7810, '长盛鸿苹果备用报价', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
     );
     const apple = await resolveRecyclePrice(db, { category_name: "苹果手机", object_name: "iPhone 17 256G", variant_name: "" });
     assert.equal(apple?.price, 5560);

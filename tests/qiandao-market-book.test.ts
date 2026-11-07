@@ -49,6 +49,17 @@ assert detect_sweep([
 assert detect_sweep([
   {"buyer_account_id": "x", "qty": 5, "traded_at": "2026-09-14T10:00:00+08:00"},
 ]) == 0
+assert detect_sweep([
+  {"buyer_account_id": "y", "qty": 30, "traded_at": "2026-10-11T16:00:00+08:00"},
+]) == 1
+assert detect_sweep([
+  {"buyer_account_id": "y", "qty": 10, "traded_at": "2026-10-11T16:00:00+08:00"},
+  {"buyer_account_id": "y", "qty": 10, "traded_at": "2026-10-11T16:01:00+08:00"},
+  {"buyer_account_id": "y", "qty": 10, "traded_at": "2026-10-11T16:02:00+08:00"},
+]) == 1
+assert detect_sweep([
+  {"buyer_account_id": "y", "qty": 29, "traded_at": "2026-10-11T16:00:00+08:00"},
+]) == 0
 print("ok")
 `], { cwd: bookScriptDir, encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr || result.stdout);

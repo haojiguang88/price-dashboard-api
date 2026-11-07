@@ -362,22 +362,41 @@ def choose_display_price(book):
     }
 
 
-def detect_sweep(trades, window_seconds=1800, lot_qty=5, min_repeats=3):
+def detect_sweep(
+    trades,
+    window_seconds=1800,
+    lot_qty=5,
+    min_repeats=3,
+    account_cap=30,
+):
+    """Flag concentrated flash buying by one account.
+
+    Current Qiandao rule (user 2026-10-11): one account can buy 30, regardless
+    of listed qty. Old rule was about 1% of listed qty (500 -> 5, 600 -> 6,
+    700 -> 7). A single 30-piece fill must count; the old 5x3 lot detector
+    would miss it.
+    """
     by_buyer = defaultdict(list)
     for trade in trades:
         buyer = str(trade.get("buyer_account_id") or "").strip()
         qty = _as_int(trade.get("qty"))
         traded = to_shanghai_datetime(trade.get("traded_at"))
-        if not buyer or qty is None or qty < lot_qty or traded is None:
+        if not buyer or qty is None or qty <= 0 or traded is None:
             continue
-        by_buyer[buyer].append(traded)
-    for stamps in by_buyer.values():
-        stamps.sort()
+        by_buyer[buyer].append((traded, qty))
+    for events in by_buyer.values():
+        events.sort(key=lambda item: item[0])
         start = 0
-        for end, current in enumerate(stamps):
-            while (current - stamps[start]).total_seconds() > window_seconds:
+        for end, (current, qty) in enumerate(events):
+            if qty >= account_cap:
+                return 1
+            while (current - events[start][0]).total_seconds() > window_seconds:
                 start += 1
-            if end - start + 1 >= min_repeats:
+            window = events[start : end + 1]
+            if sum(item[1] for item in window) >= account_cap:
+                return 1
+            lot_hits = sum(1 for item in window if item[1] >= lot_qty)
+            if lot_hits >= min_repeats:
                 return 1
     return 0
 

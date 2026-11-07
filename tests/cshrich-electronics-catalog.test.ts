@@ -164,7 +164,7 @@ test("records current CSHRich top categories, skips Apple/Nintendo, and discover
        WHERE category = '华为' AND object_name = 'Mate 70' AND COALESCE(variant, '') = '黑色'`
     );
     assert.equal(Number(huaweiPrice?.price), 4200);
-    assert.equal(huaweiPrice?.source, "潮收汇电子产品报价");
+    assert.equal(huaweiPrice?.source, "长盛鸿电子产品报价");
 
     const discoverPayload = runScript(filename, "discover");
     assert.equal(discoverPayload.success, true);

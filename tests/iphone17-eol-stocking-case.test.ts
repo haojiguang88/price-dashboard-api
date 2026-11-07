@@ -41,7 +41,7 @@ test("seeds the ongoing iPhone 17 EOL stocking case without writing an outcome",
     assert.match(review.short_lesson, /不涨就废了，得赔死/);
     assert.match(review.exposed_problem, /一台普通回撤大约一两百/);
     assert.match(review.note, /后续行情由用户自行更新/);
-    assert.match(review.background, /潮收汇苹果备用报价/);
+    assert.match(review.background, /长盛鸿苹果备用报价/);
     assert.match(review.market_evolution, /9月10日回到5900元/);
     assert.match(review.market_evolution, /7930元/);
     assert.match(review.market_evolution, /9000元/);

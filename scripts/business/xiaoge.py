@@ -131,7 +131,9 @@ def normalize_key(value):
     text = text.replace("（", "(").replace("）", ")")
     text = re.sub(r"\([^)]*\)", "", text)
     text = re.sub(r"pro\s*max", "promax", text)
-    text = re.sub(r"[\s+_／/\\-]+", "", text)
+    text = re.sub(r"[\s_／/\\-]+", "", text)
+    # 12+256 这种容量加号可以去掉。Turbo+、Pro+ 的加号是型号本身，不能去掉。
+    text = re.sub(r"(?<=\d)\+(?=\d)", "", text)
     text = text.replace("gb", "g")
     return text
 

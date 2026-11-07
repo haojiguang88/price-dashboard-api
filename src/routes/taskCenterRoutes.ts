@@ -15,6 +15,7 @@ import {
 } from '../services/preciousMetalTaskFreshness';
 import { buildTaskChildEnv, resolveTaskPython } from '../utils/taskExecutionEnv';
 import { isRunnableToday } from '../utils/taskSchedule';
+import { resolveXiaogeBackfillDates } from '../utils/xiaogeTaskBackfill';
 
 type TaskRow = {
   id: number;
@@ -577,7 +578,7 @@ async function runPreciousMetalMarketUpdate(config: any, timeoutMs: number, task
 
 async function runIphonePriceUpdate(config: any, timeoutMs: number, taskName: string): Promise<BusinessTaskRunResult> {
   const category = String(config.category || '苹果手机');
-  const primarySourceName = getTaskSourceName(config, '潮收汇苹果备用报价');
+  const primarySourceName = getTaskSourceName(config, '长盛鸿苹果备用报价');
   const legacySourceName = getTaskSourceName(config, '德璜小程序档口报价');
 
   const legacyArgs = [
@@ -688,7 +689,6 @@ async function runPopMartPriceUpdate(config: any, timeoutMs: number, taskName: s
   };
 }
 
-
 async function runBjhqCheckin(config: any, timeoutMs: number, taskName: string): Promise<BusinessTaskRunResult> {
   const parsed = await runPythonJsonScript(
     config,
@@ -725,11 +725,55 @@ async function runXiaogePhonePriceUpdate(config: any, timeoutMs: number, taskNam
   const args = ['--db', getDatabasePath()];
   if (config.dry_run) args.push('--dry-run');
   if (config.prefer_xiaoge) args.push('--prefer');
-  const parsed = await runPythonJsonScript(config, 'xiaoge.py', args, '小鸽手机回收价格更新失败', timeoutMs, taskName);
+  const dates = resolveXiaogeBackfillDates(config, getDateKey());
+  if (dates.length === 0) {
+    const parsed = await runPythonJsonScript(config, 'xiaoge.py', args, '小鸽手机回收价格更新失败', timeoutMs, taskName);
+    return {
+      message: parsed.message || '小鸽手机回收价格更新完成',
+      data: parsed,
+      status: getTaskCompletionStatus(parsed)
+    };
+  }
+
+  const runs: any[] = [];
+  const failures: string[] = [];
+  for (const date of dates) {
+    try {
+      const parsed = await runPythonJsonScript(
+        config,
+        'xiaoge.py',
+        [...args, '--backfill', date],
+        `小鸽回填 ${date} 失败`,
+        timeoutMs,
+        taskName
+      );
+      runs.push({ date, ...parsed });
+    } catch (error) {
+      failures.push(`${date}：${(error as Error).message}`);
+    }
+  }
+
+  const inserted = runs.reduce((sum, run) => sum + Number(run.inserted_count || 0), 0);
+  const updated = runs.reduce((sum, run) => sum + Number(run.updated_count || 0), 0);
+  const skipped = runs.reduce((sum, run) => sum + Number(run.skipped_count || 0), 0);
+  const mappingCount = runs.length ? runs[runs.length - 1].mapping_count : null;
+  const dayText = runs.map((run) => run.message || `${run.date} 完成`).join('；');
+  const message = dayText || `小鸽回填 ${dates.join('、')}`;
+  if (failures.length > 0) {
+    throw new Error(`${message}${message ? '。' : ''}失败 ${failures.join('；')}`);
+  }
   return {
-    message: parsed.message || '小鸽手机回收价格更新完成',
-    data: parsed,
-    status: getTaskCompletionStatus(parsed)
+    message,
+    data: {
+      success: true,
+      backfill_dates: dates,
+      inserted_count: inserted,
+      updated_count: updated,
+      skipped_count: skipped,
+      mapping_count: mappingCount,
+      steps: runs.map((run) => ({ name: run.date, data: run }))
+    },
+    status: 'success'
   };
 }
 
@@ -782,8 +826,8 @@ async function runCshrichElectronicsUpdate(
   if (config.dry_run) args.push('--dry-run');
 
   const fallbackMessage = defaultMode === 'discover'
-    ? '潮收汇电子产品分类周检失败'
-    : '潮收汇电子产品价格更新失败';
+    ? '长盛鸿电子产品分类周检失败'
+    : '长盛鸿电子产品价格更新失败';
   const parsed = await runPythonJsonScript(
     config,
     'cshrich_electronics.py',
@@ -794,7 +838,7 @@ async function runCshrichElectronicsUpdate(
   );
   return buildTaskResult(
     parsed,
-    defaultMode === 'discover' ? '潮收汇电子产品分类周检完成' : '潮收汇电子产品价格更新完成'
+    defaultMode === 'discover' ? '长盛鸿电子产品分类周检完成' : '长盛鸿电子产品价格更新完成'
   );
 }
 
@@ -838,6 +882,7 @@ async function runBusinessTask(task: TaskRow, config: any, timeoutMs: number): P
   }
   throw new Error(`生意任务执行器未接入：${task.task_key} / ${task.task_type}`);
 }
+
 
 async function executeTask(task: TaskRow, triggerType: 'manual' | 'schedule') {
   const db = await getDb();
