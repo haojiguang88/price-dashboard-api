@@ -8,7 +8,6 @@
  *   千岛收购价        market_book_snapshots.bid_price（泡泡玛特等收藏品的买盘，最接近回收价）
  *   长盛鸿电子产品报价 电子产品回收商日更报价
  *   长盛鸿苹果备用报价 苹果手机回收商备用线路
- *   德璜小程序档口报价 档口收货价
  *   东旭游戏机档口    游戏机档口收货价
  *   爱藏龙银币/龙钞   钱币商收货价
  *   金投网贵金属回收   字面就是回收价
@@ -220,13 +219,6 @@ const PROVIDERS: RecycleProvider[] = [
     lookup: priceRecordLookup(["长盛鸿苹果备用报价"], "长盛鸿苹果备用报价")
   },
   {
-    id: "dehuang_dealer",
-    label: "德璜小程序档口报价",
-    confidence: 0.65,
-    categories: ["苹果手机", ...ELECTRONICS_CATEGORIES],
-    lookup: priceRecordLookup(["德璜小程序档口报价"], "德璜小程序档口报价")
-  },
-  {
     id: "dongxu_dealer",
     label: "东旭游戏机档口",
     confidence: 0.7,
@@ -266,8 +258,8 @@ const CATEGORY_PROVIDER_ORDER: Record<string, string[]> = {
   游戏机: ["dongxu_dealer"],
   纪念币: ["aizang_silver"],
   纪念钞: ["aizang_note"],
-  苹果手机: ["cshrich_apple_backup", "dehuang_dealer"],
-  ...Object.fromEntries(ELECTRONICS_CATEGORIES.map(category => [category, ["cshrich_electronics", "dehuang_dealer"]]))
+  苹果手机: ["cshrich_apple_backup"],
+  ...Object.fromEntries(ELECTRONICS_CATEGORIES.map(category => [category, ["cshrich_electronics"]]))
 };
 
 const providerById = new Map(PROVIDERS.map(provider => [provider.id, provider]));

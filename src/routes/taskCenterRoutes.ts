@@ -579,47 +579,7 @@ async function runPreciousMetalMarketUpdate(config: any, timeoutMs: number, task
 async function runIphonePriceUpdate(config: any, timeoutMs: number, taskName: string): Promise<BusinessTaskRunResult> {
   const category = String(config.category || '苹果手机');
   const primarySourceName = getTaskSourceName(config, '长盛鸿苹果备用报价');
-  const legacySourceName = getTaskSourceName(config, '德璜小程序档口报价');
-
-  const legacyArgs = [
-    '--db',
-    getDatabasePath(),
-    '--category',
-    category,
-    '--source-name',
-    legacySourceName
-  ];
-
-  if (config.dry_run) legacyArgs.push('--dry-run');
-
-  let parsed: any;
-  try {
-    parsed = await runBackupPriceUpdate(config, category, timeoutMs, taskName);
-  } catch (error) {
-    if (config.use_backup_source === false || config.backup_on_failure === false) {
-      throw error;
-    }
-
-    let legacyParsed: any;
-    try {
-      legacyParsed = await runPythonJsonScript(config, 'iphone.py', legacyArgs, '德璜小程序苹果源更新失败', timeoutMs, taskName);
-    } catch {
-      throw error;
-    }
-
-    return {
-      message: `苹果手机价格更新：${primarySourceName}失败：${(error as Error).message}；已回退${legacySourceName}`,
-      data: {
-        primary_error: (error as Error).message,
-        primary_source: primarySourceName,
-        fallback_source: legacySourceName,
-        primary: null,
-        fallback: legacyParsed,
-      },
-      status: getTaskCompletionStatus(legacyParsed)
-    };
-  }
-
+  const parsed = await runBackupPriceUpdate(config, category, timeoutMs, taskName);
   return buildTaskResult(parsed, `苹果手机价格更新完成（${primarySourceName}）`);
 }
 
