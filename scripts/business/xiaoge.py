@@ -457,7 +457,7 @@ def upsert_mapping(conn, quote, target, variant_name, now):
 def write_price(conn, target, variant_name, price, price_date, channel, prefer, now, dry_run):
     if channel != "used":
         raise RuntimeError(f"小鸽只写入回收价，拒绝渠道 {channel}")
-    note = "小鸽回收报价"
+    note = ""
     fresh_since = (datetime.strptime(price_date, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
     existing = conn.execute(
         """
@@ -752,7 +752,7 @@ def write_price_backfill(conn, mapping, price, price_date, prefer, now, dry_run)
                 mapping["variant_name"] or None,
                 price,
                 SOURCE_NAME,
-                "小鸽回收报价（历史回填）",
+                "",
                 now,
                 now,
             ),
@@ -771,7 +771,7 @@ def write_price_backfill(conn, mapping, price, price_date, prefer, now, dry_run)
         SET price = ?, source = ?, note = ?, price_kind = 'market_reference', updated_at = ?
         WHERE id = ?
         """,
-        (price, SOURCE_NAME, "小鸽回收报价（历史回填）", now, record_id),
+        (price, SOURCE_NAME, "", now, record_id),
     )
     return "update"
 
